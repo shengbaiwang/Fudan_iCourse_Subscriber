@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
-"""Print ``export VAR=...`` lines for every env var that the configured
-model providers need (``api_key_env`` / ``base_url_env`` from
-``config.MODEL_PROVIDERS``), with values taken from the SECRETS_CONTEXT
-JSON the workflow passes in via ``${{ toJSON(secrets) }}``.
+"""Launch a command with only the model secrets selected by validated config.
 
-This lets users add custom providers with custom env-var names in
-``src/runtime/config.py`` without touching the workflow YAML, where
-secrets must otherwise be referenced one by one.  Usage in a workflow
-step (unset the context before launching the app so the full secrets
-blob never reaches the Python process):
+GitHub Actions cannot dynamically address a Secret by a name stored in a
+Variable, so the workflow passes its secrets as JSON to this short-lived
+launcher. The config validator limits selectable names to legacy model keys
+or ``LLM_*_API_KEY``/``LLM_*_BASE_URL``. ``SECRETS_CONTEXT`` is removed from
+the child environment before execution.
 
-    env:
-      SECRETS_CONTEXT: ${{ toJSON(secrets) }}
-    run: |
-      eval "$(python scripts/provider_env.py)"
-      unset SECRETS_CONTEXT
-      python -u main.py
+Usage: ``python scripts/provider_env.py -- python -u main.py``.
+
+With no command it retains the old behaviour and prints shell-safe exports,
+which is useful for diagnostics and backwards compatibility.
 """
 
 from __future__ import annotations
@@ -27,29 +22,54 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.runtime.config import MODEL_PROVIDERS
 
-
-def main():
+def _load_context() -> dict[str, object]:
     try:
-        ctx = json.loads(os.environ.get("SECRETS_CONTEXT") or "{}")
-    except ValueError:
-        print("echo '::warning::SECRETS_CONTEXT is not valid JSON'")
-        return
-    # Secret names are case-insensitive on the GitHub side; normalise.
-    lookup = {str(k).upper(): v for k, v in ctx.items() if v}
+        context = json.loads(os.environ.get("SECRETS_CONTEXT") or "{}")
+    except ValueError as exc:
+        raise ValueError("SECRETS_CONTEXT is not valid JSON") from exc
+    if not isinstance(context, dict):
+        raise ValueError("SECRETS_CONTEXT must be a JSON object")
+    # GitHub Secret names are case-insensitive; normalize for lookup only.
+    return {str(key).upper(): value for key, value in context.items() if value}
 
-    emitted: set[str] = set()
+
+def main() -> int:
+    try:
+        lookup = _load_context()
+    except ValueError as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        return 1
+
+    try:
+        from src.runtime.config import MODEL_PROVIDERS
+    except ValueError as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        return 1
+
+    selected: dict[str, str] = {}
     for provider in MODEL_PROVIDERS:
         for field in ("api_key_env", "base_url_env"):
             name = provider.get(field)
-            if not name or name in emitted:
+            if not name or name in selected:
                 continue
-            emitted.add(name)
             value = lookup.get(name.upper())
             if value:
-                print(f"export {name}={shlex.quote(str(value))}")
+                selected[name] = str(value)
+
+    command = sys.argv[1:]
+    if command[:1] == ["--"]:
+        command = command[1:]
+    if command:
+        child_env = os.environ.copy()
+        child_env.pop("SECRETS_CONTEXT", None)
+        child_env.update(selected)
+        os.execvpe(command[0], command, child_env)
+
+    for name, value in selected.items():
+        print(f"export {name}={shlex.quote(value)}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,11 +1,14 @@
 __pycache__/
 *.pyc
+.venv-web/
 .env
 data/*
 !data/icourse.db.enc
 *.mp4
 *.wav
 tests/
+!tests/
+!tests/test_local_web.py
 temp/
 # ASR models (downloaded at runtime)
 sherpa-onnx-sense-voice-*/
@@ -42,6 +45,7 @@ _backup_reencrypted.gz.enc
 docs/*
 !docs/*.png
 !docs/frontend-readme.md
+!docs/local-web-console.md
 docs/specs/
 *.mp3
 bugs.md

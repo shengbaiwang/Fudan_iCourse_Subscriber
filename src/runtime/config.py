@@ -1,4 +1,11 @@
+import json
 import os
+
+from src.runtime.model_config import (
+    normalize_base_url,
+    runtime_providers,
+    select_runtime_model,
+)
 
 STUDENT_ID = os.environ.get("StuId", "")
 PASSWORD = os.environ.get("UISPsw", "")
@@ -20,11 +27,11 @@ USER_AGENT = (
 )
 
 # 模型服务商配置（按列表顺序作为优先级，从前往后尝试）。
-# 用户可以在这里随意添加/删除/重排服务商和模型。
+# 源码默认值仅在仓库尚未设置 MODEL_PROVIDERS_JSON 时使用；本地控制台
+# 会把用户选择保存到 Actions Variable，数组顺序就是运行时回退顺序。
 # 兼容性：只设置 DASHSCOPE_API_KEY 也能跑（modelscope 项的 api_key 直接读取它）。
-# 同名 provider 多次出现 → resolve_model_providers() 把它们的 models 合并到首次出
-# 现的那条；这避免 Summarizer 内部按 name 索引 client 字典时被后写覆盖。
-MODEL_PROVIDERS: list[dict] = [
+# 动态配置会拒绝同名 provider，避免 Summarizer 的 client 字典发生覆盖。
+DEFAULT_MODEL_PROVIDERS: list[dict] = [
     {
         "name": "modelscope",
         "api_key_env": "DASHSCOPE_API_KEY",
@@ -69,34 +76,42 @@ MODEL_PROVIDERS: list[dict] = [
 ]
 
 
+def _declared_model_providers() -> list[dict]:
+    """Load Web-console configuration, falling back to source defaults."""
+    raw = os.environ.get("MODEL_PROVIDERS_JSON", "").strip()
+    try:
+        declared = DEFAULT_MODEL_PROVIDERS if not raw else json.loads(raw)
+        provider_name = os.environ.get("SUMMARY_PROVIDER", "").strip()
+        model_name = os.environ.get("SUMMARY_MODEL", "").strip()
+        if provider_name or model_name:
+            return select_runtime_model(declared, provider_name, model_name)
+        return runtime_providers(declared)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid MODEL_PROVIDERS_JSON: {exc}") from exc
+
+
+MODEL_PROVIDERS: list[dict] = _declared_model_providers()
+
+
 def resolve_model_providers() -> list[dict]:
     """Resolve MODEL_PROVIDERS into runtime configs.
 
-    Drops providers whose api_key env var is unset. Same-name entries get
-    their model lists merged into the first occurrence (Summarizer's client
-    dict keys on name and would otherwise collide).
+    Drops providers whose API-key environment variable is unset. Provider
+    names have already been checked for uniqueness by model_config.
 
     Returns:
         list of {name, api_key, base_url, models}.
     """
     resolved: list[dict] = []
-    by_name: dict[str, dict] = {}
     for p in MODEL_PROVIDERS:
         api_key = os.environ.get(p["api_key_env"], "").strip()
         if not api_key:
             continue
-        base_url = (
+        base_url = normalize_base_url(
             os.environ.get(p.get("base_url_env", ""), "").strip()
-            or p.get("default_base_url", "")
+            or p.get("default_base_url", ""),
+            p["name"],
         )
-        if not base_url:
-            continue
-        if p["name"] in by_name:
-            existing = by_name[p["name"]]
-            for m in p["models"]:
-                if m not in existing["models"]:
-                    existing["models"].append(m)
-            continue
         entry = {
             "name": p["name"],
             "api_key": api_key,
@@ -104,7 +119,6 @@ def resolve_model_providers() -> list[dict]:
             "models": list(p["models"]),
         }
         resolved.append(entry)
-        by_name[p["name"]] = entry
     return resolved
 
 

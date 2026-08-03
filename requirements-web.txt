@@ -1,0 +1,6 @@
+# Lightweight, on-demand localhost console. ASR/OCR dependencies are not needed.
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+pycryptodome>=3.20,<4
+certifi>=2025.1
+PyNaCl>=1.5,<2

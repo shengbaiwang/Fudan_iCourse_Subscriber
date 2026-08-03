@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>iCourse 本地版</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header id="app-header" class="app-header hidden">
+    <div class="header-inner">
+      <div class="header-title">
+        <button id="back-button" class="icon-button hidden" type="button" aria-label="返回">←</button>
+        <div>
+          <strong id="page-title">iCourse</strong>
+          <span id="connection" class="connection-dot">本地会话</span>
+        </div>
+      </div>
+      <nav class="desktop-nav" aria-label="主导航">
+        <button class="nav-button" type="button" data-view="courses">课程</button>
+        <button class="nav-button" type="button" data-view="search">搜索</button>
+        <button class="nav-button" type="button" data-view="subscriptions">订阅</button>
+        <button class="nav-button" type="button" data-view="automation">自动化</button>
+        <button class="nav-button" type="button" data-view="settings">设置</button>
+      </nav>
+      <button id="header-sync-button" class="icon-button header-action" type="button" aria-label="检查更新" title="检查更新">↻</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="setup" class="setup-shell hidden" aria-labelledby="setup-title">
+      <div class="brand-lockup">
+        <p>LOCAL EDITION</p>
+        <h1 id="setup-title">iCourse Subscriber</h1>
+      </div>
+      <div class="setup-card">
+        <h2>连接你的 GitHub Fork</h2>
+        <form id="setup-form" class="setup-form">
+          <div class="two-columns">
+            <label>仓库所有者<input name="owner" autocomplete="username" required></label>
+            <label>仓库名<input name="repo" required></label>
+          </div>
+          <label>GitHub Token <span>留空则尝试读取 gh auth token</span><input name="token" type="password" autocomplete="off"></label>
+          <div class="two-columns">
+            <label>学号<input name="stuid" autocomplete="off" required></label>
+            <label>UIS 密码<input name="uispsw" type="password" autocomplete="off" required></label>
+          </div>
+          <label id="remember-field" class="check-option"><input name="remember" type="checkbox" checked> 记住在这台 Mac</label>
+          <details>
+            <summary>高级设置</summary>
+            <label>数据分支<input name="branch" value="data" required></label>
+          </details>
+          <button class="primary wide-button" type="submit">连接并打开本地资料库</button>
+        </form>
+      </div>
+    </section>
+
+    <section id="dashboard" class="hidden">
+      <section id="view-courses" class="view-pane content-column">
+        <div class="view-heading">
+          <div><h1>课程</h1></div>
+          <button id="sync-button" class="primary" type="button">检查更新</button>
+        </div>
+        <div class="course-zones" role="tablist" aria-label="课程分区">
+          <button type="button" class="course-zone-button active" data-course-zone="all">全部</button>
+          <button type="button" class="course-zone-button" data-course-zone="organize">整理区</button>
+          <button type="button" class="course-zone-button" data-course-zone="study">学习区</button>
+          <button type="button" class="course-zone-button" data-course-zone="reference">查阅区</button>
+          <button type="button" class="course-zone-button" data-course-zone="archive">归档区</button>
+        </div>
+        <div id="stats" class="stats"></div>
+        <div id="course-list" class="course-list empty">正在打开本地资料库。</div>
+      </section>
+
+      <section id="view-lectures" class="view-pane content-column hidden">
+        <div class="view-heading compact">
+          <div><h1 id="course-title">课程</h1><p id="course-teacher" class="muted"></p></div>
+          <button id="course-back-button" type="button">全部课程</button>
+        </div>
+        <div id="lecture-list" class="lecture-list"></div>
+      </section>
+
+      <section id="view-detail" class="view-pane content-column hidden">
+        <div class="view-heading compact">
+          <div><p id="detail-course" class="eyebrow-blue"></p><h1 id="detail-title">笔记</h1></div>
+          <button id="detail-back" type="button">课程课次</button>
+        </div>
+        <div class="lecture-navigation">
+          <button id="previous-lecture" type="button" disabled>← 上一节</button>
+          <button id="next-lecture" type="button" disabled>下一节 →</button>
+        </div>
+        <div class="detail-tabs" role="tablist" aria-label="笔记内容">
+          <button class="detail-tab active" type="button" data-detail-tab="summary">摘要</button>
+          <button class="detail-tab" type="button" data-detail-tab="transcript">转录</button>
+          <button class="detail-tab" type="button" data-detail-tab="ppt">PPT OCR</button>
+        </div>
+        <div class="detail-actions">
+          <button id="rerun-summary-button" type="button">选择模型重跑</button>
+        </div>
+        <section id="rerun-summary-panel" class="rerun-summary-panel hidden" aria-labelledby="rerun-summary-title">
+          <div class="rerun-summary-heading"><h2 id="rerun-summary-title">重新生成笔记</h2><button id="rerun-summary-close" type="button" aria-label="关闭">×</button></div>
+          <div class="rerun-summary-form"><select id="rerun-model-select" aria-label="选择用于重新生成笔记的模型"></select><button id="rerun-summary-confirm" class="primary" type="button">开始重跑</button></div>
+        </section>
+        <article id="detail-content" class="detail-card"></article>
+      </section>
+
+      <section id="view-search" class="view-pane content-column hidden">
+        <div class="view-heading"><div><h1>搜索</h1></div></div>
+        <label class="search-field"><span>⌕</span><input id="search" type="search" placeholder="搜索你的课程资料" autocomplete="off"></label>
+        <div id="search-results" class="search-results empty">输入关键词后开始搜索。</div>
+      </section>
+
+      <section id="view-subscriptions" class="view-pane content-wide hidden">
+        <div class="view-heading"><div><h1>订阅</h1></div><button id="subscription-save-button" class="primary" type="button">保存订阅</button></div>
+        <div class="subscription-toolbar">
+          <select id="subscription-term" aria-label="学期筛选"><option value="">全部学期</option></select>
+          <input id="subscription-query" type="search" placeholder="搜索课程、教师或课程号" autocomplete="off">
+        </div>
+        <div class="subscription-layout">
+          <section class="subscription-panel">
+            <div class="section-title"><h2>已订阅 <span id="subscription-count" class="count-badge">0</span></h2></div>
+            <div id="subscription-list" class="subscription-list empty">尚未订阅课程。</div>
+          </section>
+          <section class="subscription-panel">
+            <div class="section-title"><h2>课程目录</h2></div>
+            <div id="subscription-catalog" class="subscription-list empty">正在读取本地课程目录。</div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-automation" class="view-pane content-column hidden">
+        <div class="view-heading"><div><h1>自动化</h1></div></div>
+        <div class="action-grid">
+          <article class="action-card"><h2>更新资料库</h2><button id="automation-sync-button" class="primary" type="button">检查更新</button></article>
+          <article class="action-card"><h2>检查课程</h2><button id="run-button" type="button">立即检查课程</button></article>
+          <article class="action-card"><h2>同步到 Obsidian</h2><button id="obsidian-button" type="button">打开同步器</button></article>
+        </div>
+        <section class="runs-card"><div class="section-title"><h2>最近运行</h2><button id="refresh-runs-button" type="button">刷新</button></div><div id="runs" class="runs-list empty">尚未读取。</div></section>
+      </section>
+
+      <section id="view-settings" class="view-pane content-column hidden">
+        <div class="view-heading"><div><h1>设置</h1></div></div>
+        <section class="settings-card"><h2>当前连接</h2><p id="settings-repository" class="mono-value">—</p><div class="settings-actions"><button id="configure-button" type="button">重新配置会话</button><button id="forget-credentials-button" class="danger" type="button">忘记本机登录</button></div></section>
+        <section class="settings-card"><h2>模型与 API</h2><button id="model-button" class="primary" type="button">打开模型管理</button></section>
+        <section class="settings-card"><h2>Obsidian</h2><button id="settings-obsidian-button" type="button">打开 Obsidian 同步</button></section>
+      </section>
+
+      <section id="model-management" class="view-pane content-wide hidden" aria-labelledby="model-management-title">
+        <div class="view-heading compact"><div><p class="eyebrow-blue">MODEL ROUTING</p><h1 id="model-management-title">模型与 API</h1><p id="model-source" class="hidden"></p></div><button id="model-close-button" type="button">返回设置</button></div>
+        <div id="model-provider-list" class="provider-list" aria-live="polite"></div>
+        <div class="model-footer"><button id="model-add-button" type="button">＋ 新增供应商</button><button id="model-save-button" class="primary" type="button">保存到 GitHub</button></div>
+      </section>
+
+      <section id="obsidian-sync" class="view-pane content-wide hidden" aria-labelledby="obsidian-sync-title">
+        <div class="view-heading compact"><div><p class="eyebrow-blue">OBSIDIAN EXPORT</p><h1 id="obsidian-sync-title">同步到 Obsidian</h1></div><button id="obsidian-close-button" type="button">返回设置</button></div>
+        <form id="obsidian-form" class="obsidian-form">
+          <label class="vault-field">Obsidian Vault 路径<input id="obsidian-vault-path" name="vault_path" type="text" autocomplete="off" spellcheck="false" placeholder="例如 /Users/你的用户名/Documents/Obsidian/课程笔记" required></label>
+          <fieldset class="obsidian-options"><legend>导出内容</legend><label class="check-option"><input id="obsidian-include-transcript" type="checkbox"> 包含课程转录</label><label class="check-option"><input id="obsidian-include-ocr" type="checkbox"> 包含 PPT OCR</label></fieldset>
+          <button id="obsidian-preview-button" class="primary" type="submit">预览变更</button>
+        </form>
+        <section id="obsidian-preview" class="obsidian-preview hidden" aria-live="polite" aria-labelledby="obsidian-preview-title">
+          <div class="preview-head"><div><p class="eyebrow-blue">SYNC PREVIEW</p><h2 id="obsidian-preview-title">等待预览</h2><p id="obsidian-preview-meta" class="muted"></p></div><button id="obsidian-sync-confirm-button" class="primary" type="button" disabled>确认同步</button></div>
+          <div id="obsidian-preview-counts" class="preview-counts"></div>
+          <div id="obsidian-preview-list" class="obsidian-preview-list"></div>
+        </section>
+      </section>
+    </section>
+    <div id="message" class="message hidden" role="status" aria-live="polite"></div>
+  </main>
+
+  <nav id="mobile-nav" class="mobile-nav hidden" aria-label="主导航">
+    <button class="nav-button" type="button" data-view="courses">课程</button>
+    <button class="nav-button" type="button" data-view="search">搜索</button>
+    <button class="nav-button" type="button" data-view="subscriptions">订阅</button>
+    <button class="nav-button" type="button" data-view="automation">自动化</button>
+    <button class="nav-button" type="button" data-view="settings">设置</button>
+  </nav>
+  <script src="/app.js" defer></script>
+</body>
+</html>

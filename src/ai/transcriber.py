@@ -28,6 +28,7 @@ from typing import Callable, Optional
 import numpy as np
 import sherpa_onnx
 
+from src.ai.transcript_text import sanitize_asr_segment
 from src.runtime import config
 
 
@@ -67,112 +68,9 @@ def _resource_meter(bound: str = "") -> str:
         return ""
 
 
-# ── Generic per-segment text post-processing ─────────────────────────────
-# Applied to every recognized segment regardless of backend.  The cleanups
-# below address noise that the LLM otherwise has to spend tokens ignoring:
-#
-#   • SenseVoice's zh-en-ja-ko-yue model hallucinates kana / hangul tokens
-#     in pure-Chinese audio ("うん", "あの", "그래") because the model was
-#     trained to handle code-switching and biases toward emitting non-empty
-#     output even for filler sounds.
-#   • FireRed inserts ``<sil>`` between recognized chunks.
-#   • Both backends transcribe occasional bilingual filler English ("Yeah",
-#     "OK", "well") from bilingual classroom speech that adds nothing.
-#
-# What we do NOT touch: real technical English (CNN, FCN, YOLO, RGB, VGG…).
-# The English filter is a fixed whitelist of fillers, so tech terms survive
-# verbatim.  This is by design — anything subject-specific lives at the
-# prompt / LLM layer, not here.
-#
-# Module-level compiled patterns so we don't recompile per call.
-
-# Japanese hiragana + katakana + half-width katakana
-_JP_NOISE_RE = re.compile(r"[぀-ゟ゠-ヿｦ-ﾟ]+")
-# Korean: precomposed hangul syllables + jamo blocks
-_KR_NOISE_RE = re.compile(r"[가-힯ᄀ-ᇿ㄰-㆏]+")
-# English + Chinese filler / interjection words.  Word-bounded where
-# possible so tech terms ("CNN", "RNN") are never touched.
-#
-#   [\s.。,，;；!！?？]*  — leading punctuation / whitespace (greedy)
-#   \b(…)\b                 — filler word (word-bounded for ASCII)
-#   [\s.。,，;；!！?？、。]+ — trailing punctuation sequence (at least 1)
-#
-# All three are removed together so we don't leave orphan punctuation
-# behind.  For Chinese fillers that can't be word-bounded, we require
-# at least ONE punctuation neighbour.
-#
-# CJK interjections — ONLY pure onomatopoeia / filler sounds, NOT sentence
-# particles ("吗""呢""吧""嘛""呀" are meaningful and must stay).
-_CN_FILLER_WORDS = r"嗯|呃|啊+|哦+|哈+|呵+|唉|哎|哟|嗨|喔+|噢+|啧|嘶|啧|唔+"
-_EN_FILLER_WORDS = (
-    r"yeah|yep|yup|ok|okay|uh+|um+|hmm+|ohh*|huh+|hey+|"
-    r"you know|i mean|"
-    r"the|it|its|that|this|these|those|"
-    r"of|to|for|a|an|be|was|were|do|does|did|"
-    r"just|only|very|really|actually"
-)
-# Pattern: filler word surrounded by punctuation on either side.
-# Requires AT LEAST ONE punctuation neighbour (leading or trailing) so
-# we don't touch fillers embedded in real content.  The entire match
-# (optional leading punct + filler + mandatory trailing punct) is
-# removed, so no orphan punctuation remains.
-_FILLER_PUNCT_RE = re.compile(
-    r"(?:"
-    r"[\s.。,，;；!！?？、。]+"
-    r"\b(?:" + _EN_FILLER_WORDS + r")\b"
-    r"[\s.。,，;；!！?？、。]*"
-    r"|"
-    r"[\s.。,，;；!！?？、。]*"
-    r"\b(?:" + _EN_FILLER_WORDS + r")\b"
-    r"[\s.。,，;；!！?？、。]+"
-    r")",
-    re.IGNORECASE,
-)
-_CN_FILLER_PUNCT_RE = re.compile(
-    r"(?:"
-    r"[\s.。,，;；!！?？、。]+"
-    r"(?:" + _CN_FILLER_WORDS + r")"
-    r"[\s.。,，;；!！?？、。]*"
-    r"|"
-    r"[\s.。,，;；!！?？、。]*"
-    r"(?:" + _CN_FILLER_WORDS + r")"
-    r"[\s.。,，;；!！?？、。]+"
-    r")",
-)
-# Angle-bracket tokens emitted as literal text by some backends:
-#   <sil>          FireRed silence
-#   <|zh|>, <|EMO|>, <|HAPPY|>, <|Speech|> …  SenseVoice format tags
-#                  (sherpa-onnx usually strips these, but defense in depth)
-_BRACKET_TOK_RE = re.compile(r"<\|?[^<>]*\|?>")
-# Collapse the leftover whitespace (incl. ideographic full-width space U+3000)
-_WS_COLLAPSE_RE = re.compile(r"[ \t　]+")
-# After deletions, runs of dangling punctuation + whitespace pile up (e.g.
-# "P. Yeah. Yeah。" → "P. . 。" — the periods are orphans left by the
-# removed fillers).  Collapse 2+ adjacent punctuation/space chars to a
-# single full-width period so the LLM still sees ONE sentence break.
-_ORPHAN_PUNCT_RE = re.compile(r"[\s.。,，;；!！?？]{2,}")
-# Trim leading/trailing punctuation+whitespace on each segment — the inter-
-# segment join in ``_consume_pcm_stream`` already inserts a space, so any
-# punctuation at the edges is noise from a deletion at the boundary.
-_EDGE_PUNCT = " \t　.。,，;；!！?？"
-
-
 def _postprocess_segment(text: str) -> str:
-    """Strip cross-backend ASR noise from one recognized segment."""
-    text = _BRACKET_TOK_RE.sub("", text)
-    # Japanese / Korean kana — always noise in Chinese lectures
-    text = _JP_NOISE_RE.sub("", text)
-    text = _KR_NOISE_RE.sub("", text)
-    # Filler words with punctuation neighbours — remove word + punct together
-    text = _FILLER_PUNCT_RE.sub("", text)
-    text = _CN_FILLER_PUNCT_RE.sub("", text)
-    # Clean up what's left
-    text = _ORPHAN_PUNCT_RE.sub("。", text)
-    text = _WS_COLLAPSE_RE.sub(" ", text)
-    text = text.strip(_EDGE_PUNCT).strip()
-    if text in (".", "。", "？", "。", "!", "；", "，"):
-        return ""
-    return text
+    """Remove ASR control metadata while preserving spoken content."""
+    return sanitize_asr_segment(text)
 
 
 class Transcriber:
@@ -203,6 +101,7 @@ class Transcriber:
         self._vad_config = None
         self._last_duration = 0.0           # audio seconds from last transcription
         self._last_transcript = ""           # text from last transcription
+        self._last_raw_transcript = ""       # exact recognizer output, joined
         self._last_segments: list[dict] = []
         self._media_duration: Optional[float] = None
 
@@ -334,7 +233,8 @@ class Transcriber:
             stream = self._recognizer.create_stream()
             stream.accept_waveform(SAMPLE_RATE, samples)
             self._recognizer.decode_stream(stream)
-            text = _postprocess_segment(stream.result.text)
+            raw_text = stream.result.text or ""
+            text = _postprocess_segment(raw_text)
             if text:
                 start_ms = int(seg_start_samples / SAMPLE_RATE * 1000)
                 end_ms = int(
@@ -344,6 +244,10 @@ class Transcriber:
                     "start_ms": start_ms,
                     "end_ms": end_ms,
                     "text": text,
+                    # Keep the exact recognizer output available to callers in
+                    # this run.  The persisted ``text`` only differs by known
+                    # backend metadata and whitespace normalization.
+                    "raw_text": raw_text,
                 })
 
     # ── Shared consumer core ────────────────────────────────────────────
@@ -508,6 +412,9 @@ class Transcriber:
 
         speed_kbps = (total_bytes / 1024) / elapsed if elapsed > 0 else 0
         transcript = " ".join(s["text"] for s in segments)
+        raw_transcript = " ".join(
+            s.get("raw_text", s["text"]) for s in segments
+        )
 
         # Final silence check
         if (not silence_marked
@@ -541,6 +448,7 @@ class Transcriber:
             flush=True,
         )
         self._last_transcript = transcript
+        self._last_raw_transcript = raw_transcript
         self._last_segments = segments
         return transcript, segments
 

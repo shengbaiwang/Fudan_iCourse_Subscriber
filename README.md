@@ -43,7 +43,7 @@
 | `SMTP_PASSWORD` | ✅ | QQ 邮箱 SMTP **授权码**（不是登录密码） | `abcdefghijklmnop` |
 | `RECEIVER_EMAIL` | ✅ | 接收摘要邮件的邮箱 | `you@m.fudan.edu.com` |
 
-> 至少配置一个 LLM API Key（DASHSCOPE、DEEPSEEK 或 GEMINI）。程序按配置顺序自动回退尝试。如果需要选择其他的LLM供应商，可以在`src\runtime\config.py`路径下自定义供应商。
+> 至少配置一个 LLM API Key（DASHSCOPE、DEEPSEEK 或 GEMINI）。程序按配置顺序自动回退尝试；需要切换模型或添加 OpenAI-compatible 供应商时，可使用下方的本地控制台“模型与 API”页面。
 
 ### 第 3 步：获取课程 ID
 
@@ -92,6 +92,40 @@
 - **导出 PDF**：通过 GitHub Actions 触发导出工作流，生成格式化课程笔记 PDF 并邮件发送
 
 > 前端页面需要你手动在 GitHub Pages 设置中开启（Settings → Pages → Source → GitHub Actions），然后触发一次 Deploy Frontend workflow 即可部署。
+
+### 按需本地 Web 管理界面
+
+没有常开电脑或 NAS 时，可以继续让 GitHub Actions 定时处理课程，只在需要管理和
+查看时启动 localhost 控制台：
+
+```bash
+python3.12 -m venv .venv-web
+source .venv-web/bin/activate
+python -m pip install -r requirements-web.txt
+python -m local_web
+```
+
+在 macOS Finder 中，也可以直接双击项目根目录的
+[`启动 iCourse 本地控制台.command`](./启动%20iCourse%20本地控制台.command)：首次会准备本地
+界面依赖，之后会自动打开已经运行的控制台，或启动新的本地服务并打开网页。
+
+控制台默认打开 `http://127.0.0.1:8765`，支持同步并本地解密分片、浏览和搜索笔记、
+查看 GitHub Actions 状态、手动触发课程检查，以及在“模型与 API”中管理供应商、
+Base URL、模型列表和回退顺序。还可以按需将已生成的笔记预览后同步到本机
+Obsidian Vault；该同步不会要求电脑常开，也不会覆盖检测到手动修改的文件。模型配置保存在非敏感的 Actions Variable
+`MODEL_PROVIDERS_JSON` 中，API Key 则只写入对应的 Actions Secret；GitHub 不允许
+回显 Secret，因此已保存的 Key 留空即保留，测试连接时必须重新输入。配置只影响
+之后生成的笔记；如需改写某一节历史笔记，可在该笔记的摘要页选择已配置模型重跑，
+它只复用已有转录与 PPT OCR 重新生成摘要，并更新 `summary_model`。
+
+macOS 上可选择将 Token、学号和 UIS 密码保存到系统钥匙串；本地资料库持久化为加密文件，
+启动时先打开上次资料、后台自动检查更新，明文数据库仍会在退出时清理。模型接口目前只
+支持 OpenAI-compatible `chat/completions`。细粒度 GitHub Token 需为该
+Fork 授予 Contents: Read、Actions: Read and write、Secrets: Read and write 和
+Variables: Read and write。完整安装、升级与安全说明见
+[`docs/local-web-console.md`](docs/local-web-console.md)。
+如果使用的是带 `repo` 勾选框的 classic PAT，则 `repo` 已覆盖仓库 Variables 与
+Secrets API，不会看到单独的 Variables 权限项。
 
 > [!TIP]
 >

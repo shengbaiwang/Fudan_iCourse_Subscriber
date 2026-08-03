@@ -1,0 +1,227 @@
+# 本地 Web 管理界面
+
+本地控制台是一个**按需启动**的 localhost 服务。GitHub Actions 仍负责每天的
+课程检查、ASR、OCR、摘要和邮件；电脑不需要常开。
+
+新版采用与公开版一致的“课程 → 课次 → 笔记详情”主路径：顶部导航提供课程、搜索、订阅、
+自动化和设置；笔记详情可切换摘要、转录与 PPT OCR，并显示实际生成模型，也可以选择
+一个已配置模型重新生成摘要。模型管理和
+Obsidian 按需同步归入“设置”，因此日常阅读不会被管理项打断。它们仍全部通过本机 API
+运行，不会把 GitHub Token、UIS 密码或 Obsidian 文件交给浏览器端脚本。
+
+摘要中的常用 Markdown（标题、列表、引用、代码块、粗体、删除线与链接）会直接排版
+显示。原始 HTML 不会执行；这样课程摘要即使包含意外的 HTML，也不能在本地页面运行脚本。
+
+课程页还提供四个本机分区：整理区、学习区、查阅区和归档区。新课程默认在整理区；可在
+课程卡片中直接移动。分区记录仅保存在本机 `course-zones.json`，不改变 GitHub 订阅、
+Actions 或远端课程数据。
+
+## 安全边界
+
+- 服务默认只监听 `127.0.0.1:8765`。
+- 默认情况下，GitHub Token、学号和 UIS 密码仅保存在当前 Python 进程内存中。
+- 在 macOS 上勾选“记住在这台 Mac”后，三项凭据保存到登录用户的系统钥匙串；配置文件
+  仍只保存仓库 owner、名称和 data 分支，不保存任何凭据。
+- 本地持久化远端原始的加密 blob，以及一份使用 UIS 派生密钥加密的完整本地资料库。
+- SQLite 明文只在权限受限的临时目录中为当前进程解锁，退出服务后删除。
+- 浏览器不会接触 GitHub Token 或 UIS 密码。
+- 若你主动使用 Obsidian 同步，生成的 Markdown 会作为**明文**写入你选择的 Vault；
+  这是导出功能本身的目的。是否再由 Obsidian Sync、iCloud 或其他工具上传，取决于你
+  自己的 Obsidian 设置。
+
+这不会消除 GitHub Actions 使用 UIS 凭据和云端 IP 登录的风险；它解决的是本地
+管理页面将凭据保存在浏览器 `localStorage` 的问题。
+
+## 自动打开与更新
+
+首次连接时，勾选“记住在这台 Mac”。以后启动本地控制台会自动从 macOS 钥匙串恢复会话，
+优先打开已经保存的本地资料库，并在后台检查 data 分支是否有新提交：无更新时不下载；
+有更新时仅复用已有加密分片并下载变更部分，完成后页面自动刷新。离线或更新失败不会妨碍
+阅读上次成功保存的资料。
+
+“检查更新”按钮仅用于手动触发同一流程，不再是每次打开前必须执行的步骤。设置页的
+“忘记本机登录”会删除钥匙串中的凭据；本地加密资料库会保留，但下次需要重新输入登录信息
+才能解锁。
+
+## 安装
+
+建议使用独立虚拟环境，避免安装 ASR/OCR 的重量级依赖：
+
+```bash
+python3.12 -m venv .venv-web
+source .venv-web/bin/activate
+python -m pip install -r requirements-web.txt
+```
+
+从较早版本升级时，也需要在已经激活的 `.venv-web` 中重新执行安装命令；模型配置、
+Actions Secret 写入和 HTTPS 证书兼容需要 `requirements-web.txt` 中新增的
+`PyNaCl`、`certifi` 等依赖：
+
+```bash
+python -m pip install -r requirements-web.txt
+```
+
+依赖或本地控制台代码更新后，请先在原终端按 `Ctrl+C` 停止服务，再运行
+`python -m local_web`。只刷新浏览器不会让正在运行的 Python 进程加载新代码。
+
+Windows PowerShell 激活命令为：
+
+```powershell
+.venv-web\Scripts\Activate.ps1
+```
+
+## 启动
+
+在 macOS 上，推荐直接双击项目根目录的 `启动 iCourse 本地控制台.command`。它会检测
+控制台是否已经运行：已运行则直接打开网页；首次运行时自动创建 `.venv-web` 并安装本地
+界面依赖，之后启动服务和浏览器。Terminal 窗口保持打开表示本地服务正在运行。
+
+```bash
+python -m local_web
+```
+
+程序会自动打开 `http://127.0.0.1:8765`。不希望自动打开浏览器时：
+
+```bash
+python -m local_web --no-open
+```
+
+默认拒绝绑定非本机地址。虽然可以显式传入 `--allow-remote`，但管理 API 能够触发
+GitHub Actions，除非处于可信网络并额外配置认证，否则不应这样使用。
+
+## GitHub Token
+
+可以在设置页面输入细粒度 Token，也可以留空并复用 GitHub CLI：
+
+```bash
+gh auth login
+```
+
+建议将 Token 限定到自己的 Fork，并只授予所需权限：
+
+- Contents: Read（读取 data 分支）
+- Actions: Read and write（查看和触发 workflow）
+- Secrets: Read and write（写入模型 API Key，以及后续修改订阅）
+- Variables: Read and write（读取和更新非敏感的模型供应商配置）
+
+上面是 **Fine-grained personal access token** 的权限名称。如果使用的是 GitHub
+旧版 **Tokens (classic)** 页面（会看到 `repo`、`workflow` 等 scopes），勾选
+`repo` 即可访问该 Fork 的仓库 Variables 与 Secrets API；classic 页面没有单独的
+Variables/Secrets 权限可选。
+
+不要选择整个账号或所有仓库；创建 Fine-grained personal access token 时使用
+**Only select repositories**，只勾选自己的 `Fudan_iCourse_Subscriber` Fork。
+如果 Token 缺少 Variables 权限，笔记浏览可能仍能工作，但“模型与 API”页面无法
+读取或保存配置；缺少 Secrets 权限则无法新增或更新 API Key。
+
+## 模型与 API
+
+配置本地会话后，可以在“模型与 API”区域管理 GitHub Actions 之后调用的 LLM：
+
+- 添加、删除、启用或停用供应商。
+- 设置供应商名称、HTTPS Base URL 与存放 API Key 的 Actions Secret 名称。
+- 为每个供应商维护一个或多个模型，并调整供应商及模型的先后顺序。
+- 保存配置到 Fork，并使用手动输入的 API Key 做一次轻量连接测试。
+
+调用顺序就是页面中的排列顺序：程序先按**供应商顺序**逐个尝试，再按该供应商的
+**模型顺序**逐个尝试；当前模型调用失败后才进入下一项。因此应把首选模型放在最
+前面，把备用或更昂贵的模型放在后面。至少需要启用一个供应商，每个启用的供应商
+至少需要一个模型和一个已经配置的 API Key。
+
+目前只支持实现 OpenAI-compatible `POST /chat/completions` 的服务。填写的 Base URL
+应是该兼容 API 的根地址，例如以 `/v1` 结尾；控制台会在其后调用
+`/chat/completions`。仅提供供应商专有 SDK、Anthropic Messages API、Gemini 原生
+`generateContent` 或其他不兼容协议的端点不能直接使用。Gemini 等服务只有在使用
+其官方或代理提供的 OpenAI-compatible 端点时才可配置。
+
+### 配置和密钥分别保存在哪里
+
+控制台刻意把非敏感配置与密钥分开：
+
+| 内容 | GitHub 存储位置 | 是否可读取 | 示例 |
+|---|---|---|---|
+| 供应商名称、Base URL、模型列表、启用状态和顺序 | Actions Variable `MODEL_PROVIDERS_JSON` | 可以 | `modelscope`、模型顺序 |
+| API Key | 对应的 Actions Secret | 只能判断名称是否存在，不能读取值 | `DASHSCOPE_API_KEY` |
+
+`MODEL_PROVIDERS_JSON` 不包含 API Key，只记录“应该从哪个 Secret 名称读取 Key”。
+内置兼容名称包括 `DASHSCOPE_API_KEY`、`DEEPSEEK_API_KEY` 和
+`GEMINI_API_KEY`；自定义名称应使用 `LLM_*_API_KEY` 形式。不要把真实 Key 写进
+供应商名称、Base URL、模型名称、Variable 或仓库文件。
+
+GitHub 的 Secrets API 不提供读取明文值的能力，因此控制台不会、也无法回显之前
+保存的 Key：
+
+- 编辑已有供应商时让 API Key 输入框保持空白，会继续使用 GitHub 上现有的 Secret，
+  不会清空或覆盖它。
+- 只有输入新值并保存时，才会创建或替换对应的 Actions Secret。
+- “测试连接”不能复用 GitHub 上已保存但不可读取的 Key；每次测试都必须在当前页面
+  重新输入 Key。测试值只用于这次本地请求，页面不应把它当作已回显的旧值。
+
+保存时，控制台先写入新提供的 Secrets，再更新 `MODEL_PROVIDERS_JSON`，避免 Actions
+拿到一份引用了尚不存在密钥的配置。供应商配置还会在本机保存一份**不含 Key**的
+缓存，在仓库尚未创建该 Variable 时可作为页面的非敏感回退；GitHub Actions 实际
+运行仍以仓库中的 Variable 和 Secrets 为准。
+
+### 配置何时生效
+
+保存模型配置后，它会在下一次启动的 GitHub Actions 任务中生效，包括定时检查和
+之后手动触发的检查。更改默认模型不会自动改写历史笔记：旧笔记的 `summary_model`
+会保留并继续在课次详情中显示，代表那篇现有笔记实际使用的模型。
+
+如需重跑某一节，在该节的“摘要”页点击“选择模型重跑”。控制台只显示已启用且已配置
+API Key 的模型；确认后会启动单次工作流，以选定的**一个**模型重新生成摘要，并更新
+`summary_model`。此操作保留已有转录和 PPT OCR，不重新登录 iCourse、不下载视频、也不
+重新执行 ASR/OCR；原摘要会被替换，并产生相应模型费用。工作流完成后点击“检查更新”
+即可取回新笔记。
+
+## 按需同步到 Obsidian
+
+这项功能适合没有常开电脑或 NAS 的使用方式：GitHub Actions 仍在云端按计划处理课程，
+你只需在想看或整理笔记时启动本地控制台，等待后台自动检查更新完成后即可点击工具栏的
+“同步到 Obsidian”。电脑不需要为此长期运行。
+
+首次使用前，请先在 Obsidian 中创建或打开目标 Vault。然后：
+
+1. 在控制台填写 Vault 的**绝对路径**，例如
+   `/Users/你的用户名/Documents/Obsidian/课程笔记`。路径必须是一个已有的 Vault，
+   即其中已存在 `.obsidian` 文件夹。
+2. 默认只导出课程摘要；如确实需要，也可勾选“包含课程转录”和“包含 PPT OCR”。
+   后两者会明显增大笔记体积。
+3. 点击“预览变更”。页面会逐项显示将新建、更新、保持不变和冲突的笔记。
+4. 确认预览无误后点击“确认同步”。只有这一步才会写入 Vault。
+
+笔记固定写入 Vault 下的 `iCourse 笔记/`，按课程分文件夹保存，并附带课程、课次、日期
+和实际生成模型等 YAML 属性。同步器在该目录内维护 `.icourse-sync.json`，其中仅保存
+课次 ID、相对路径与内容哈希，不保存笔记正文、转录、GitHub Token 或 API Key。
+
+### 写入与冲突规则
+
+- 从不删除 Vault 中的文件，也不扫描或改写 `iCourse 笔记/` 之外的内容。
+- 只有当目标笔记仍与上次由同步器写入的版本完全一致时，才会因新的摘要、转录/OCR
+  选项变化而更新。
+- 如果目标文件被手动编辑，或同名文件并非同步器此前创建，预览会标为“冲突（不覆盖）”；
+  确认同步后它也会原样保留。解决后重新预览即可。
+- 当前版本以整篇生成笔记为单位保护手写修改；也就是说，直接改动生成文件的任意位置
+  都会使它成为冲突，而不会尝试猜测如何合并。需要长期手写内容时，建议另建普通
+  Obsidian 笔记并用链接关联。
+- 同步时会再次检查文件状态，因此即使在预览后又发生手改，也不会被旧预览覆盖。
+- 为避免路径穿越或符号链接写入，Vault 外部、符号链接路径和非普通文件都会被拒绝。
+
+Vault 路径以及两个导出选项会保存在本机控制台配置目录的 `obsidian.json`（尽可能设为
+仅当前用户可读）；它不包含笔记内容或任何登录凭据。修改路径或导出选项后，页面会要求
+重新预览，避免复用过期的同步计划。
+
+## 本地管理订阅
+
+在“订阅”页可以按学期、课程名、教师或课程号检索已同步到数据分支的课程目录，将课程
+加入或移出“已订阅”，最后点击“保存订阅”。控制台会把完整列表加密写入 Fork 的
+Actions Secret `COURSE_IDS`，后续定时检查即使用该列表。
+
+GitHub 不允许读取 Secret 明文，因此页面优先显示你在本机最近保存的非敏感课程编号快照；
+若没有本机快照，则退回数据分支中由上次工作流发布的订阅快照。这个快照保存在本机的
+`subscriptions.json`，只含课程 ID，不含 Token、学号或 UIS 密码。
+
+## 当前功能范围
+
+本地控制台支持数据库同步、课程/课次浏览、全文搜索、订阅编辑、运行状态、手动触发
+日常检查、模型与 API 配置、指定课次的模型重跑，以及按需的 Obsidian Markdown 同步。

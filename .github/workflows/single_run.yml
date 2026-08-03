@@ -5,13 +5,29 @@ on:
     inputs:
       course_ids:
         description: "Comma-separated course IDs to process (e.g. 30004,30005)"
-        required: true
+        required: false
+        default: ""
         type: string
       use_official_transcript:
         description: "Use official iCourse transcripts instead of ASR"
         required: false
         default: false
         type: boolean
+      resummarize_sub_ids:
+        description: "Existing lecture sub_id(s) to regenerate from saved transcript/OCR"
+        required: false
+        default: ""
+        type: string
+      summary_provider:
+        description: "Configured provider name for a summary-only rerun"
+        required: false
+        default: ""
+        type: string
+      summary_model:
+        description: "Configured model name for a summary-only rerun"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -163,18 +179,30 @@ jobs:
           UISPsw: ${{ secrets.UISPSW }}
           COURSE_IDS: ${{ inputs.course_ids }}
           USE_OFFICIAL_TRANSCRIPT: ${{ inputs.use_official_transcript && '1' || '' }}
+          RESUMMARIZE_SUB_IDS: ${{ inputs.resummarize_sub_ids }}
+          SUMMARY_PROVIDER: ${{ inputs.summary_provider }}
+          SUMMARY_MODEL: ${{ inputs.summary_model }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
-          # All secrets, JSON-encoded. provider_env.py exports only the
-          # vars named by config.MODEL_PROVIDERS (api_key_env /
-          # base_url_env), so user-defined providers with custom env-var
-          # names work without editing this workflow.
+          # The short-lived launcher selects only validated model-secret
+          # names and removes this full JSON before starting main.py.
           SECRETS_CONTEXT: ${{ toJSON(secrets) }}
+          MODEL_PROVIDERS_JSON: ${{ vars.MODEL_PROVIDERS_JSON }}
         run: |
-          eval "$(python scripts/provider_env.py)"
-          unset SECRETS_CONTEXT
-          python -u main.py
+          if [ -n "$RESUMMARIZE_SUB_IDS" ]; then
+            if [ -z "$SUMMARY_PROVIDER" ] || [ -z "$SUMMARY_MODEL" ]; then
+              echo "::error::Summary-only rerun requires summary_provider and summary_model."
+              exit 1
+            fi
+            python scripts/provider_env.py -- python -u scripts/resummarize.py
+          else
+            if [ -z "$COURSE_IDS" ]; then
+              echo "::error::course_ids is required unless resummarize_sub_ids is set."
+              exit 1
+            fi
+            python scripts/provider_env.py -- python -u main.py
+          fi
 
       - name: Deploy database to data branch
         if: always()
