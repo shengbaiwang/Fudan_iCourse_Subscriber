@@ -10,6 +10,15 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
+
+# GitHub Actions invokes this file by path (``python scripts/resummarize.py``),
+# which otherwise puts only ``scripts/`` on ``sys.path``.  Add the repository
+# root explicitly so the project packages remain importable from that entry
+# point as well as via ``python -m``.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.ai import bucketer
 from src.ai.summarizer import Summarizer
