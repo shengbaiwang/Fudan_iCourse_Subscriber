@@ -3,7 +3,9 @@
 
 This deliberately does not log in to iCourse or instantiate ASR/OCR.  A
 rerun consumes the transcript and accepted PPT OCR already in the encrypted
-database, then replaces only ``summary`` and ``summary_model``.
+database, updates the active ``summary`` / ``summary_model``, and appends a
+new row to ``summary_versions`` — previous versions (from any model,
+including this one) are never overwritten.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.ai import bucketer
 from src.ai.summarizer import Summarizer
+from src.ai.title import build_title_material, split_generated_title
 from src.data.database import Database
 
 
@@ -64,9 +67,26 @@ def run() -> int:
         )
         try:
             summary, model_used = summarizer.summarize(course, prompt_text)
-            db.update_summary(sub_id, summary, model_used)
+            # The prompt embeds the note title as the output's first line —
+            # one call covers summary + title, saving a second API request.
+            ai_title, body = split_generated_title(summary)
+            db.update_summary(sub_id, body, model_used)
             db.mark_processed(sub_id)
             db.clear_error(sub_id)
+            # Fall back to a dedicated tiny title call only when the summary
+            # did not carry a usable title.  A title failure never fails the rerun.
+            try:
+                title = ai_title.strip()
+                if not title:
+                    title, _title_model = summarizer.generate_title(
+                        build_title_material(course, transcript, pages)
+                    )
+                db.update_ai_title(sub_id, title)
+            except Exception as title_exc:
+                print(
+                    f"::warning::{sub_id} 标题生成失败：{title_exc}",
+                    file=sys.stderr,
+                )
             completed += 1
             print(f"[Re-summarize] Done {sub_id} with {model_used}", flush=True)
         except Exception as exc:

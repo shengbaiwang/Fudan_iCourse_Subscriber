@@ -93,12 +93,12 @@ function _relativeTime(iso) {
   if (!iso) return "";
   const d = Date.now() - new Date(iso).getTime();
   const m = Math.floor(d / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return m + "m ago";
+  if (m < 1) return "刚刚";
+  if (m < 60) return m + " 分钟前";
   const h = Math.floor(m / 60);
-  if (h < 24) return h + "h ago";
+  if (h < 24) return h + " 小时前";
   const days = Math.floor(h / 24);
-  if (days < 30) return days + "d ago";
+  if (days < 30) return days + " 天前";
   return new Date(iso).toLocaleDateString();
 }
 
@@ -149,7 +149,7 @@ async function _loadShard(owner, repo, entry, password, token) {
   );
   if (!ICS.crypto.isGzip(gzipped)) {
     throw new Error(
-      "Shard '" + entry.name + "' decrypted to non-gzip bytes — wrong key?"
+      "分片 '" + entry.name + "' 解密结果不是 gzip 数据——密钥是否正确？"
     );
   }
   var dbBytes = await _gunzip(gzipped);
@@ -163,7 +163,7 @@ async function _fetchAndDecryptIndex(owner, repo, indexSha, password, token) {
     indexEnc, password, ICS.crypto.NEW_ITERATIONS,
   );
   if (!ICS.crypto.isJsonObj(indexBytes)) {
-    throw new Error("Shard index decrypted to non-JSON bytes — wrong key?");
+    throw new Error("索引解密结果不是 JSON——密钥是否正确？");
   }
   return JSON.parse(new TextDecoder().decode(indexBytes));
 }
@@ -262,6 +262,7 @@ document.addEventListener("alpine:init", () => {
     settingsForm: {}, showSecrets: {},
     exportDialogOpen: false, exportSelection: {}, exportingPdf: false,
     deleteDialogOpen: false, deleteSelection: {}, deletingCourses: false,
+    refreshing: false,
     repoOwner: "", repoName: "", dataBranch: "data",
     _history: [],
     /* Subscriptions editor state — three-column layout:
@@ -297,42 +298,51 @@ document.addEventListener("alpine:init", () => {
       await this._loadDB(creds);
     },
 
-    async _loadDB(creds) {
-      this.view = "loading"; this.error = null;
+    /* opts.silent: refresh in the background — keep the current view, report
+       failures via toast instead of replacing the page with the error view.
+       Used by the refresh button when data is already on screen. */
+    async _loadDB(creds, opts) {
+      var silent = !!(opts && opts.silent);
+      if (!silent) this.view = "loading";
+      this.error = null;
       try {
-        this.loadingMsg = "Connecting to GitHub API...";
+        this.loadingMsg = "正在连接 GitHub…";
         var manifest = await ICS.github.fetchShardManifest(
           this.repoOwner, this.repoName, this.dataBranch, creds.token,
         );
         this.commitSha = manifest.commitSha;
 
         if (manifest.format === "sharded") {
-          this.loadingMsg = "Deriving decryption key...";
+          this.loadingMsg = "正在推导解密密钥…";
           var pw = await ICS.crypto.buildPasswordV2(creds);
 
-          this.loadingMsg = "Loading index...";
+          this.loadingMsg = "正在加载索引…";
           var self = this;
           await _loadFromShardManifest(
             manifest, this.repoOwner, this.repoName, pw, creds.token,
             function (i, n, name) {
               if (i === 0) {
-                self.loadingMsg = "All " + n + " shards unchanged — instant load.";
+                self.loadingMsg = n + " 个分片均为最新，正在本地加载…";
               } else {
-                self.loadingMsg = "Downloading shard " + i + "/" + n
-                  + " (" + name + ")...";
+                self.loadingMsg = "正在下载分片 " + i + "/" + n
+                  + "（" + name + "）…";
               }
             },
           );
         } else {
-          this.loadingMsg = "Downloading + decrypting legacy database...";
+          this.loadingMsg = "正在下载并解密数据库…";
           await _loadFromLegacyBlob(
             manifest, this.repoOwner, this.repoName, creds, creds.token,
           );
         }
 
         this.courses = this._sortCoursesByStar(ICS.db.getCourses());
-        this.view = "courses";
+        if (!silent) this.view = "courses";
       } catch (e) {
+        if (silent) {
+          this._toast("刷新失败：" + e.message, "error");
+          throw e;
+        }
         this.error = e.message;
         this.view = "error";
       }
@@ -343,7 +353,7 @@ document.addEventListener("alpine:init", () => {
       this._history.push({ view: this.view, courseId: this.currentCourse?.course_id, lectureId: this.currentLecture?.sub_id });
       this._go(view, params);
     },
-    _go(view, params) {
+    _go(view, params, opts) {
       params = params || {};
       this.error = null;
       if (view === "courses") {
@@ -376,6 +386,9 @@ document.addEventListener("alpine:init", () => {
       }
       this.view = view;
       if (view !== "lectures") this.exportDialogOpen = false;
+      // Forward navigation starts at the top of the new view; going back
+      // keeps the previous scroll position (browser-like behaviour).
+      if (!(opts && opts.keepScroll)) this._scrollToTop();
     },
     _sortCoursesByStar(list) {
       // Stable two-key sort: starred first (descending = pinned), then
@@ -390,7 +403,7 @@ document.addEventListener("alpine:init", () => {
     },
     goBack() {
       const p = this._history.pop();
-      if (p) this._go(p.view, { courseId: p.courseId, subId: p.lectureId });
+      if (p) this._go(p.view, { courseId: p.courseId, subId: p.lectureId }, { keepScroll: true });
       else this._go("courses");
     },
 
@@ -468,7 +481,7 @@ document.addEventListener("alpine:init", () => {
     },
     openExportDialog() {
       const list = this.getExportableLectures();
-      if (!list.length) { this._toast("No summarized lectures to export", "error"); return; }
+      if (!list.length) { this._toast("没有可导出的摘要", "error"); return; }
       this.exportSelection = {};
       list.forEach((lec) => { this.exportSelection[lec.sub_id] = true; });
       this.exportDialogOpen = true;
@@ -501,12 +514,12 @@ document.addEventListener("alpine:init", () => {
         (lec) => this.exportSelection[lec.sub_id]
       );
       if (!selected.length) {
-        this._toast("Please select at least one lecture", "error");
+        this._toast("请至少选择一节课", "error");
         return;
       }
       const creds = _loadCreds();
       if (!creds?.token) {
-        this._toast("Not authenticated", "error");
+        this._toast("未登录或 PAT 缺失", "error");
         return;
       }
       this.exportingPdf = true;
@@ -522,7 +535,7 @@ document.addEventListener("alpine:init", () => {
           "success"
         );
       } catch (e) {
-        this._toast(e?.message || "Export failed", "error");
+        this._toast(e?.message || "导出失败", "error");
       } finally {
         this.exportingPdf = false;
       }
@@ -544,7 +557,7 @@ document.addEventListener("alpine:init", () => {
       ];
       for (var i = 0; i < selected.length; i++) {
         var lec = selected[i];
-        lines.push("## " + (lec.sub_title || "Untitled") + "（" + (lec.date || "") + "）");
+        lines.push("## " + (lec.sub_title || "（无题）") + "（" + (lec.date || "") + "）");
         lines.push("");
         if (lec.summary) {
           lines.push("### 摘要");
@@ -683,7 +696,15 @@ document.addEventListener("alpine:init", () => {
 
     async refresh() {
       const c = _loadCreds();
-      if (c) { await this._loadDB(c); this._toast("Refreshed", "success"); }
+      if (!c || this.refreshing) return;
+      this.refreshing = true;
+      try {
+        // With data already on screen, refresh silently in the background;
+        // without data (initial load / error view) use the full loading view.
+        await this._loadDB(c, { silent: this.courses.length > 0 });
+        this._toast("已刷新", "success");
+      } catch (e) { /* already reported via toast by _loadDB */ }
+      finally { this.refreshing = false; }
     },
 
     async testAndSave() {
@@ -731,12 +752,12 @@ document.addEventListener("alpine:init", () => {
     async saveSettingsAndReload() {
       _saveCreds({ ...this.settingsForm });
       _saveSettings({ owner: this.repoOwner, repo: this.repoName, branch: this.dataBranch });
-      this._toast("Saved. Reloading...", "success");
+      this._toast("已保存，正在重新加载…", "success");
       const c = _loadCreds();
       if (c) await this._loadDB(c);
     },
     clearAllData() {
-      if (!confirm("Clear all saved credentials?")) return;
+      if (!confirm("确定清除所有已保存的凭据与本地缓存？此操作不可撤销。")) return;
       localStorage.removeItem(_LS + "creds");
       localStorage.removeItem(_LS + "settings");
       // Close the cached connection before deleting — Chrome/Firefox block

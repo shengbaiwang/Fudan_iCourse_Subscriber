@@ -4,14 +4,15 @@ import time
 
 from openai import OpenAI
 
+from src.ai.title import clean_title
 from src.runtime import config
 
 SYSTEM_PROMPT= r"""你是一个专业的课程助教。你的任务是根据用户提供的课程录音文本和ppt文字ocr部分，生成用于学生自学和期末复习的详细笔记。
-1. **直接输出**：不要包含任何"好的"、"没问题"、"以下是总结"等客套话，不要输出全局课程名称大标题（由系统自动生成），直接开始总结即可。
+1. **直接输出**：不要包含任何"好的"、"没问题"、"以下是总结"等客套话。**第一行必须是一个一级标题**（以 `# ` 开头），概括本节课的核心内容作为笔记标题：不超过 20 字，是"本节课"的标题而非课程名，不含日期、课次号与书名号。标题行之后直接开始正文总结。
 2. **文本清洗**：语言必须通顺、逻辑清晰，严格去除口语化表达、重复句和无意义的录音识别错误等。内容可能被识别成同音字，需要通过学术语境修复。
 3. **格式严格**：
    - 必须使用 Markdown 格式排版。
-   - 标题结构清晰与级别限制：只允许使用三级及后续级别的标题（即只能使用`###`、`####`或`#####`），禁止使用 `#` 和 `##`。用清晰的标题组织结构。
+   - 标题结构清晰与级别限制：除第一行的笔记标题外，正文只允许使用三级及后续级别的标题（即只能使用`###`、`####`或`#####`），禁止在正文中使用 `#` 和 `##`。用清晰的标题组织结构。
    - 不得使用超过两级的缩进和超过两级嵌套的bullet point。
    - 尽可能用完整的段落来组织老师的讲解，适量使用bullet point，不得过度使用bullet point
    - 合理使用加粗、列表、表格、分级标题、段首小标题等形式来组织信息，确保结构清晰。
@@ -157,3 +158,48 @@ class Summarizer:
         raise RuntimeError(
             "All LLM models failed:\n" + "\n".join(errors)
         )
+
+    def generate_title(self, material: str) -> tuple[str, str]:
+        """Generate a concise note title from reliable source material.
+
+        Uses the same provider/model fallback chain as ``summarize`` but is
+        deliberately forgiving: any failure returns ``("", "")`` so callers
+        keep the previous title instead of failing the whole lecture.
+
+        Returns ``(title, model_used)``; title is "" when nothing usable
+        came back.  Never raises.
+        """
+        if not material or not material.strip():
+            return ("", "")
+        system = (
+            "你是课程助教。根据用户提供的课程材料（PPT 课件文字与录音转录节选），"
+            "为这节课生成一个简短准确的笔记标题。要求：不超过 20 字；概括本节课的"
+            "核心内容而非课程名；PPT 文字是真实课件内容，比录音转录更可靠，以其为准；"
+            "只输出标题本身，不要日期、课次号、书名号、引号或任何解释。"
+        )
+        for provider in self.providers:
+            client = self._clients[provider["name"]]
+            for model in provider["models"]:
+                model_id = f"{provider['name']}/{model}"
+                try:
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": f"课程材料如下：\n\n{material}"},
+                        ],
+                        timeout=60,
+                    )
+                    if not response.choices:
+                        raise ValueError("API returned empty choices")
+                    title = clean_title(response.choices[0].message.content)
+                    if title:
+                        print(f"[Summarizer] Title by {model_id}: {title}")
+                        return (title, model_id)
+                except Exception as e:
+                    print(
+                        f"[Summarizer] title via {model_id} failed: "
+                        f"{type(e).__name__}: {e}"
+                    )
+        print("[Summarizer] title generation skipped — all models failed")
+        return ("", "")

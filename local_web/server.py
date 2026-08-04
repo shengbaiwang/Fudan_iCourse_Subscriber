@@ -94,9 +94,19 @@ class CourseZoneRequest(BaseModel):
     zone: str = Field(min_length=1, max_length=32)
 
 
+class LectureNameRequest(BaseModel):
+    sub_id: str = Field(min_length=1, max_length=100)
+    name: str = Field(default="", max_length=100)
+
+
 class SummaryRerunRequest(BaseModel):
     provider: str = Field(min_length=1, max_length=50)
     model: str = Field(min_length=1, max_length=200)
+
+
+class SummaryBatchRerunRequest(SummaryRerunRequest):
+    sub_ids: list[str] = Field(default_factory=list, max_length=20)
+    course_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
 def create_app(
@@ -484,6 +494,20 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"zones": dict(runtime.course_zones)}
 
+    @app.get("/api/local/lecture-names")
+    async def lecture_names() -> dict[str, dict[str, str]]:
+        return {"names": dict(runtime.lecture_names)}
+
+    @app.put("/api/local/lecture-names")
+    async def save_lecture_name(payload: LectureNameRequest) -> dict[str, dict[str, str]]:
+        try:
+            await run_in_threadpool(
+                runtime.save_lecture_name, payload.sub_id, payload.name
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"names": dict(runtime.lecture_names)}
+
     def normalized_subscription_ids(values: list[str]) -> list[str]:
         result: list[str] = []
         seen: set[str] = set()
@@ -553,28 +577,66 @@ def create_app(
 
     @app.post("/api/local/lectures/{sub_id}/rerun-summary")
     async def rerun_lecture_summary(sub_id: str, payload: SummaryRerunRequest):
-        """Dispatch a summary-only rerun with one configured model.
+        return await dispatch_summary_rerun(
+            [sub_id], [], payload.provider, payload.model
+        )
 
-        The workflow input is intentionally checked against the repository
-        configuration first.  That keeps a browser request from selecting an
-        arbitrary endpoint/model or a provider whose GitHub Secret is absent.
-        """
-        item = await run_in_threadpool(require_db().lecture, sub_id)
-        if item is None:
-            raise HTTPException(status_code=404, detail="课次不存在")
-        if not str(item.get("transcript") or "").strip():
-            raise HTTPException(
-                status_code=409,
-                detail="这节课没有可用转录，暂时不能只重新生成笔记",
+    async def dispatch_summary_rerun(
+        requested_sub_ids: list[str],
+        requested_course_ids: list[str],
+        provider_value: str,
+        model_value: str,
+    ) -> dict[str, Any]:
+        """Validate selected lectures and dispatch one bounded rerun workflow."""
+        local_db = require_db()
+        sub_ids: list[str] = []
+        seen: set[str] = set()
+
+        def include(sub_id: str) -> None:
+            normalized = str(sub_id).strip()
+            if len(normalized) > 100 or "," in normalized:
+                raise HTTPException(status_code=400, detail="课次 ID 格式不正确")
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                sub_ids.append(normalized)
+
+        for sub_id in requested_sub_ids:
+            include(sub_id)
+        for course_id in requested_course_ids:
+            normalized_course_id = str(course_id).strip()
+            if not normalized_course_id or len(normalized_course_id) > 100:
+                raise HTTPException(status_code=400, detail="课程 ID 格式不正确")
+            course_sub_ids = await run_in_threadpool(
+                local_db.rerunnable_lecture_ids, normalized_course_id
             )
+            for sub_id in course_sub_ids:
+                include(sub_id)
+
+        if not sub_ids:
+            raise HTTPException(status_code=400, detail="请选择至少一个有转录的课次或课程")
+        if len(sub_ids) > 20:
+            raise HTTPException(
+                status_code=400,
+                detail=f"已选择 {len(sub_ids)} 个可重跑课次；一次最多 20 个，请分批提交",
+            )
+
+        for sub_id in sub_ids:
+            item = await run_in_threadpool(local_db.lecture, sub_id)
+            if item is None:
+                raise HTTPException(status_code=404, detail=f"课次不存在：{sub_id}")
+            if not str(item.get("transcript") or "").strip():
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"课次没有可用转录，暂时不能只重新生成笔记：{sub_id}",
+                )
         try:
             gh = client()
             raw = await run_in_threadpool(
                 gh.repository_variable, "MODEL_PROVIDERS_JSON"
             )
             document = validate_model_config(raw or DEFAULT_MODEL_PROVIDERS)
-            provider_name = payload.provider.strip()
-            model_name = payload.model.strip()
+            provider_name = provider_value.strip()
+            model_name = model_value.strip()
             provider = next(
                 (row for row in document["providers"] if row["name"] == provider_name),
                 None,
@@ -595,7 +657,7 @@ def create_app(
                 ref="main",
                 inputs={
                     "course_ids": "",
-                    "resummarize_sub_ids": str(sub_id),
+                    "resummarize_sub_ids": ",".join(sub_ids),
                     "summary_provider": provider_name,
                     "summary_model": model_name,
                     "use_official_transcript": "false",
@@ -605,12 +667,21 @@ def create_app(
                 "ok": True,
                 "provider": provider_name,
                 "model": model_name,
-                "sub_id": str(sub_id),
+                "sub_ids": sub_ids,
+                "sub_id": sub_ids[0] if len(sub_ids) == 1 else None,
+                "count": len(sub_ids),
             }
         except HTTPException:
             raise
         except (GitHubAPIError, ValueError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/local/summary-reruns")
+    async def rerun_summary_batch(payload: SummaryBatchRerunRequest):
+        """Regenerate selected lectures, or all eligible lectures in courses."""
+        return await dispatch_summary_rerun(
+            payload.sub_ids, payload.course_ids, payload.provider, payload.model
+        )
 
     @app.get("/api/local/search")
     async def search(q: str, limit: int = 50):

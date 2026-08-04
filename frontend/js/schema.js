@@ -26,7 +26,15 @@ CREATE TABLE IF NOT EXISTS lectures (
     transcript TEXT, summary TEXT,
     processed_at TEXT, emailed_at TEXT,
     error_msg TEXT, error_count INTEGER DEFAULT 0,
-    error_stage TEXT, summary_model TEXT
+    error_stage TEXT, summary_model TEXT,
+    ai_title TEXT
+);
+CREATE TABLE IF NOT EXISTS summary_versions (
+    sub_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    PRIMARY KEY (sub_id, model, generated_at)
 );
 CREATE TABLE IF NOT EXISTS ppt_pages (
     sub_id TEXT NOT NULL,

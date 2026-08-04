@@ -270,6 +270,50 @@ class CourseZoneStore:
         temp.replace(self.path)
 
 
+class LectureNameStore:
+    """Persist local-only custom note names (empty name = back to auto naming)."""
+
+    def __init__(self, directory: Path | None = None):
+        self.directory = directory or default_config_dir()
+        self.path = self.directory / "lecture-names.json"
+
+    def load(self) -> dict[str, str]:
+        try:
+            raw = json.loads(self.path.read_text("utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        names: dict[str, str] = {}
+        for raw_id, raw_name in raw.items():
+            sub_id = str(raw_id).strip()
+            name = str(raw_name).strip()
+            if sub_id and len(sub_id) <= 100 and name and len(name) <= 100:
+                names[sub_id] = name
+        return names
+
+    def save(self, names: dict[str, str]) -> None:
+        clean = {
+            str(sub_id).strip(): str(name).strip()
+            for sub_id, name in names.items()
+            if str(sub_id).strip()
+            and len(str(sub_id).strip()) <= 100
+            and str(name).strip()
+            and len(str(name).strip()) <= 100
+        }
+        self.directory.mkdir(parents=True, exist_ok=True)
+        temp = self.path.with_suffix(".tmp")
+        temp.write_text(
+            json.dumps(clean, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            os.chmod(temp, 0o600)
+        except OSError:
+            pass
+        temp.replace(self.path)
+
+
 def _normalize_course_ids(values: list[object]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -306,6 +350,7 @@ class RuntimeState:
         obsidian_store: ObsidianSettingsStore | None = None,
         subscription_store: SubscriptionSettingsStore | None = None,
         course_zone_store: CourseZoneStore | None = None,
+        lecture_name_store: LectureNameStore | None = None,
         credential_store: CredentialStore | None = None,
     ):
         self.store = store or SettingsStore()
@@ -317,11 +362,15 @@ class RuntimeState:
             self.store.directory
         )
         self.course_zone_store = course_zone_store or CourseZoneStore(self.store.directory)
+        self.lecture_name_store = lecture_name_store or LectureNameStore(
+            self.store.directory
+        )
         self.credential_store = credential_store or MacOSKeychainStore()
         self.settings = self.store.load()
         self.obsidian_settings = self.obsidian_store.load()
         self.subscription_ids = self.subscription_store.load()
         self.course_zones = self.course_zone_store.load()
+        self.lecture_names = self.lecture_name_store.load()
         self.credentials = self.credential_store.load(self.settings)
         self.credentials_remembered = self.credentials is not None
         self.database_path: Path | None = None
@@ -389,3 +438,18 @@ class RuntimeState:
         with self.lock:
             self.course_zones = {**self.course_zones, normalized_id: normalized_zone}
             self.course_zone_store.save(self.course_zones)
+
+    def save_lecture_name(self, sub_id: str, name: str) -> None:
+        """Set or clear a custom note name; an empty name restores auto naming."""
+        normalized_id = sub_id.strip()
+        normalized_name = name.strip()
+        if not normalized_id or len(normalized_id) > 100 or len(normalized_name) > 100:
+            raise ValueError("笔记名称无效")
+        with self.lock:
+            names = {**self.lecture_names}
+            if normalized_name:
+                names[normalized_id] = normalized_name
+            else:
+                names.pop(normalized_id, None)
+            self.lecture_names = names
+            self.lecture_name_store.save(names)

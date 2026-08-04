@@ -8,11 +8,12 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from local_web.database import DatabaseManager
+from local_web.database import DatabaseManager, auto_lecture_title
 from local_web.github_client import GitHubClient
 from local_web.server import create_app
 from local_web.state import (
     CourseZoneStore,
+    LectureNameStore,
     ObsidianSettings,
     ObsidianSettingsStore,
     RepositorySettings,
@@ -64,6 +65,14 @@ class SettingsStoreTest(unittest.TestCase):
             store.save({"1001": "study", "1002": "archive", "bad": "unknown"})
             self.assertEqual(store.load(), {"1001": "study", "1002": "archive"})
 
+    def test_persists_local_lecture_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LectureNameStore(Path(directory))
+            store.save({"10": "第一课 导论", " ": "无效", "11": "  "})
+            self.assertEqual(store.load(), {"10": "第一课 导论"})
+            text = store.path.read_text("utf-8")
+            self.assertNotIn("无效", text)
+
     def test_migrates_localized_and_legacy_course_zone_files(self):
         with tempfile.TemporaryDirectory() as directory:
             store = CourseZoneStore(Path(directory))
@@ -91,6 +100,25 @@ class SettingsStoreTest(unittest.TestCase):
             state.save_course_zone("1001", "查阅区")
             restored = CourseZoneStore(path).load()
             self.assertEqual(restored, {"1001": "reference"})
+
+    def test_runtime_state_renames_and_resets_a_lecture_name(self):
+        class EmptyKeychain:
+            available = False
+
+            def load(self, _settings):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            state = RuntimeState(
+                store=SettingsStore(path),
+                course_zone_store=CourseZoneStore(path),
+                credential_store=EmptyKeychain(),
+            )
+            state.save_lecture_name("10", "自定义名称")
+            self.assertEqual(LectureNameStore(path).load(), {"10": "自定义名称"})
+            state.save_lecture_name("10", "")
+            self.assertEqual(LectureNameStore(path).load(), {})
 
     def test_remembered_credentials_use_injected_keychain_store(self):
         class FakeKeychain:
@@ -280,6 +308,35 @@ class AutoUpdateLifecycleTest(unittest.TestCase):
             asyncio.run(status_endpoint())
             asyncio.run(status_endpoint())
             self.assertEqual(database.sync_calls, 1)
+
+
+class AutoLectureTitleTest(unittest.TestCase):
+    def test_prefers_the_first_summary_heading(self):
+        self.assertEqual(
+            auto_lecture_title("## 一、导论与背景\n正文段落", "2026-03-05第6-8节"),
+            "一、导论与背景",
+        )
+
+    def test_falls_back_to_first_line_and_strips_markdown(self):
+        self.assertEqual(
+            auto_lecture_title("**加粗**的第一行 [链接](https://x)\n第二行", "t"),
+            "加粗的第一行 链接",
+        )
+
+    def test_skips_math_and_falls_back_to_sub_title(self):
+        self.assertEqual(
+            auto_lecture_title("$E=mc^2$", "2026-03-05第6-8节"),
+            "2026-03-05第6-8节",
+        )
+
+    def test_falls_back_when_no_summary(self):
+        self.assertEqual(auto_lecture_title("", "2026-03-05第6-8节"), "2026-03-05第6-8节")
+        self.assertEqual(auto_lecture_title(None, None), "")
+
+    def test_truncates_long_names(self):
+        title = auto_lecture_title("一" * 60, "t", max_length=40)
+        self.assertEqual(len(title), 40)
+        self.assertTrue(title.endswith("…"))
 
 
 if __name__ == "__main__":

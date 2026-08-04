@@ -372,10 +372,17 @@ def _build_shard_db(source_db: str, course_ids: list[str],
                 (row["course_id"], row["title"], row["teacher"]),
             )
 
-        for table in ("lectures", "ppt_pages"):
+        for table in ("lectures", "summary_versions", "ppt_pages"):
             if table == "lectures":
                 rows = src.execute(
                     f"SELECT * FROM lectures WHERE course_id IN ({placeholders})",
+                    course_ids,
+                ).fetchall()
+            elif table == "summary_versions":
+                rows = src.execute(
+                    f"""SELECT sv.* FROM summary_versions sv
+                        JOIN lectures l ON sv.sub_id = l.sub_id
+                        WHERE l.course_id IN ({placeholders})""",
                     course_ids,
                 ).fetchall()
             else:
@@ -539,7 +546,22 @@ def _migrate_shard_schema(target: sqlite3.Connection) -> None:
             "(key TEXT PRIMARY KEY, value TEXT)"
         )
 
-    for table in ("lectures", "ppt_pages", "courses", "all_courses", "meta"):
+    versions_exists = target.execute(
+        "SELECT 1 FROM shard.sqlite_master "
+        "WHERE type='table' AND name='summary_versions'"
+    ).fetchone()
+    if not versions_exists:
+        target.execute(
+            """CREATE TABLE IF NOT EXISTS shard.summary_versions (
+                   sub_id TEXT NOT NULL,
+                   model TEXT NOT NULL,
+                   summary TEXT NOT NULL,
+                   generated_at TEXT NOT NULL,
+                   PRIMARY KEY (sub_id, model, generated_at)
+               )"""
+        )
+
+    for table in ("lectures", "summary_versions", "ppt_pages", "courses", "all_courses", "meta"):
         main_cols = {
             row[1] for row in target.execute(
                 f"PRAGMA table_info('{table}')"
@@ -617,6 +639,10 @@ def reassemble_database(
                         "SELECT * FROM shard.lectures"
                     )
                     target.execute(
+                        "INSERT OR IGNORE INTO main.summary_versions "
+                        "SELECT * FROM shard.summary_versions"
+                    )
+                    target.execute(
                         "INSERT OR IGNORE INTO main.ppt_pages "
                         "SELECT * FROM shard.ppt_pages"
                     )
@@ -637,5 +663,13 @@ def reassemble_database(
                     target.execute("DETACH DATABASE shard")
             finally:
                 os.unlink(tmp_path)
+        # A local console can reassemble an older published shard set before
+        # any new workflow opens it through Database._init_tables.  Seed its
+        # existing active notes here too (guarded: lectures that already have
+        # version rows are left untouched), so the first selected-model rerun
+        # immediately has both versions available for comparison.
+        from src.data.schema import backfill_summary_versions
+        backfill_summary_versions(target, "main")
+        target.commit()
     finally:
         target.close()

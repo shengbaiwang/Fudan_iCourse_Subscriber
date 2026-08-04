@@ -15,6 +15,8 @@ from src.data.schema import (
     LECTURES_MIGRATION_COLUMNS,
     PPT_PAGES_MIGRATION_COLUMNS,
     SCHEMA_SQL,
+    backfill_summary_versions,
+    migrate_summary_versions_table,
 )
 
 
@@ -30,6 +32,10 @@ def _ensure_schema(conn: sqlite3.Connection):
     for col, typedef in PPT_PAGES_MIGRATION_COLUMNS:
         if col not in existing_ppt:
             conn.execute(f"ALTER TABLE ppt_pages ADD COLUMN {col} {typedef}")
+    # Rebuild the versions table if it still uses the legacy per-model key,
+    # then seed versionless lectures — both idempotent (src/data/schema.py).
+    migrate_summary_versions_table(conn, "main")
+    backfill_summary_versions(conn, "main")
 
 
 def _migrate_attached(conn: sqlite3.Connection, schema: str):
@@ -54,6 +60,22 @@ def _migrate_attached(conn: sqlite3.Connection, schema: str):
                 conn.execute(
                     f"ALTER TABLE {schema}.{table} ADD COLUMN {col} {typedef}"
                 )
+    # ATTACHed databases can be written to during a merge.  Creating the
+    # versions table here lets a newly deployed workflow safely merge a
+    # database produced by an older workflow too.
+    conn.execute(
+        f"""CREATE TABLE IF NOT EXISTS {schema}.summary_versions (
+                sub_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                PRIMARY KEY (sub_id, model, generated_at)
+            )"""
+    )
+    # A pre-existing table may still use the legacy per-model key — rebuild
+    # it so the union merge below keeps every rerun from both sides.
+    migrate_summary_versions_table(conn, schema)
+    backfill_summary_versions(conn, schema)
 
 
 def merge(local_path: str, remote_path: str):
@@ -76,10 +98,10 @@ def merge(local_path: str, remote_path: str):
                 INSERT OR IGNORE INTO main.lectures
                     (sub_id, course_id, sub_title, date, transcript, summary,
                      processed_at, emailed_at, error_msg, error_count, error_stage,
-                     summary_model)
+                     summary_model, ai_title)
                 SELECT sub_id, course_id, sub_title, date, transcript, summary,
                        processed_at, emailed_at, error_msg, error_count, error_stage,
-                       summary_model
+                       summary_model, ai_title
                 FROM local.lectures
             """)
 
@@ -91,6 +113,7 @@ def merge(local_path: str, remote_path: str):
                     transcript    = COALESCE(l.transcript,    main.lectures.transcript),
                     summary       = COALESCE(l.summary,       main.lectures.summary),
                     summary_model = COALESCE(l.summary_model, main.lectures.summary_model),
+                    ai_title      = COALESCE(l.ai_title,      main.lectures.ai_title),
                     processed_at  = COALESCE(l.processed_at,  main.lectures.processed_at),
                     emailed_at    = COALESCE(l.emailed_at,    main.lectures.emailed_at),
                     error_msg = CASE
@@ -110,6 +133,17 @@ def merge(local_path: str, remote_path: str):
                     END
                 FROM local.lectures l
                 WHERE main.lectures.sub_id = l.sub_id
+            """)
+
+            # Versions are append-only rows keyed by (sub_id, model,
+            # generated_at).  Union both sides so concurrent reruns — even
+            # with the same model — all survive the deploy-time merge
+            # instead of one silently overwriting the other.
+            conn.execute("""
+                INSERT OR IGNORE INTO main.summary_versions
+                    (sub_id, model, summary, generated_at)
+                SELECT sub_id, model, summary, generated_at
+                FROM local.summary_versions
             """)
 
             # 4) PPT pages: insert local-only rows.  Existing rows are left

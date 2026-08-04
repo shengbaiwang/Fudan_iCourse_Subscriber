@@ -27,7 +27,8 @@
   <!-- Left: back arrow or logo -->
   <div class="flex items-center gap-2 min-w-0">
     <button x-show="['lectures','detail','settings','subscriptions'].includes(view)"
-            @click="goBack()" class="p-1 -ml-1 text-gray-600 hover:text-gray-900 flex-shrink-0">
+            @click="goBack()" aria-label="返回"
+            class="p-1 -ml-1 text-gray-600 hover:text-gray-900 flex-shrink-0">
       <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
       </svg>
@@ -35,7 +36,7 @@
     <h1 class="text-base font-bold text-gray-800 truncate" x-text="
       view === 'lectures' ? currentCourse?.title :
       view === 'detail'   ? currentLecture?.sub_title :
-      view === 'settings' ? 'Settings' :
+      view === 'settings' ? '设置' :
       view === 'subscriptions' ? '编辑订阅' :
       'iCourse'
     "></h1>
@@ -52,7 +53,7 @@
         <path stroke-linecap="round" stroke-linejoin="round"
               d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25"/>
       </svg>
-      Courses
+      课程
     </button>
     <button @click="_go('search')"
             class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
@@ -62,7 +63,7 @@
       <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
       </svg>
-      Search
+      搜索
     </button>
     <button @click="openSubscriptions()"
             class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
@@ -85,7 +86,7 @@
               d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"/>
         <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
       </svg>
-      Settings
+      设置
     </button>
   </div>
 
@@ -93,8 +94,10 @@
   <div class="flex items-center gap-1 ml-auto md:ml-4">
     <!-- Refresh (courses view) -->
     <button x-show="view === 'courses'" @click="refresh()"
-            class="p-2 text-gray-400 hover:text-blue-600">
-      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            :disabled="refreshing"
+            aria-label="刷新" title="刷新"
+            class="p-2 text-gray-400 hover:text-blue-600 disabled:opacity-50">
+      <svg class="w-5 h-5" :class="refreshing && 'animate-spin'" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round"
               d="M4 4v5h4.5M20 20v-5h-4.5M4.5 9A8 8 0 0119.5 15M19.5 15A8 8 0 014.5 9"/>
       </svg>
@@ -108,10 +111,10 @@
             class="text-sm bg-white text-red-500 border border-red-300 px-3 py-1.5 rounded-lg hover:bg-red-50">
       删除
     </button>
-    <!-- View toggle (detail view, desktop): cycle summary → transcript → PPT -->
+    <!-- View toggle (detail view): cycle summary → transcript → PPT -->
     <button x-show="view === 'detail' && currentLecture"
             @click="cycleDetailView()"
-            class="hidden md:block text-sm bg-gray-100 text-gray-700 px-3 py-1.5 rounded-lg hover:bg-gray-200"
+            class="flex-shrink-0 text-sm bg-gray-100 text-gray-700 px-3 py-1.5 rounded-lg hover:bg-gray-200"
             x-text="nextDetailViewLabel()">
     </button>
   </div>
@@ -127,14 +130,14 @@
         <path stroke-linecap="round" stroke-linejoin="round"
               d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25"/>
       </svg>
-      <span class="text-[10px]">Courses</span>
+      <span class="text-[10px]">课程</span>
     </button>
     <button @click="_go('search')" class="flex flex-col items-center gap-0.5 px-4 py-1"
             :class="view === 'search' ? 'text-blue-600' : 'text-gray-400'">
       <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
       </svg>
-      <span class="text-[10px]">Search</span>
+      <span class="text-[10px]">搜索</span>
     </button>
     <button @click="openSubscriptions()" class="flex flex-col items-center gap-0.5 px-4 py-1"
             :class="view === 'subscriptions' ? 'text-blue-600' : 'text-gray-400'">
@@ -151,7 +154,7 @@
               d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"/>
         <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
       </svg>
-      <span class="text-[10px]">Settings</span>
+      <span class="text-[10px]">设置</span>
     </button>
   </div>
 </nav>
@@ -169,15 +172,18 @@
 
   <!-- ─── ERROR ─── -->
   <div x-show="view === 'error'" class="max-w-lg mx-auto p-6 mt-12 text-center">
-    <div class="text-red-500 text-5xl mb-4">!</div>
-    <h2 class="text-lg font-bold text-gray-800 mb-2">Failed to load</h2>
-    <p class="text-sm text-red-600 mb-6 break-words" x-text="error"></p>
+    <svg class="w-12 h-12 mx-auto mb-4 text-red-400" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round"
+            d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/>
+    </svg>
+    <h2 class="text-lg font-bold text-gray-800 mb-2">加载失败</h2>
+    <p class="text-xs text-gray-500 bg-gray-100 rounded-lg p-3 mb-6 break-words text-left" x-text="error"></p>
     <div class="flex flex-col gap-3 items-center">
-      <button @click="refresh()" class="bg-blue-500 text-white px-6 py-2 rounded hover:bg-blue-600 text-sm">
-        Retry
+      <button @click="refresh()" class="bg-blue-500 text-white px-6 py-2 rounded-lg hover:bg-blue-600 text-sm">
+        重试
       </button>
-      <button @click="view = 'setup'" class="text-sm text-gray-500 underline">
-        Re-enter credentials
+      <button @click="view = 'setup'" class="text-sm text-gray-500 hover:text-gray-700">
+        重新填写凭据
       </button>
     </div>
   </div>
@@ -185,7 +191,7 @@
   <!-- ─── SETUP WIZARD ─── -->
   <div x-show="view === 'setup'" class="max-w-md mx-auto p-6 mt-8">
     <h2 class="text-xl font-bold text-gray-800 mb-1">iCourse Subscriber</h2>
-    <p class="text-sm text-gray-500 mb-6">Enter your credentials to connect to your encrypted database.</p>
+    <p class="text-sm text-gray-500 mb-6">输入凭据，连接你的加密课程数据库。</p>
 
     <div class="space-y-4">
       <!-- Repo info -->
@@ -207,11 +213,11 @@
         <label class="block text-xs text-gray-500 mb-1">
           GitHub Fine-grained PAT
           <a href="https://github.com/settings/personal-access-tokens/new" target="_blank"
-             class="text-blue-500 underline ml-1">Create</a>
+             class="text-blue-500 underline ml-1">创建</a>
         </label>
         <input x-model="setup.token" type="password" placeholder="github_pat_..."
                class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-300 focus:outline-none">
-        <p class="text-xs text-gray-400 mt-1">Scope: this repo only, Contents: Read and Write</p>
+        <p class="text-xs text-gray-400 mt-1">权限：仅本仓库，Contents 可读写</p>
       </div>
 
       <!-- 4 Secrets -->
@@ -228,7 +234,7 @@
 
       <!-- Advanced -->
       <details class="text-sm">
-        <summary class="text-gray-400 cursor-pointer">Advanced</summary>
+        <summary class="text-gray-400 cursor-pointer">高级设置</summary>
         <div class="mt-2">
           <div>
             <label class="block text-xs text-gray-500 mb-1">Data Branch</label>
@@ -245,7 +251,7 @@
       <button @click="testAndSave()" :disabled="setupTesting"
               class="w-full bg-blue-500 text-white py-2.5 rounded-lg font-medium hover:bg-blue-600 disabled:opacity-50 flex items-center justify-center gap-2">
         <div x-show="setupTesting" class="spinner !w-4 !h-4 !border-2 !border-white/30 !border-t-white"></div>
-        <span x-text="setupTesting ? 'Testing connection…' : 'Connect'"></span>
+        <span x-text="setupTesting ? '正在验证连接…' : '连接'"></span>
       </button>
     </div>
   </div>
@@ -254,21 +260,28 @@
   <div x-show="view === 'courses'" class="view-enter max-w-2xl mx-auto p-4">
     <!-- Empty state -->
     <div x-show="courses.length === 0" class="text-center py-16 text-gray-400">
-      <p class="text-lg mb-2">No courses yet</p>
-      <p class="text-sm">Make sure the workflow has run at least once.</p>
+      <p class="text-lg mb-2">还没有课程</p>
+      <p class="text-sm">请确认 workflow 已至少成功运行一次。</p>
     </div>
 
     <!-- Course cards -->
     <div class="space-y-3">
       <template x-for="c in courses" :key="c.course_id">
-        <button @click="openCourse(c.course_id)"
-                class="w-full text-left bg-white rounded-xl shadow-sm border border-gray-100 p-4 hover:shadow-md transition-shadow active:bg-gray-50">
+        <div @click="openCourse(c.course_id)"
+             @keydown.enter.prevent="openCourse(c.course_id)"
+             @keydown.space.prevent="openCourse(c.course_id)"
+             role="button" tabindex="0"
+             class="w-full text-left bg-white rounded-xl shadow-sm border border-gray-100 p-4 hover:shadow-md transition-shadow active:bg-gray-50 cursor-pointer">
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0 flex items-start gap-2">
               <span @click.stop="toggleStar(c.course_id)"
-                      class="flex-shrink-0 mt-0.5 text-lg leading-none cursor-pointer select-none"
+                      @keydown.enter.stop.prevent="toggleStar(c.course_id)"
+                      @keydown.space.stop.prevent="toggleStar(c.course_id)"
+                      role="button" tabindex="0"
+                      class="flex-shrink-0 p-1 -m-1 text-lg leading-none cursor-pointer select-none rounded"
                       :class="isStarred(c.course_id) ? 'text-amber-400' : 'text-gray-300 hover:text-amber-400'"
                       :title="isStarred(c.course_id) ? '取消置顶' : '置顶'"
+                      :aria-label="isStarred(c.course_id) ? '取消置顶' : '置顶'"
                       x-text="isStarred(c.course_id) ? '★' : '☆'"></span>
               <div class="min-w-0">
                 <h3 class="font-semibold text-gray-800 truncate" x-text="c.title"></h3>
@@ -277,11 +290,11 @@
             </div>
             <div class="flex flex-col items-end flex-shrink-0">
               <span class="text-xs font-medium bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full"
-                    x-text="c.summary_count + ' summaries'"></span>
+                    x-text="c.summary_count + ' 篇摘要'"></span>
               <span class="text-xs text-gray-400 mt-1" x-text="relTime(c.last_updated)"></span>
             </div>
           </div>
-        </button>
+        </div>
       </template>
     </div>
   </div>
@@ -291,7 +304,7 @@
     <p x-show="currentCourse?.teacher" class="text-sm text-gray-500 mb-3" x-text="currentCourse?.teacher"></p>
 
     <div x-show="lectures.length === 0" class="text-center py-16 text-gray-400">
-      <p>No lectures recorded yet.</p>
+      <p>暂无课次记录。</p>
     </div>
 
     <div class="space-y-2">
@@ -300,7 +313,7 @@
                 :class="lec.state === 'ready' ? 'hover:shadow-md active:bg-gray-50 cursor-pointer' : 'opacity-60 cursor-default'"
                 class="w-full text-left bg-white rounded-lg border border-gray-100 p-3.5 transition-shadow">
           <div class="flex items-center justify-between gap-2">
-            <h4 class="font-medium text-gray-800 text-sm truncate" x-text="lec.sub_title || 'Untitled'"></h4>
+            <h4 class="font-medium text-gray-800 text-sm truncate" x-text="lec.sub_title || '（无题）'"></h4>
             <span class="flex-shrink-0 text-xs px-2 py-0.5 rounded-full"
                   :class="{
                     'badge-ready': lec.state === 'ready',
@@ -309,12 +322,12 @@
                     'badge-skipped': lec.state === 'skipped',
                     'badge-failed': lec.state === 'failed'
                   }"
-                  x-text="lec.state === 'ready' ? 'Ready' :
-                          lec.state === 'processing' ? 'Summarizing…' :
-                          lec.state === 'waiting' ? 'Waiting' :
-                          lec.state === 'novideo' ? 'No Video' :
-                          lec.state === 'skipped' ? 'No Content' :
-                          'Failed: ' + (lec.error_stage || 'unknown')"></span>
+                  x-text="lec.state === 'ready' ? '就绪' :
+                          lec.state === 'processing' ? '总结中…' :
+                          lec.state === 'waiting' ? '等待中' :
+                          lec.state === 'novideo' ? '无视频' :
+                          lec.state === 'skipped' ? '无内容' :
+                          '失败：' + (lec.error_stage || '未知原因')"></span>
           </div>
           <!-- Preview snippet for ready lectures -->
           <p x-show="lec.state === 'ready' && lec.summary"
@@ -335,7 +348,7 @@
         <!-- Metadata -->
         <p x-show="detailView === 'summary' && currentLecture.summary_model"
            class="text-xs text-gray-400 mb-4">
-          Generated by <span x-text="currentLecture.summary_model"></span>
+          由 <span x-text="currentLecture.summary_model"></span> 生成
         </p>
 
         <!-- Prev / next lecture nav (top) -->
@@ -406,12 +419,6 @@
           </button>
         </nav>
 
-        <!-- Mobile cycle button (FAB-style) -->
-        <button x-show="currentLecture"
-                @click="cycleDetailView()"
-                class="md:hidden fixed left-5 bottom-24 text-xs bg-gray-100 text-gray-700 px-3 py-2 rounded-full shadow hover:bg-gray-200 z-20"
-                x-text="nextDetailViewLabel()">
-        </button>
       </div>
     </template>
   </div>
@@ -424,21 +431,21 @@
           <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
         </svg>
         <input x-model="searchQuery" @input="doSearch()" type="text"
-               placeholder="Search summaries…" autofocus
+               placeholder="搜索摘要、转录、OCR…" aria-label="搜索" autofocus
                class="w-full pl-10 pr-4 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-300 focus:outline-none">
       </div>
       <div class="relative flex-1 min-w-[150px]" @click.away="searchCourseOpen = false">
         <button @click="searchCourseOpen = !searchCourseOpen"
-                class="w-full border rounded-lg px-3 py-2 text-sm bg-white text-left focus:ring-2 focus:ring-blue-300 focus:outline-none">
-          <span x-text="searchCourseLabel"></span>
-          <span class="float-right ml-2">▾</span>
+                class="w-full border rounded-lg px-3 py-2 text-sm bg-white flex items-center justify-between gap-2 focus:ring-2 focus:ring-blue-300 focus:outline-none">
+          <span class="truncate" x-text="searchCourseLabel"></span>
+          <span class="flex-shrink-0 text-gray-400 text-xs transition-transform" :class="searchCourseOpen && 'rotate-180'">▾</span>
         </button>
-        <div x-show="searchCourseOpen" class="absolute right-0 z-10 mt-1 bg-white border rounded-lg shadow-lg max-h-64 overflow-y-auto w-full min-w-[240px]">
+        <div x-show="searchCourseOpen" x-transition class="absolute right-0 z-10 mt-1 bg-white border rounded-lg shadow-lg max-h-64 overflow-y-auto w-full min-w-[240px]">
           <input x-model="searchCourseFilterQuery" type="text"
                  placeholder="搜索课程名…"
                  class="w-full border-b px-3 py-2 text-sm sticky top-0 bg-white focus:outline-none">
           <div class="border-b px-3 py-2">
-            <!-- <p class="text-xs text-gray-400 mb-1.5">搜索范围</p> -->
+            <p class="text-xs text-gray-400 mb-1.5">搜索范围</p>
             <div class="flex flex-wrap gap-1.5">
               <button @click="toggleSearchDomain('summary')" type="button"
                       class="text-xs px-3 py-1 rounded-full font-medium transition-colors"
@@ -477,7 +484,7 @@
     </div>
 
     <div x-show="searchQuery && searchResults.length === 0" class="text-center py-12 text-gray-400 text-sm">
-      No results.
+      未找到匹配结果。
     </div>
 
     <div class="space-y-2">
@@ -487,12 +494,12 @@
           <div class="flex items-center justify-between gap-2">
             <p class="text-xs text-blue-600 font-medium truncate" x-text="r.course_title"></p>
             <span class="text-[10px] uppercase tracking-wide text-gray-400 flex-shrink-0"
-              x-text="r.hit_field === 'transcript' ? '转录命中'
-                : r.hit_field === 'sub_title'  ? '标题命中'
-                : r.hit_field === 'ocr'        ? 'OCR命中'
-                : '摘要命中'"></span>
+              x-text="r.hit_field === 'transcript' ? '转录'
+                : r.hit_field === 'sub_title'  ? '标题'
+                : r.hit_field === 'ocr'        ? 'OCR'
+                : '摘要'"></span>
           </div>
-          <h4 class="font-medium text-gray-800 text-sm mt-0.5" x-text="r.sub_title || 'Untitled'"></h4>
+          <h4 class="font-medium text-gray-800 text-sm mt-0.5" x-text="r.sub_title || '（无题）'"></h4>
            <p class="text-xs text-gray-400 mt-1 line-clamp-2"
              x-html="highlight(r.hit_field === 'transcript' ? r.transcript
                     : r.hit_field === 'ocr' ? r.ppt_text
@@ -517,11 +524,11 @@
           <div class="relative" @click.away="subsTermOpen = false">
             <label class="block text-xs text-gray-500 mb-1">学期</label>
             <button @click="subsTermOpen = !subsTermOpen"
-                    class="border rounded-lg px-3 py-2 text-sm bg-white text-left min-w-[100px] focus:ring-2 focus:ring-blue-300 focus:outline-none">
+                    class="border rounded-lg px-3 py-2 text-sm bg-white min-w-[100px] flex items-center justify-between gap-2 focus:ring-2 focus:ring-blue-300 focus:outline-none">
               <span x-text="subsTermLabel"></span>
-              <span class="float-right ml-2">▾</span>
+              <span class="text-gray-400 text-xs transition-transform" :class="subsTermOpen && 'rotate-180'">▾</span>
             </button>
-            <div x-show="subsTermOpen" class="absolute z-10 mt-1 bg-white border rounded-lg shadow-lg max-h-48 overflow-y-auto min-w-[160px]">
+            <div x-show="subsTermOpen" x-transition class="absolute z-10 mt-1 bg-white border rounded-lg shadow-lg max-h-48 overflow-y-auto min-w-[160px]">
               <template x-for="t in allCoursesTerms" :key="t">
                 <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-gray-50 text-sm cursor-pointer whitespace-nowrap">
                   <input type="checkbox" :checked="subsTerms.includes(t)"
@@ -536,11 +543,11 @@
           <div class="relative" @click.away="subsDeptOpen = false">
             <label class="block text-xs text-gray-500 mb-1">院系</label>
             <button @click="subsDeptOpen = !subsDeptOpen"
-                    class="border rounded-lg px-3 py-2 text-sm bg-white text-left min-w-[100px] focus:ring-2 focus:ring-blue-300 focus:outline-none">
+                    class="border rounded-lg px-3 py-2 text-sm bg-white min-w-[100px] flex items-center justify-between gap-2 focus:ring-2 focus:ring-blue-300 focus:outline-none">
               <span x-text="subsDeptLabel"></span>
-              <span class="float-right ml-2">▾</span>
+              <span class="text-gray-400 text-xs transition-transform" :class="subsDeptOpen && 'rotate-180'">▾</span>
             </button>
-            <div x-show="subsDeptOpen" class="absolute z-10 mt-1 bg-white border rounded-lg shadow-lg max-h-64 overflow-y-auto min-w-[240px]">
+            <div x-show="subsDeptOpen" x-transition class="absolute z-10 mt-1 bg-white border rounded-lg shadow-lg max-h-64 overflow-y-auto min-w-[240px]">
               <input x-model="deptSearchQuery" @input="onDeptSearchInput()" type="text"
                      placeholder="搜索院系…"
                      class="w-full border-b px-3 py-2 text-sm sticky top-0 bg-white focus:outline-none">
@@ -721,16 +728,16 @@
             <span x-text="singleRunTriggering ? '触发中…' : '▶ 单次运行'"></span>
           </button>
         </div>
-        <p class="text-xs text-gray-400 mt-1">
-          单次运行会触发 workflow 处理选中课程，结果发送到 RECEIVER_EMAIL。
-          保存需要 GitHub PAT 具备 <strong>Secrets: Read and write</strong> 权限。
+        <p class="text-xs text-gray-400 mt-2 leading-relaxed">
+          单次运行会触发 workflow 处理右侧列表中的课程，结果发送到 RECEIVER_EMAIL。<br>
+          保存订阅需要 GitHub PAT 具备 <strong>Secrets: Read and write</strong> 权限。
         </p>
       </div>
   </div>
 
   <!-- ─── SETTINGS ─── -->
   <div x-show="view === 'settings'" class="view-enter max-w-md mx-auto p-6">
-    <h2 class="text-lg font-bold text-gray-800 mb-4">Credentials</h2>
+    <h2 class="text-lg font-bold text-gray-800 mb-4">凭据</h2>
 
     <div class="space-y-3">
       <template x-for="field in [
@@ -746,13 +753,13 @@
                    class="flex-1 border rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-300 focus:outline-none">
             <button @click="showSecrets[field.key] = !showSecrets[field.key]"
                     class="text-xs text-gray-400 hover:text-gray-600 w-10"
-                    x-text="showSecrets[field.key] ? 'Hide' : 'Show'"></button>
+                    x-text="showSecrets[field.key] ? '隐藏' : '显示'"></button>
           </div>
         </div>
       </template>
     </div>
 
-    <h2 class="text-lg font-bold text-gray-800 mt-8 mb-4">Advanced</h2>
+    <h2 class="text-lg font-bold text-gray-800 mt-8 mb-4">高级</h2>
     <div class="space-y-3">
       <div class="grid grid-cols-2 gap-3">
         <div>
@@ -772,13 +779,13 @@
 
     <button @click="saveSettingsAndReload()"
             class="w-full mt-6 bg-blue-500 text-white py-2.5 rounded-lg font-medium hover:bg-blue-600">
-      Save &amp; Reload
+      保存并重新加载
     </button>
 
     <div class="mt-8 pt-6 border-t border-gray-200">
       <button @click="clearAllData()"
               class="w-full text-sm text-red-500 hover:text-red-700 py-2">
-        Clear all credentials
+        清除凭据与本地缓存
       </button>
     </div>
   </div>
@@ -787,9 +794,11 @@
 
 <!-- ── DELETE DIALOG ── -->
 <div x-show="deleteDialogOpen" x-transition.opacity
+     role="dialog" aria-modal="true" aria-label="删除课次"
      class="fixed inset-0 z-50 bg-black/40 flex items-end md:items-center justify-center p-3"
+     @keydown.escape.window="closeDeleteDialog()"
      @click.self="closeDeleteDialog()">
-  <div class="w-full max-w-2xl bg-white rounded-xl shadow-xl max-h-[85vh] flex flex-col">
+  <div class="dialog-panel w-full max-w-2xl bg-white rounded-xl shadow-xl max-h-[85vh] flex flex-col">
     <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200">
       <h3 class="font-semibold text-gray-800">删除课次</h3>
       <button @click="closeDeleteDialog()" class="text-gray-400 hover:text-gray-600 text-sm">关闭</button>
@@ -805,14 +814,14 @@
       <span class="text-xs text-gray-500" x-text="'已选 ' + selectedDeleteCount() + ' / ' + getDeletableLectures().length"></span>
     </div>
 
-    <div class="overflow-y-auto px-4 py-3 space-y-2">
+    <div class="overflow-y-auto px-4 py-3 space-y-2 flex-1 min-h-0">
       <template x-for="lec in getDeletableLectures()" :key="lec.sub_id">
         <label class="flex items-start gap-3 p-3 border border-gray-100 rounded-lg hover:bg-gray-50 cursor-pointer">
           <input type="checkbox" class="mt-0.5 rounded border-gray-300 text-red-500 focus:ring-red-400"
                  :checked="deleteSelection[lec.sub_id]"
                  @change="toggleDeleteLecture(lec.sub_id, $event.target.checked)">
           <div class="min-w-0">
-            <p class="text-sm font-medium text-gray-800 truncate" x-text="lec.sub_title || 'Untitled'"></p>
+            <p class="text-sm font-medium text-gray-800 truncate" x-text="lec.sub_title || '（无题）'"></p>
             <p class="text-xs text-gray-500 mt-1 line-clamp-2" x-text="snippet(lec.summary, 100)"></p>
           </div>
         </label>
@@ -841,9 +850,11 @@
 
 <!-- ── EXPORT DIALOG ── -->
 <div x-show="exportDialogOpen" x-transition.opacity
+     role="dialog" aria-modal="true" aria-label="导出课程摘要"
      class="fixed inset-0 z-50 bg-black/40 flex items-end md:items-center justify-center p-3"
+     @keydown.escape.window="closeExportDialog()"
      @click.self="closeExportDialog()">
-  <div class="w-full max-w-2xl bg-white rounded-xl shadow-xl max-h-[85vh] flex flex-col">
+  <div class="dialog-panel w-full max-w-2xl bg-white rounded-xl shadow-xl max-h-[85vh] flex flex-col">
     <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200">
       <h3 class="font-semibold text-gray-800">导出课程摘要</h3>
       <button @click="closeExportDialog()" class="text-gray-400 hover:text-gray-600 text-sm">关闭</button>
@@ -859,14 +870,14 @@
       <span class="text-xs text-gray-500" x-text="'已选 ' + selectedExportCount() + ' / ' + getExportableLectures().length"></span>
     </div>
 
-    <div class="overflow-y-auto px-4 py-3 space-y-2">
+    <div class="overflow-y-auto px-4 py-3 space-y-2 flex-1 min-h-0">
       <template x-for="lec in getExportableLectures()" :key="lec.sub_id">
         <label class="flex items-start gap-3 p-3 border border-gray-100 rounded-lg hover:bg-gray-50 cursor-pointer">
           <input type="checkbox" class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-400"
                  :checked="isLectureSelected(lec.sub_id)"
                  @change="toggleLectureSelection(lec.sub_id, $event.target.checked)">
           <div class="min-w-0">
-            <p class="text-sm font-medium text-gray-800 truncate" x-text="lec.sub_title || 'Untitled'"></p>
+            <p class="text-sm font-medium text-gray-800 truncate" x-text="lec.sub_title || '（无题）'"></p>
             <p class="text-xs text-gray-500 mt-1 line-clamp-2" x-text="snippet(lec.summary, 100)"></p>
           </div>
         </label>
@@ -876,9 +887,9 @@
       </p>
     </div>
 
-    <div class="px-4 py-2 bg-blue-50 border-t border-blue-100 text-xs text-blue-800 leading-relaxed space-y-1">
-      <p>[MD] <strong>复制 Markdown</strong>：导出所选课次的摘要到剪贴板，纯浏览器端操作，无需网络。</p>
-      <p>[PDF] <strong>触发后台导出</strong>：通过 GitHub Actions 生成 PDF，发送到 RECEIVER_EMAIL。预计 1-3 分钟。</p>
+    <div class="px-4 py-2.5 bg-blue-50 border-t border-blue-100 text-xs text-blue-800 leading-relaxed space-y-1">
+      <p><strong>复制 Markdown</strong>：所选课次的摘要复制到剪贴板，纯本地操作，无需网络。</p>
+      <p><strong>触发后台导出</strong>：由 GitHub Actions 生成 PDF 并发送到 RECEIVER_EMAIL，约 1–3 分钟。</p>
     </div>
 
     <div class="px-4 py-3 border-t border-gray-100 flex justify-end gap-2">
@@ -888,7 +899,8 @@
         取消
       </button>
       <button @click="exportSelectedToClipboard()"
-              class="px-4 py-2 text-sm rounded-lg border border-green-300 text-green-700 hover:bg-green-50">
+              :disabled="selectedExportCount() === 0"
+              class="px-4 py-2 text-sm rounded-lg border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-50">
         复制 Markdown
       </button>
       <button @click="exportSelectedToPdf()"

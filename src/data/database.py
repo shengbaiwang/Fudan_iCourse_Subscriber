@@ -10,6 +10,8 @@ from src.data.schema import (
     LECTURES_MIGRATION_COLUMNS,
     PPT_PAGES_MIGRATION_COLUMNS,
     SCHEMA_SQL,
+    backfill_summary_versions,
+    migrate_summary_versions_table,
 )
 
 
@@ -53,6 +55,13 @@ class Database:
                     self.conn.execute(
                         f"ALTER TABLE lectures ADD COLUMN {col} {typedef}"
                     )
+
+            # Upgrade existing notes into the version library on first
+            # startup after the feature is introduced, and rebuild the
+            # table when it still uses the legacy per-model primary key.
+            # Both helpers are idempotent (see src/data/schema.py).
+            migrate_summary_versions_table(self.conn)
+            backfill_summary_versions(self.conn)
 
             existing_ppt = {
                 row[1]
@@ -388,13 +397,41 @@ class Database:
         return int(row[0]) if row and row[0] is not None else 0
 
     def update_summary(self, sub_id: str, summary: str, model: str):
-        """Save summary and model name."""
+        """Save the active summary and append the run as a new version.
+
+        Every rerun — including with the same model — becomes its own
+        ``summary_versions`` row (keyed by ``generated_at``), so previous
+        versions are never overwritten.  ``lectures.summary`` always holds
+        the latest output for email/export.
+        """
+        generated_at = datetime.now().isoformat()
         with self._lock, self.conn:
             self.conn.execute(
                 """UPDATE lectures
                    SET summary = ?, summary_model = ?
                    WHERE sub_id = ?""",
                 (summary, model, sub_id),
+            )
+            self.conn.execute(
+                """INSERT OR REPLACE INTO summary_versions
+                       (sub_id, model, summary, generated_at)
+                   VALUES (?, ?, ?, ?)""",
+                (sub_id, model or "unknown", summary, generated_at),
+            )
+
+    def update_ai_title(self, sub_id: str, title: str):
+        """Store the AI-generated note title for a lecture.
+
+        Empty titles are ignored, so a failed generation never wipes a
+        previously saved one.
+        """
+        clean = (title or "").strip()
+        if not clean:
+            return
+        with self._lock, self.conn:
+            self.conn.execute(
+                "UPDATE lectures SET ai_title = ? WHERE sub_id = ?",
+                (clean, sub_id),
             )
 
     def get_lecture(self, sub_id: str) -> dict | None:

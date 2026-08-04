@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -19,6 +20,49 @@ from .state import RuntimeCredentials, default_cache_dir, default_config_dir
 
 class DatabaseNotReady(RuntimeError):
     pass
+
+
+_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
+
+
+def _strip_markdown(value: str) -> str:
+    """Reduce one markdown fragment to plain readable text for a note name."""
+    text = re.sub(r"\$\$[\s\S]*?\$\$", " ", value)      # display math
+    text = re.sub(r"\$[^$\n]+\$", " ", text)            # inline math
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)   # images
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)  # links keep label
+    text = re.sub(r"<[^>]+>", " ", text)                # html tags
+    text = re.sub(r"[*_`~#>|]", "", text)               # emphasis/code/quote marks
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def auto_lecture_title(
+    summary: str | None, sub_title: str | None, *, max_length: int = 40
+) -> str:
+    """Derive a readable note name from the summary.
+
+    Prefers the first Markdown heading, then the first non-empty line; falls
+    back to ``sub_title`` (the raw date/period label) when there is no usable
+    text.  Local derivation only — no LLM involved.
+    """
+    fallback = str(sub_title or "").strip()
+    text = str(summary or "")
+    if text.strip():
+        candidates: list[str] = []
+        heading = _HEADING_PATTERN.search(text)
+        if heading:
+            candidates.append(heading.group(1))
+        for line in text.splitlines():
+            if line.strip():
+                candidates.append(line)
+                break
+        for candidate in candidates:
+            clean = _strip_markdown(candidate)
+            if clean:
+                if len(clean) > max_length:
+                    clean = clean[: max_length - 1].rstrip() + "…"
+                return clean
+    return fallback
 
 
 class DatabaseManager:
@@ -208,15 +252,41 @@ class DatabaseManager:
             return [dict(row) for row in db.execute(sql)]
 
     def lectures(self, course_id: str) -> list[dict[str, Any]]:
-        sql = """
-            SELECT sub_id, course_id, sub_title, date, processed_at,
-                   error_stage, error_msg, summary_model,
-                   CASE WHEN summary IS NOT NULL THEN 1 ELSE 0 END AS has_summary
-            FROM lectures WHERE course_id = ?
-            ORDER BY COALESCE(date, ''), sub_title
-        """
         with closing(self._connect()) as db:
-            return [dict(row) for row in db.execute(sql, (course_id,))]
+            # ai_title is a new column; a persistent library saved by an older
+            # build may lack it (read-only here — the next sync rebuilds it).
+            has_ai_title = db.execute(
+                "SELECT 1 FROM pragma_table_info('lectures') WHERE name = 'ai_title'"
+            ).fetchone()
+            sql = f"""
+                SELECT sub_id, course_id, sub_title, date, processed_at,
+                       error_stage, error_msg, summary_model, summary,
+                       {"ai_title" if has_ai_title else "NULL AS ai_title"},
+                       CASE WHEN summary IS NOT NULL THEN 1 ELSE 0 END AS has_summary,
+                       CASE WHEN TRIM(COALESCE(transcript, '')) != ''
+                            THEN 1 ELSE 0 END AS transcript_available
+                FROM lectures WHERE course_id = ?
+                ORDER BY COALESCE(date, ''), sub_title
+            """
+            rows = [dict(row) for row in db.execute(sql, (course_id,))]
+        for row in rows:
+            # Display name: AI title from the pipeline when present, else
+            # local derivation.  The bulky summary text is dropped either way.
+            row["auto_title"] = row.get("ai_title") or auto_lecture_title(
+                row.pop("summary", ""), row.get("sub_title")
+            )
+        return rows
+
+    def rerunnable_lecture_ids(self, course_id: str) -> list[str]:
+        """Return a course's lectures which have material for a summary rerun."""
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                """SELECT sub_id FROM lectures
+                   WHERE course_id = ? AND TRIM(COALESCE(transcript, '')) != ''
+                   ORDER BY COALESCE(date, ''), sub_title, sub_id""",
+                (course_id,),
+            )
+            return [str(row["sub_id"]) for row in rows]
 
     def lecture(self, sub_id: str) -> dict[str, Any] | None:
         sql = """
@@ -229,6 +299,28 @@ class DatabaseManager:
             if not row:
                 return None
             result = dict(row)
+            result["auto_title"] = result.get("ai_title") or auto_lecture_title(
+                result.get("summary"), result.get("sub_title")
+            )
+            has_versions = db.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type = 'table' AND name = 'summary_versions'"""
+            ).fetchone()
+            if has_versions:
+                result["summary_versions"] = [
+                    dict(version)
+                    for version in db.execute(
+                        """SELECT model, summary, generated_at
+                           FROM summary_versions
+                           WHERE sub_id = ?
+                           ORDER BY generated_at DESC, model""",
+                        (sub_id,),
+                    )
+                ]
+            else:
+                # The deployed data branch may still contain a pre-version
+                # database while an updated local console is already open.
+                result["summary_versions"] = []
             result["ppt_pages"] = [
                 dict(page)
                 for page in db.execute(
@@ -253,17 +345,23 @@ class DatabaseManager:
         a Vault substantially larger and are not needed for the usual note.
         """
         transcript_column = ", l.transcript" if include_transcript else ""
-        sql = f"""
-            SELECT l.sub_id, l.course_id, l.sub_title, l.date, l.processed_at,
-                   l.summary, l.summary_model, c.title AS course_title,
-                   c.teacher{transcript_column}
-            FROM lectures l
-            JOIN courses c ON c.course_id = l.course_id
-            WHERE TRIM(COALESCE(l.summary, '')) != ''
-            ORDER BY COALESCE(c.title, ''), c.course_id,
-                     COALESCE(l.date, ''), COALESCE(l.sub_title, ''), l.sub_id
-        """
         with closing(self._connect()) as db:
+            # ai_title is a new column; a persistent library saved by an
+            # older build may lack it (read-only here — next sync rebuilds).
+            has_ai_title = db.execute(
+                "SELECT 1 FROM pragma_table_info('lectures') WHERE name = 'ai_title'"
+            ).fetchone()
+            ai_column = ", l.ai_title" if has_ai_title else ", NULL AS ai_title"
+            sql = f"""
+                SELECT l.sub_id, l.course_id, l.sub_title, l.date, l.processed_at,
+                       l.summary, l.summary_model, c.title AS course_title,
+                       c.teacher{transcript_column}{ai_column}
+                FROM lectures l
+                JOIN courses c ON c.course_id = l.course_id
+                WHERE TRIM(COALESCE(l.summary, '')) != ''
+                ORDER BY COALESCE(c.title, ''), c.course_id,
+                         COALESCE(l.date, ''), COALESCE(l.sub_title, ''), l.sub_id
+            """
             notes = [dict(row) for row in db.execute(sql)]
             if not include_ocr or not notes:
                 return notes

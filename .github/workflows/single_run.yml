@@ -18,6 +18,11 @@ on:
         required: false
         default: ""
         type: string
+      backfill_titles:
+        description: "Generate AI titles for notes that lack one (titles only, no re-summarizing)"
+        required: false
+        default: false
+        type: boolean
       summary_provider:
         description: "Configured provider name for a summary-only rerun"
         required: false
@@ -180,6 +185,7 @@ jobs:
           COURSE_IDS: ${{ inputs.course_ids }}
           USE_OFFICIAL_TRANSCRIPT: ${{ inputs.use_official_transcript && '1' || '' }}
           RESUMMARIZE_SUB_IDS: ${{ inputs.resummarize_sub_ids }}
+          BACKFILL_TITLES: ${{ inputs.backfill_titles }}
           SUMMARY_PROVIDER: ${{ inputs.summary_provider }}
           SUMMARY_MODEL: ${{ inputs.summary_model }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
@@ -190,7 +196,9 @@ jobs:
           SECRETS_CONTEXT: ${{ toJSON(secrets) }}
           MODEL_PROVIDERS_JSON: ${{ vars.MODEL_PROVIDERS_JSON }}
         run: |
-          if [ -n "$RESUMMARIZE_SUB_IDS" ]; then
+          if [ "$BACKFILL_TITLES" = "true" ]; then
+            python scripts/provider_env.py -- python -u scripts/generate_titles.py
+          elif [ -n "$RESUMMARIZE_SUB_IDS" ]; then
             if [ -z "$SUMMARY_PROVIDER" ] || [ -z "$SUMMARY_MODEL" ]; then
               echo "::error::Summary-only rerun requires summary_provider and summary_model."
               exit 1

@@ -131,6 +131,26 @@ class ObsidianSyncServiceTest(unittest.TestCase):
         self.assertIn("00:12 · 第 1 页", markdown)
         self.assertIn("01:11 · 第 2 页", markdown)
 
+    def test_ai_title_drives_filename_heading_and_caption(self):
+        vault = self.make_vault()
+        service = ObsidianSyncService()
+        note = sample_note(ai_title="梯度下降法", sub_title="2026-08-02第1-2节")
+        preview = service.preview(vault, [note])
+        self.assertEqual(preview["items"][0]["title"], "梯度下降法")
+        self.assertIn("梯度下降法", preview["items"][0]["path"])
+        service.sync(preview["plan_id"])
+        markdown = self.only_note(vault).read_text("utf-8")
+        self.assertIn("# 梯度下降法", markdown)
+        self.assertIn("*2026-08-02第1-2节*", markdown)
+
+        # Existing files keep their path even when the AI title later changes
+        # (the manifest pins the original path; no orphan files are created).
+        changed = service.preview(
+            vault,
+            [sample_note(ai_title="随机梯度下降", sub_title="2026-08-02第1-2节")],
+        )
+        self.assertEqual(changed["items"][0]["path"], preview["items"][0]["path"])
+
     def test_requires_absolute_initialized_vault_and_rejects_symlink_output(self):
         service = ObsidianSyncService()
         with self.assertRaisesRegex(ObsidianSyncError, "绝对路径"):

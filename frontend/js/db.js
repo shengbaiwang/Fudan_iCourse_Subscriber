@@ -2,7 +2,8 @@
  * sql.js wrapper — load lecture data from sharded encrypted shards.
  *
  * In the sharded layout (current), each shard is a self-contained sqlite
- * file holding only the courses + lectures + ppt_pages rows for the courses
+ * file holding only the courses + lectures + summary_versions + ppt_pages
+ * rows for the courses
  * it owns. The page reassembles them in-memory by copying every shard's
  * rows into a single working SQL.Database. This avoids ATTACH'ing across
  * sql.js DB instances — sql.js doesn't support cross-file ATTACH cleanly,
@@ -45,6 +46,11 @@ async function _initFromBytes(dbBytes) {
   if (!dbBytes) _db.exec(_schemaSql());
   // Ensure new tables exist when loading a cached DB from an older version
   _db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
+  _db.exec(
+    "CREATE TABLE IF NOT EXISTS summary_versions (" +
+    "sub_id TEXT NOT NULL, model TEXT NOT NULL, summary TEXT NOT NULL, " +
+    "generated_at TEXT NOT NULL, PRIMARY KEY (sub_id, model, generated_at))"
+  );
 }
 
 async function _initEmpty() {
@@ -128,6 +134,7 @@ async function _attachShard(shardBytes) {
   try {
     _copyRows(shard, _db, "courses");
     _copyRows(shard, _db, "lectures");
+    if (shardTables["summary_versions"]) _copyRows(shard, _db, "summary_versions");
     _copyRows(shard, _db, "ppt_pages");
     _copyRows(shard, _db, "all_courses");
     if (shardTables["meta"]) _copyRows(shard, _db, "meta");

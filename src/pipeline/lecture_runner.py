@@ -41,6 +41,7 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 from src.ai import bucketer
+from src.ai.title import build_title_material, split_generated_title
 from src.pipeline.ppt_pipeline import PPTPipeline
 from src.ai.transcriber import IncompleteAudioError, NoAudioStreamError
 from src.runtime import config
@@ -367,14 +368,34 @@ class LectureRunner:
             self._reporter.info(
                 f"    [OK] Summary by {model_used}: {len(summary)} chars"
             )
-            self._db.update_summary(sub_id, summary, model_used)
-            return summary
+            # The prompt asks the model to lead with `# <title>`, so one call
+            # yields both summary and title (saves a second API request).
+            ai_title, body = split_generated_title(summary)
+            self._db.update_summary(sub_id, body, model_used)
+            self._save_ai_title(sub_id, ai_title, course_title, transcript, kept_pages)
+            return body
         except Exception as e:
             self._reporter.info(
                 f"    [FAIL] Summarization error: {type(e).__name__}: {e}"
             )
             self._db.update_error(sub_id, "summarize", str(e))
             raise
+
+    def _save_ai_title(self, sub_id: str, ai_title: str, course_title: str,
+                       transcript: str, kept_pages: list[dict]):
+        """Persist the note title.  It normally arrives embedded in the
+        summary output; only when missing do we spend a second, tiny call.
+        Any failure leaves the previous title untouched."""
+        try:
+            title = (ai_title or "").strip()
+            if not title:
+                material = build_title_material(course_title, transcript, kept_pages)
+                title, _title_model = self._summarizer.generate_title(material)
+            self._db.update_ai_title(sub_id, title)
+        except Exception as e:
+            self._reporter.info(
+                f"    [WARN] title generation failed: {type(e).__name__}: {e}"
+            )
 
     def _release_audio(self, sub_id: str):
         try:
