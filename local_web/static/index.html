@@ -4,6 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>iCourse 本地版</title>
+  <script>
+    // 首屏渲染前应用主题，避免日间/夜间切换时闪烁
+    (function () {
+      var saved = null;
+      try { saved = localStorage.getItem("icourse-local-theme"); } catch (_) {}
+      document.documentElement.dataset.theme = saved
+        || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    })();
+  </script>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -20,10 +29,14 @@
         <button class="nav-button" type="button" data-view="courses">课程</button>
         <button class="nav-button" type="button" data-view="search">搜索</button>
         <button class="nav-button" type="button" data-view="subscriptions">订阅</button>
+        <button class="nav-button" type="button" data-view="rerun">重跑</button>
         <button class="nav-button" type="button" data-view="automation">自动化</button>
         <button class="nav-button" type="button" data-view="settings">设置</button>
       </nav>
-      <button id="header-sync-button" class="icon-button header-action" type="button" aria-label="检查更新" title="检查更新">↻</button>
+      <div class="header-actions">
+        <button id="header-sync-button" class="icon-button" type="button" aria-label="检查更新" title="检查更新">↻</button>
+        <button id="theme-toggle" class="icon-button" type="button" aria-label="切换到夜间模式" title="切换到夜间模式">🌙</button>
+      </div>
     </div>
   </header>
 
@@ -59,14 +72,7 @@
       <section id="view-courses" class="view-pane content-column">
         <div class="view-heading">
           <div><h1>课程</h1></div>
-          <div class="heading-actions"><button id="course-bulk-toggle" type="button">批量重跑课程</button><button id="sync-button" class="primary" type="button">检查更新</button></div>
         </div>
-        <section id="course-bulk-panel" class="bulk-rerun-panel hidden" aria-label="批量重跑课程">
-          <span id="course-bulk-count" class="count-badge">已选 0 门</span>
-          <select id="course-bulk-model-select" aria-label="选择重跑模型"></select>
-          <button id="course-bulk-confirm" class="primary" type="button">重跑已选课程</button>
-          <button id="course-bulk-close" class="bulk-rerun-close" type="button" aria-label="退出批量重跑">×</button>
-        </section>
         <div class="course-zones" role="tablist" aria-label="课程分区">
           <button type="button" class="course-zone-button active" role="tab" aria-selected="true" data-course-zone="all">全部</button>
           <button type="button" class="course-zone-button" role="tab" aria-selected="false" data-course-zone="organize">整理区</button>
@@ -81,21 +87,15 @@
       <section id="view-lectures" class="view-pane content-column hidden">
         <div class="view-heading compact">
           <div><h1 id="course-title">课程</h1><p id="course-teacher" class="muted"></p></div>
-          <div class="heading-actions"><button id="lecture-bulk-toggle" type="button">批量重跑</button><button id="course-back-button" type="button">全部课程</button></div>
+          <div class="heading-actions"><button id="course-back-button" type="button">全部课程</button></div>
         </div>
-        <section id="lecture-bulk-panel" class="bulk-rerun-panel hidden" aria-label="批量重跑课次">
-          <span id="lecture-bulk-count" class="count-badge">已选 0 节</span>
-          <select id="lecture-bulk-model-select" aria-label="选择重跑模型"></select>
-          <button id="lecture-bulk-confirm" class="primary" type="button">重跑已选课次</button>
-          <button id="lecture-bulk-close" class="bulk-rerun-close" type="button" aria-label="退出批量重跑">×</button>
-        </section>
         <div id="lecture-list" class="lecture-list"></div>
       </section>
 
       <section id="view-detail" class="view-pane content-column hidden">
         <div class="view-heading compact">
-          <div><p id="detail-course" class="eyebrow-blue"></p><h1 id="detail-title">笔记</h1><p id="detail-subtitle" class="meta hidden"></p></div>
-          <div class="heading-actions"><button id="detail-rename" type="button">改名</button><button id="detail-back" type="button">课程课次</button></div>
+          <div><p id="detail-course" class="eyebrow-blue"></p><h1 id="detail-title" title="双击改名">笔记</h1><p id="detail-subtitle" class="meta hidden"></p></div>
+          <div class="heading-actions"><button id="detail-back" type="button">课程课次</button></div>
         </div>
         <div class="lecture-navigation">
           <button id="previous-lecture" type="button" disabled>← 上一节</button>
@@ -105,14 +105,8 @@
           <button class="detail-tab active" type="button" role="tab" aria-selected="true" data-detail-tab="summary">摘要</button>
           <button class="detail-tab" type="button" role="tab" aria-selected="false" data-detail-tab="transcript">转录</button>
           <button class="detail-tab" type="button" role="tab" aria-selected="false" data-detail-tab="ppt">PPT OCR</button>
-          <button id="rerun-summary-button" class="detail-rerun" type="button">选择模型重跑</button>
         </div>
         <section id="summary-version-controls" class="summary-version-controls hidden" aria-label="笔记版本对比"></section>
-        <section id="rerun-summary-panel" class="rerun-summary-panel hidden" aria-label="重新生成笔记">
-          <select id="rerun-model-select" aria-label="选择用于重新生成笔记的模型"></select>
-          <button id="rerun-summary-confirm" class="primary" type="button">开始重跑</button>
-          <button id="rerun-summary-close" class="bulk-rerun-close" type="button" aria-label="关闭">×</button>
-        </section>
         <article id="detail-content" class="detail-card"></article>
       </section>
 
@@ -123,14 +117,23 @@
       </section>
 
       <section id="view-subscriptions" class="view-pane content-wide hidden">
-        <div class="view-heading"><div><h1>订阅</h1></div><button id="subscription-save-button" class="primary" type="button">保存订阅</button></div>
+        <div class="view-heading"><div><h1>订阅</h1><p class="muted">在课程目录点击“订阅”即生效，无需再保存。</p></div></div>
         <div class="subscription-toolbar">
           <select id="subscription-term" aria-label="学期筛选"><option value="">全部学期</option></select>
           <input id="subscription-query" type="search" placeholder="搜索课程、教师或课程号" aria-label="搜索课程、教师或课程号" autocomplete="off">
         </div>
         <div class="subscription-layout">
           <section class="subscription-panel">
-            <div class="section-title"><h2>已订阅 <span id="subscription-count" class="count-badge">0</span></h2></div>
+            <div class="section-title">
+              <h2>已订阅 <span id="subscription-count" class="count-badge">0</span></h2>
+              <div class="subscription-sort-controls">
+                <select id="subscription-sort" aria-label="已订阅排序方式">
+                  <option value="time">按订阅时间</option>
+                  <option value="term">按学期</option>
+                </select>
+                <button id="subscription-sort-dir" type="button" aria-label="切换正序/倒序" title="切换正序/倒序">↑</button>
+              </div>
+            </div>
             <div id="subscription-list" class="subscription-list empty">尚未订阅课程。</div>
           </section>
           <section class="subscription-panel">
@@ -140,11 +143,21 @@
         </div>
       </section>
 
+      <section id="view-rerun" class="view-pane content-column hidden">
+        <div class="view-heading">
+          <div><h1>重跑</h1><p class="muted">勾选要用新模型重跑的课程；展开课程可只选部分课次。仅处理有转录的课次，单次最多 20 节。</p></div>
+        </div>
+        <div class="rerun-toolbar">
+          <select id="rerun-page-model-select" aria-label="选择重跑模型"></select>
+          <button id="rerun-page-submit" class="primary" type="button" disabled>重跑已选</button>
+        </div>
+        <div id="rerun-course-list" class="rerun-course-list empty">正在读取课程…</div>
+      </section>
+
       <section id="view-automation" class="view-pane content-column hidden">
         <div class="view-heading"><div><h1>自动化</h1></div></div>
         <section class="runs-card quick-actions-card">
           <div class="quick-actions">
-            <button id="automation-sync-button" class="primary" type="button">检查更新</button>
             <button id="run-button" type="button">立即检查课程</button>
             <button id="backfill-titles-button" type="button">补齐笔记标题</button>
             <button id="obsidian-button" type="button">打开同步页面</button>
@@ -186,6 +199,7 @@
     <button class="nav-button" type="button" data-view="courses">课程</button>
     <button class="nav-button" type="button" data-view="search">搜索</button>
     <button class="nav-button" type="button" data-view="subscriptions">订阅</button>
+    <button class="nav-button" type="button" data-view="rerun">重跑</button>
     <button class="nav-button" type="button" data-view="automation">自动化</button>
     <button class="nav-button" type="button" data-view="settings">设置</button>
   </nav>
