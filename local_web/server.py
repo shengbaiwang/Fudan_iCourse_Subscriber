@@ -684,8 +684,22 @@ def create_app(
         )
 
     @app.get("/api/local/search")
-    async def search(q: str, limit: int = 50):
-        return await run_in_threadpool(require_db().search, q, limit)
+    async def search(
+        q: str,
+        course_id: str = "",
+        domains: str = "",
+        page: int = 1,
+        page_size: int = 50,
+    ):
+        domain_list = [d.strip() for d in domains.split(",") if d.strip()] or None
+        return await run_in_threadpool(
+            require_db().search,
+            q,
+            course_id=course_id,
+            domains=domain_list,
+            page=page,
+            page_size=page_size,
+        )
 
     @app.get("/api/local/workflows")
     async def workflows():

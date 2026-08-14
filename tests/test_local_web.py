@@ -217,7 +217,9 @@ class DatabaseQueryTest(unittest.TestCase):
                 self.assertEqual(manager.courses()[0]["title"], "测试课程")
                 self.assertEqual(manager.lectures("1")[0]["sub_id"], "10")
                 self.assertEqual(manager.lecture("10")["summary"], "摘要关键词")
-                self.assertEqual(manager.search("关键词")[0]["hit_field"], "summary")
+                self.assertEqual(
+                    manager.search("关键词")["results"][0]["hit_field"], "summary"
+                )
                 self.assertEqual(manager.subscription_ids(), ["1", "2"])
                 self.assertEqual(manager.subscription_terms(), ["2026-秋"])
                 self.assertEqual(
@@ -236,6 +238,96 @@ class DatabaseQueryTest(unittest.TestCase):
                 )
                 self.assertEqual(detailed_notes[0]["transcript"], "转录关键词")
                 self.assertEqual(detailed_notes[0]["ocr_pages"][0]["text"], "OCR 关键词")
+            finally:
+                manager.close()
+
+    def _search_fixture(self, cache: Path) -> DatabaseManager:
+        manager = DatabaseManager(cache)
+        with closing(sqlite3.connect(manager.db_path)) as db:
+            db.executescript(SCHEMA_SQL)
+            db.execute("INSERT INTO courses VALUES ('1', '搜索课程', '教师')")
+            db.execute("INSERT INTO courses VALUES ('2', '另一门课', '老师')")
+            db.executemany(
+                """INSERT INTO lectures
+                   (sub_id, course_id, sub_title, date, transcript, summary,
+                    processed_at, summary_model)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    # 标题命中
+                    ("t1", "1", "贝叶斯定理", "2026-01-01", "", "无关键词",
+                     "2026-01-03", "m"),
+                    # 摘要命中：关键词藏在长文本中部且带 markdown 标记，
+                    # 验证片段居中且去除语法符号
+                    ("t2", "1", "第二讲", "2026-01-02",
+                     "", "开头" + "长" * 200 + "**贝叶斯**" + "尾" * 200,
+                     "2026-01-02", "m"),
+                    # 仅转录命中
+                    ("t3", "1", "第三讲", "2026-01-03", "转录里的贝叶斯", "",
+                     "2026-01-01", "m"),
+                    # 另一门课，仅摘要命中
+                    ("t4", "2", "第四讲", "2026-01-04", "", "贝叶斯主义", 
+                     "2026-01-04", "m"),
+                ],
+            )
+            db.execute(
+                """INSERT INTO ppt_pages (sub_id, page_num, created_sec, text, ocr_status)
+                   VALUES ('t3', 1, 10, 'PPT 上的贝叶斯公式', 'done')"""
+            )
+            db.commit()
+        manager.commit_sha = "fixture"
+        return manager
+
+    def test_search_title_snippet_keywords_and_ranking(self):
+        with tempfile.TemporaryDirectory() as cache:
+            manager = self._search_fixture(Path(cache))
+            try:
+                result = manager.search("贝叶斯")
+                self.assertEqual(result["total"], 4)
+                # 排序：标题 > 摘要 > 转录（同域按处理时间倒序：t4 在 t2 前）
+                self.assertEqual(
+                    [item["sub_id"] for item in result["results"]],
+                    ["t1", "t4", "t2", "t3"],
+                )
+                self.assertEqual(
+                    [item["hit_field"] for item in result["results"]],
+                    ["title", "summary", "summary", "transcript"],
+                )
+                # 片段居中：长摘要的片段应包含关键词而非只有开头；
+                # markdown 语法符号应被剥除
+                long_hit = next(
+                    r for r in result["results"] if r["sub_id"] == "t2"
+                )
+                self.assertIn("贝叶斯", long_hit["snippet"])
+                self.assertNotIn("*", long_hit["snippet"])
+                self.assertTrue(long_hit["snippet"].startswith("…"))
+                # 标题使用 AI/派生标题而非时间节次
+                self.assertTrue(long_hit["auto_title"].startswith("开头"))
+                t4_hit = next(
+                    r for r in result["results"] if r["sub_id"] == "t4"
+                )
+                self.assertEqual(t4_hit["auto_title"], "贝叶斯主义")
+                # 多关键词 AND
+                self.assertEqual(manager.search("贝叶斯 主义")["total"], 1)
+                self.assertEqual(manager.search("贝叶斯 不存在词")["total"], 0)
+                # 域过滤
+                titles = manager.search("贝叶斯", domains=["title"])
+                self.assertEqual([r["sub_id"] for r in titles["results"]], ["t1"])
+                ocr = manager.search("贝叶斯", domains=["ocr"])
+                self.assertEqual([r["sub_id"] for r in ocr["results"]], ["t3"])
+                self.assertIn("贝叶斯", ocr["results"][0]["snippet"])
+                # 课程过滤
+                scoped = manager.search("贝叶斯", course_id="2")
+                self.assertEqual([r["sub_id"] for r in scoped["results"]], ["t4"])
+                # 分页
+                first = manager.search("贝叶斯", page=1, page_size=2)
+                self.assertTrue(first["has_more"])
+                second = manager.search("贝叶斯", page=2, page_size=2)
+                self.assertFalse(second["has_more"])
+                self.assertEqual(first["total"], second["total"])
+                self.assertEqual(
+                    [r["sub_id"] for r in first["results"] + second["results"]],
+                    ["t1", "t4", "t2", "t3"],
+                )
             finally:
                 manager.close()
 

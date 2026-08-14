@@ -17,6 +17,9 @@ _TRANSCRIPT_LIMIT = 1500
 
 _TITLE_PREFIX_PATTERN = re.compile(r"^(标题|题目|课题|课题名)[:：]\s*")
 _WHITESPACE_PATTERN = re.compile(r"\s+")
+# 书名号（《》）不在此列：它们可能是标题中著作名的一部分（如“《折南漕议》研读”），
+# 不能无差别地从两端剥除，只在整标题被一对书名号包裹时才去除（见 clean_title）。
+_EDGE_MARKS = "「」『』“”‘’\"'<>*#、。：:，, "
 
 
 def clean_title(raw: str | None, *, max_length: int = 30) -> str:
@@ -24,14 +27,18 @@ def clean_title(raw: str | None, *, max_length: int = 30) -> str:
 
     Takes the first line, drops a leading "标题：" style prefix and
     surrounding quotes/brackets/markdown marks, collapses whitespace and
-    truncates to ``max_length`` characters.
+    truncates to ``max_length`` characters.  A pair of book-title marks
+    wrapping the whole title (《标题》) is unwrapped, but marks belonging
+    to a book name inside the title (《X》研读……) are kept.
     """
     text = str(raw or "").strip()
     if not text:
         return ""
     line = text.splitlines()[0].strip()
     line = _TITLE_PREFIX_PATTERN.sub("", line)
-    line = line.strip("「」『』“”‘’\"'《》<>*#、。：:，, ")
+    line = line.strip(_EDGE_MARKS)
+    if line.startswith("《") and line.endswith("》"):
+        line = line[1:-1].strip(_EDGE_MARKS)
     line = _WHITESPACE_PATTERN.sub(" ", line).strip()
     if not line:
         return ""

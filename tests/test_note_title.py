@@ -15,6 +15,16 @@ class CleanTitleTest(unittest.TestCase):
     def test_returns_empty_for_pure_punctuation(self):
         self.assertEqual(clean_title("《 》"), "")
 
+    def test_unwraps_book_title_marks_wrapping_whole_title(self):
+        self.assertEqual(clean_title("《梯度下降》"), "梯度下降")
+
+    def test_keeps_book_title_marks_of_book_names(self):
+        self.assertEqual(clean_title("《折南漕议》研读与漕运制度变革"), "《折南漕议》研读与漕运制度变革")
+        self.assertEqual(
+            clean_title("漕运变革史料研读：从《漏网喁鱼集》到《折南漕议》"),
+            "漕运变革史料研读：从《漏网喁鱼集》到《折南漕议》",
+        )
+
     def test_returns_empty_for_empty_input(self):
         self.assertEqual(clean_title(""), "")
         self.assertEqual(clean_title(None), "")
