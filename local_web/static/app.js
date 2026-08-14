@@ -77,6 +77,20 @@ function text(value) {
   return value == null || value === "" ? "—" : String(value);
 }
 
+function relativeTime(iso) {
+  if (!iso) return "";
+  const time = new Date(iso).getTime();
+  if (Number.isNaN(time)) return "";
+  const minutes = Math.floor((Date.now() - time) / 60000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} 天前`;
+  return new Date(time).toLocaleDateString();
+}
+
 function escapeHtml(value) {
   return String(value || "").replace(/[&<>"']/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -138,8 +152,41 @@ function _tableAlignments(delimiterLine) {
   });
 }
 
+function _stashFormulas(mdText) {
+  // Stash $...$ / $$...$$ / \(...\) / \[...\] before markdown processing so
+  // characters like * and _ inside LaTeX (P_n, D^*) aren't treated as emphasis.
+  const formulas = [];
+  const stash = (replacement) => {
+    const token = `\u0001${formulas.length}\u0002`;
+    formulas.push(replacement);
+    return token;
+  };
+  let text = String(mdText || "");
+  text = text.replace(/(\\\([\s\S]*?\\\))|(\\\[[\s\S]*?\\\])/g, (match) => stash(match));
+  text = text.replace(/\$\$([\s\S]+?)\$\$/g, (_match, formula) => stash(`\\[${formula}\\]`));
+  text = text.replace(/\$([^$\n]+?)\$/g, (_match, formula) => stash(`\\(${formula}\\)`));
+  return { text, formulas };
+}
+
+function _restoreFormulas(html, formulas) {
+  return html.replace(/\u0001(\d+)\u0002/g, (_match, index) => escapeHtml(formulas[Number(index)] || ""));
+}
+
+function activateMath(element) {
+  // No-op when the KaTeX CDN scripts failed to load (e.g. offline).
+  if (typeof renderMathInElement !== "function" || !element) return;
+  renderMathInElement(element, {
+    delimiters: [
+      { left: "\\[", right: "\\]", display: true },
+      { left: "\\(", right: "\\)", display: false },
+    ],
+    throwOnError: false,
+  });
+}
+
 function renderMarkdown(value) {
-  const lines = String(value || "").replace(/\r\n?/g, "\n").split("\n");
+  const stashed = _stashFormulas(value);
+  const lines = stashed.text.replace(/\r\n?/g, "\n").split("\n");
   const html = [];
   let paragraph = [];
   const flushParagraph = () => {
@@ -215,7 +262,8 @@ function renderMarkdown(value) {
     }
   }
   flushParagraph();
-  return html.join("") || "<p>暂无摘要</p>";
+  const rendered = html.join("");
+  return rendered ? _restoreFormulas(rendered, stashed.formulas) : "<p>暂无摘要</p>";
 }
 
 function createButton(label, onClick, className = "") {
@@ -410,18 +458,24 @@ async function loadCourses() {
     const title = document.createElement("strong");
     title.className = "course-title";
     title.textContent = course.title || course.course_id;
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    meta.textContent = text(course.teacher);
-    textBlock.append(title, meta);
+    textBlock.append(title);
+    const metaParts = [];
+    if (course.teacher) metaParts.push(String(course.teacher));
+    const updated = relativeTime(course.last_updated);
+    if (updated) metaParts.push(`${updated}更新`);
+    if (metaParts.length) {
+      const meta = document.createElement("p");
+      meta.className = "course-meta";
+      meta.textContent = metaParts.join(" · ");
+      textBlock.append(meta);
+    }
     open.append(textBlock);
     titleRow.append(open, star);
+    const aside = document.createElement("div");
+    aside.className = "course-aside";
     const count = document.createElement("span");
     count.className = "count-badge";
     count.textContent = `笔记 ${course.summary_count}/${course.total_count}`;
-    row.append(titleRow, count);
-    const footer = document.createElement("div");
-    footer.className = "course-card-footer";
     const zoneControl = document.createElement("label");
     zoneControl.className = "course-zone-select";
     const select = document.createElement("select");
@@ -431,10 +485,12 @@ async function loadCourses() {
     });
     select.onchange = () => moveCourseToZone(course.course_id, select.value, select);
     zoneControl.append(select);
-    footer.append(zoneControl);
-    card.append(row, footer);
+    aside.append(count, zoneControl);
+    row.append(titleRow, aside);
+    card.append(row);
     list.append(card);
   });
+  syncSearchCourseOptions();
 }
 
 async function openCourse(course) {
@@ -486,7 +542,7 @@ function renderLectureList() {
   });
 }
 
-async function openLecture(subId) {
+async function openLecture(subId, options = {}) {
   currentLecture = await api(`/api/local/lectures/${encodeURIComponent(subId)}`);
   if (!currentCourse || String(currentCourse.course_id) !== String(currentLecture.course_id)) {
     currentCourse = courseRows.find((course) => String(course.course_id) === String(currentLecture.course_id)) || {
@@ -503,11 +559,19 @@ async function openLecture(subId) {
     "hidden", !detailSubtitle || lectureDisplayName(currentLecture) === detailSubtitle
   );
   $("#detail-course").textContent = currentLecture.course_title || "";
-  detailTab = "summary";
+  // 搜索结果可指定落地 tab（命中转录/OCR 时直接打开对应内容）。
+  detailTab = ["summary", "transcript", "ppt"].includes(options.tab) ? options.tab : "summary";
   // Empty on purpose — renderSummaryVersions auto-selects the latest version.
   selectedSummaryVersionKeys = new Set();
   renderDetail();
   showView("detail");
+  // 搜索定位：高亮关键词并滚动到首个命中处。
+  if (Array.isArray(options.terms) && options.terms.length) {
+    const root = $("#detail-content");
+    applySearchHits(root, options.terms);
+    const first = root.querySelector("mark.search-hit");
+    if (first) first.scrollIntoView({ block: "center" });
+  }
 }
 
 function lectureState(lecture) {
@@ -598,7 +662,7 @@ function _textNodes(root, skipHighlights = false) {
     skipHighlights
       ? {
         acceptNode(node) {
-          return node.parentElement && node.parentElement.closest("mark.user-highlight")
+          return node.parentElement && node.parentElement.closest("mark.user-highlight, mark.search-hit")
             ? NodeFilter.FILTER_REJECT
             : NodeFilter.FILTER_ACCEPT;
         },
@@ -613,7 +677,8 @@ function _textNodes(root, skipHighlights = false) {
 
 // 把跨节点的 [start, end) 区间（按文本节点拼接偏移）逐段包进 <mark>。
 // 倒序处理：splitText 只影响当前节点之后的部分，前面节点的偏移保持有效。
-function _wrapOffsets(nodes, start, end) {
+// className 区分持久化的用户高亮（user-highlight）与搜索定位的临时高亮（search-hit）。
+function _wrapOffsets(nodes, start, end, className = "user-highlight") {
   let offset = 0;
   const segments = [];
   nodes.forEach((node) => {
@@ -630,8 +695,8 @@ function _wrapOffsets(nodes, start, end) {
     if (segEnd < node.data.length) node.splitText(segEnd);
     const mid = segStart > 0 ? node.splitText(segStart) : node;
     const mark = document.createElement("mark");
-    mark.className = "user-highlight";
-    mark.title = "点击后可取消高亮";
+    mark.className = className;
+    if (className === "user-highlight") mark.title = "点击后可取消高亮";
     mid.parentNode.replaceChild(mark, mid);
     mark.appendChild(mid);
   }
@@ -669,6 +734,23 @@ function applyStoredHighlights(root) {
   if (!currentLecture) return;
   highlightsFor(currentLecture.sub_id).forEach((snippet) => {
     _applyHighlightSnippet(root, snippet);
+  });
+}
+
+/* 搜索定位：把关键词在正文中的所有出现包成临时 <mark class="search-hit">
+   （不落盘、不参与用户高亮逻辑，重新渲染即消失），大小写不敏感。 */
+function applySearchHits(root, terms) {
+  terms.forEach((term) => {
+    const needle = String(term || "").toLowerCase();
+    if (!needle) return;
+    for (let guard = 0; guard < 200; guard += 1) {
+      const nodes = _textNodes(root, true);
+      let full = "";
+      nodes.forEach((node) => { full += node.data; });
+      const index = full.toLowerCase().indexOf(needle);
+      if (index === -1) break;
+      _wrapOffsets(nodes, index, index + needle.length, "search-hit");
+    }
   });
 }
 
@@ -845,6 +927,7 @@ function renderSummaryVersions(root) {
   if (!versions.length) {
     controls.classList.add("hidden");
     root.innerHTML = `<div class="summary">${renderMarkdown(currentLecture.summary)}</div>`;
+    activateMath(root);
     return;
   }
   if (!selectedSummaryVersionKeys.size) selectedSummaryVersionKeys.add(versions[0].key);
@@ -902,6 +985,7 @@ function renderSummaryVersions(root) {
     grid.append(panel);
   });
   root.append(grid);
+  activateMath(root);
 }
 
 async function populateRerunModelSelect(selector, refresh = false) {
@@ -1113,7 +1197,7 @@ function renderSubscriptionCourse(course, action, label) {
   meta.className = "meta";
   meta.textContent = [course.teacher, course.dept, course.term, course.course_id].filter(Boolean).join(" · ");
   content.append(title, meta);
-  const button = createButton(label, action, "subscription-action");
+  const button = createButton(label, action, `subscription-action ${label === "移除" ? "remove" : "add"}`);
   button.setAttribute("aria-label", `${label}${course.title || course.course_id}`);
   row.append(content, button);
   return row;
@@ -1284,14 +1368,16 @@ function showView(view, options = {}) {
   };
   Object.entries(paneIds).forEach(([name, id]) => $("#" + id).classList.toggle("hidden", name !== view));
   const title = {
-    courses: "iCourse", lectures: currentCourse?.title || "课程", detail: currentLecture?.sub_title || "笔记",
+    courses: "iCourse", lectures: currentCourse?.title || "课程", detail: currentLecture ? lectureDisplayName(currentLecture) : "笔记",
     search: "搜索", subscriptions: "订阅", rerun: "重跑",
     automation: "自动化", settings: "设置", models: "模型与 API", obsidian: "同步到 Obsidian",
   }[view] || "iCourse";
   $("#page-title").textContent = title;
-  $("#back-button").classList.toggle("hidden", !["lectures", "detail", "models", "obsidian"].includes(view));
-  // Lectures/detail are depths of the courses path — keep 课程 highlighted.
-  const navView = ["lectures", "detail"].includes(view) ? "courses" : view;
+  $("#back-button").classList.toggle("hidden", !["lectures", "detail", "models", "obsidian", "rerun", "automation"].includes(view));
+  // Lectures/detail are depths of the courses path — keep 课程 highlighted;
+  // rerun/automation live under 设置 now.
+  const navView = ["lectures", "detail"].includes(view) ? "courses"
+    : ["rerun", "automation", "models", "obsidian"].includes(view) ? "settings" : view;
   document.querySelectorAll(".nav-button").forEach((button) => {
     const active = button.dataset.view === navView;
     button.classList.toggle("active", active);
@@ -1779,11 +1865,16 @@ async function syncObsidianPlan() {
    data-theme 已在 <head> 内联脚本中早于首屏设置，这里只负责按钮状态与切换。 */
 const THEME_KEY = "icourse-local-theme";
 
+const THEME_ICONS = {
+  moon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
+  sun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+};
+
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   const button = $("#theme-toggle");
   const dark = theme === "dark";
-  button.textContent = dark ? "☀️" : "🌙";
+  button.innerHTML = dark ? THEME_ICONS.sun : THEME_ICONS.moon;
   const label = dark ? "切换到日间模式" : "切换到夜间模式";
   button.setAttribute("aria-label", label);
   button.title = label;
@@ -2035,52 +2126,132 @@ $("#subscription-query").oninput = () => {
   subscriptionTimer = setTimeout(() => loadSubscriptionCatalog().catch((error) => message(error.message, true)), 240);
 };
 $("#settings-obsidian-button").onclick = () => $("#obsidian-button").click();
+$("#settings-rerun-button").onclick = async () => {
+  showView("rerun");
+  try { await loadRerunView(); }
+  catch (error) { message(error.message, true); }
+};
+$("#settings-automation-button").onclick = () => showView("automation");
 $("#refresh-runs-button").onclick = () => loadRuns().catch((error) => message(error.message, true));
 
-$("#search").oninput = (event) => {
-  clearTimeout(searchTimer);
-  const query = event.target.value.trim();
+/* ── 搜索：多关键词 AND、域/课程过滤、分页 ── */
+const SEARCH_DOMAIN_LABELS = { title: "标题", summary: "摘要", transcript: "转录", ocr: "OCR" };
+const searchActiveDomains = new Set(Object.keys(SEARCH_DOMAIN_LABELS));
+let searchPage = 1;
+let searchHasMore = false;
+
+function searchTerms() {
+  return $("#search").value.trim().split(/\s+/).filter(Boolean);
+}
+
+function resetSearchResults(messageText) {
+  const root = $("#search-results");
+  root.replaceChildren();
+  root.className = "search-results empty";
+  root.textContent = messageText;
+  $("#search-meta").classList.add("hidden");
+  $("#search-more").classList.add("hidden");
+  searchPage = 1;
+  searchHasMore = false;
+}
+
+// 片段与关键词都先转义 HTML 再插 <mark>，正则特殊字符需二次转义。
+function highlightSearchSnippet(snippet, terms) {
+  let html = escapeHtml(snippet);
+  terms.forEach((term) => {
+    const safe = escapeHtml(term).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (safe) html = html.replace(new RegExp("(" + safe + ")", "gi"), "<mark>$1</mark>");
+  });
+  return html;
+}
+
+function renderSearchResultItem(item, terms) {
+  const button = document.createElement("button");
+  button.className = "search-card";
+  const row = document.createElement("div");
+  row.className = "search-row";
+  const left = document.createElement("div");
+  const course = document.createElement("p");
+  course.textContent = item.course_title || item.course_id;
+  const title = document.createElement("h2");
+  // 与课次列表一致：自定义改名 > AI/派生标题 > 原始节次
+  title.textContent = lectureNames[String(item.sub_id)]
+    || item.auto_title || item.sub_title || item.sub_id;
+  const snippet = document.createElement("p");
+  snippet.innerHTML = highlightSearchSnippet(item.snippet || "", terms);
+  left.append(course, title, snippet);
+  const hit = document.createElement("span");
+  hit.className = "count-badge";
+  hit.textContent = SEARCH_DOMAIN_LABELS[item.hit_field] || "摘要";
+  row.append(left, hit);
+  button.append(row);
+  // 命中哪里就打开哪个 tab，并定位到关键词在原文中的位置。
+  const tab = { transcript: "transcript", ocr: "ppt" }[item.hit_field] || "summary";
+  button.onclick = () => openLecture(item.sub_id, { tab, terms });
+  return button;
+}
+
+async function runSearch(page) {
+  const query = $("#search").value.trim();
   if (!query) {
-    const root = $("#search-results");
-    root.textContent = "输入关键词后开始搜索。";
-    root.className = "search-results empty";
+    resetSearchResults("输入关键词后开始搜索。");
     return;
   }
-  searchTimer = setTimeout(async () => {
-    try {
-      const results = await api(`/api/local/search?q=${encodeURIComponent(query)}`);
-      const root = $("#search-results");
-      root.replaceChildren();
-      root.classList.remove("empty");
-      results.forEach((item) => {
-        const button = document.createElement("button");
-        button.className = "search-card";
-        const row = document.createElement("div");
-        row.className = "search-row";
-        const left = document.createElement("div");
-        const course = document.createElement("p");
-        course.textContent = item.course_title || item.course_id;
-        const title = document.createElement("h2");
-        title.textContent = lectureNames[String(item.sub_id)] || item.sub_title || item.sub_id;
-        const snippet = document.createElement("p");
-        snippet.textContent = item.snippet || item.hit_field;
-        left.append(course, title, snippet);
-        const hit = document.createElement("span");
-        hit.className = "count-badge";
-        hit.textContent = item.hit_field === "ocr" ? "OCR" : item.hit_field === "transcript" ? "转录" : "摘要";
-        row.append(left, hit);
-        button.append(row);
-        button.onclick = () => openLecture(item.sub_id);
-        root.append(button);
-      });
-      if (!results.length) {
-        root.textContent = "没有找到匹配内容。";
-        root.classList.add("empty");
-      }
-    } catch (error) {
-      message(error.message, true);
+  const terms = searchTerms();
+  const params = new URLSearchParams({ q: query, page: String(page), page_size: "50" });
+  const courseId = $("#search-course").value;
+  if (courseId) params.set("course_id", courseId);
+  params.set("domains", [...searchActiveDomains].join(","));
+  try {
+    const result = await api(`/api/local/search?${params}`);
+    if (!result.total) {
+      resetSearchResults("没有找到匹配内容。");
+      return;
     }
-  }, 300);
+    const root = $("#search-results");
+    if (page <= 1) root.replaceChildren();
+    root.classList.remove("empty");
+    result.results.forEach((item) => root.append(renderSearchResultItem(item, terms)));
+    searchPage = result.page;
+    searchHasMore = result.has_more;
+    const meta = $("#search-meta");
+    meta.textContent = `共 ${result.total} 条结果`;
+    meta.classList.remove("hidden");
+    $("#search-more").classList.toggle("hidden", !searchHasMore);
+  } catch (error) {
+    message(error.message, true);
+  }
+}
+
+// 课程下拉的选项跟随课程列表重建，保留当前选择。
+function syncSearchCourseOptions() {
+  const select = $("#search-course");
+  const selected = select.value;
+  select.replaceChildren(new Option("全部课程", ""));
+  courseRows.forEach((course) => {
+    select.append(new Option(course.title || course.course_id, String(course.course_id)));
+  });
+  select.value = courseRows.some((c) => String(c.course_id) === selected) ? selected : "";
+}
+
+$("#search").oninput = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => runSearch(1), 300);
+};
+$("#search-course").onchange = () => runSearch(1);
+document.querySelectorAll(".search-domain").forEach((button) => {
+  button.onclick = () => {
+    const domain = button.dataset.domain;
+    // 至少保留一个搜索域
+    if (searchActiveDomains.has(domain) && searchActiveDomains.size === 1) return;
+    if (searchActiveDomains.has(domain)) searchActiveDomains.delete(domain);
+    else searchActiveDomains.add(domain);
+    button.classList.toggle("active", searchActiveDomains.has(domain));
+    runSearch(1);
+  };
+});
+$("#search-more").onclick = () => {
+  if (searchHasMore) runSearch(searchPage + 1);
 };
 
 refreshStatus().catch((error) => message(`无法连接本地服务：${error.message}`, true));

@@ -13,6 +13,7 @@
         || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     })();
   </script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -29,8 +30,6 @@
         <button class="nav-button" type="button" data-view="courses">课程</button>
         <button class="nav-button" type="button" data-view="search">搜索</button>
         <button class="nav-button" type="button" data-view="subscriptions">订阅</button>
-        <button class="nav-button" type="button" data-view="rerun">重跑</button>
-        <button class="nav-button" type="button" data-view="automation">自动化</button>
         <button class="nav-button" type="button" data-view="settings">设置</button>
       </nav>
       <div class="header-actions">
@@ -112,8 +111,19 @@
 
       <section id="view-search" class="view-pane content-column hidden">
         <div class="view-heading"><div><h1>搜索</h1></div></div>
-        <label class="search-field"><span>⌕</span><input id="search" type="search" placeholder="搜索你的课程资料" aria-label="搜索课程资料" autocomplete="off"></label>
+        <label class="search-field"><span>⌕</span><input id="search" type="search" placeholder="搜索标题、摘要、转录、OCR，空格分隔多个关键词" aria-label="搜索课程资料" autocomplete="off"></label>
+        <div class="search-filters">
+          <select id="search-course" aria-label="按课程筛选"><option value="">全部课程</option></select>
+          <div class="search-domains" role="group" aria-label="搜索范围">
+            <button type="button" class="search-domain active" data-domain="title">标题</button>
+            <button type="button" class="search-domain active" data-domain="summary">摘要</button>
+            <button type="button" class="search-domain active" data-domain="transcript">转录</button>
+            <button type="button" class="search-domain active" data-domain="ocr">OCR</button>
+          </div>
+        </div>
+        <p id="search-meta" class="search-meta hidden"></p>
         <div id="search-results" class="search-results empty">输入关键词后开始搜索。</div>
+        <button id="search-more" class="hidden" type="button">加载更多</button>
       </section>
 
       <section id="view-subscriptions" class="view-pane content-wide hidden">
@@ -170,6 +180,7 @@
         <div class="view-heading"><div><h1>设置</h1></div></div>
         <section class="settings-card"><h2>当前连接</h2><p id="settings-repository" class="mono-value">—</p><div class="settings-actions"><button id="configure-button" type="button">重新配置会话</button><button id="forget-credentials-button" class="danger" type="button">忘记本机登录</button></div></section>
         <section class="settings-card"><h2>管理</h2><div class="settings-actions"><button id="model-button" class="primary" type="button">打开模型管理</button><button id="settings-obsidian-button" type="button">打开 Obsidian 同步</button></div></section>
+        <section class="settings-card"><h2>工具</h2><div class="settings-actions"><button id="settings-rerun-button" type="button">重跑笔记</button><button id="settings-automation-button" type="button">自动化运行</button></div></section>
       </section>
 
       <section id="model-management" class="view-pane content-wide hidden" aria-labelledby="model-management-title">
@@ -199,10 +210,10 @@
     <button class="nav-button" type="button" data-view="courses">课程</button>
     <button class="nav-button" type="button" data-view="search">搜索</button>
     <button class="nav-button" type="button" data-view="subscriptions">订阅</button>
-    <button class="nav-button" type="button" data-view="rerun">重跑</button>
-    <button class="nav-button" type="button" data-view="automation">自动化</button>
     <button class="nav-button" type="button" data-view="settings">设置</button>
   </nav>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>
