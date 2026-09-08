@@ -30,6 +30,21 @@ def _ensure_schema(conn: sqlite3.Connection):
     for col, typedef in PPT_PAGES_MIGRATION_COLUMNS:
         if col not in existing_ppt:
             conn.execute(f"ALTER TABLE ppt_pages ADD COLUMN {col} {typedef}")
+    _backfill_summary_versions(conn, "main")
+
+
+def _backfill_summary_versions(conn: sqlite3.Connection, schema: str):
+    """Seed model versions from legacy active summaries when needed."""
+    conn.execute(
+        f"""INSERT OR IGNORE INTO {schema}.summary_versions
+               (sub_id, model, summary, generated_at)
+           SELECT sub_id,
+                  COALESCE(NULLIF(summary_model, ''), 'unknown'),
+                  summary,
+                  COALESCE(NULLIF(processed_at, ''), datetime('now'))
+           FROM {schema}.lectures
+           WHERE TRIM(COALESCE(summary, '')) != ''"""
+    )
 
 
 def _migrate_attached(conn: sqlite3.Connection, schema: str):
@@ -54,6 +69,19 @@ def _migrate_attached(conn: sqlite3.Connection, schema: str):
                 conn.execute(
                     f"ALTER TABLE {schema}.{table} ADD COLUMN {col} {typedef}"
                 )
+    # ATTACHed databases can be written to during a merge.  Creating the
+    # comparison table here lets a newly deployed workflow safely merge a
+    # database produced by an older workflow too.
+    conn.execute(
+        f"""CREATE TABLE IF NOT EXISTS {schema}.summary_versions (
+                sub_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                PRIMARY KEY (sub_id, model)
+            )"""
+    )
+    _backfill_summary_versions(conn, schema)
 
 
 def merge(local_path: str, remote_path: str):
@@ -110,6 +138,21 @@ def merge(local_path: str, remote_path: str):
                     END
                 FROM local.lectures l
                 WHERE main.lectures.sub_id = l.sub_id
+            """)
+
+            # Versions are independent of the current active summary.  This
+            # makes concurrent reruns with different models additive rather
+            # than one silently overwriting the other at deployment time.
+            conn.execute("""
+                INSERT INTO main.summary_versions
+                    (sub_id, model, summary, generated_at)
+                SELECT sub_id, model, summary, generated_at
+                FROM local.summary_versions
+                WHERE true
+                ON CONFLICT(sub_id, model) DO UPDATE SET
+                    summary = excluded.summary,
+                    generated_at = excluded.generated_at
+                WHERE excluded.generated_at >= main.summary_versions.generated_at
             """)
 
             # 4) PPT pages: insert local-only rows.  Existing rows are left

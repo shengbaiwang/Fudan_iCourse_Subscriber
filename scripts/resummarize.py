@@ -3,7 +3,8 @@
 
 This deliberately does not log in to iCourse or instantiate ASR/OCR.  A
 rerun consumes the transcript and accepted PPT OCR already in the encrypted
-database, then replaces only ``summary`` and ``summary_model``.
+database, updates the active ``summary`` / ``summary_model``, and retains one
+comparison version for the selected model.
 """
 
 from __future__ import annotations

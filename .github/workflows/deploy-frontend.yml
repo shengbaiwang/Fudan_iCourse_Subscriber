@@ -3,7 +3,7 @@ name: Deploy Frontend
 on:
   push:
     branches: [main]
-    paths: ['frontend/**']
+    paths: ['local_web/static/**', 'frontend/**', 'scripts/build_frontend.py', '.github/workflows/deploy-frontend.yml']
   workflow_dispatch:
     inputs:
       branch:
@@ -35,13 +35,16 @@ jobs:
         with:
           ref: ${{ inputs.branch || github.ref }}
 
+      - name: Build shared console
+        run: python3 scripts/build_frontend.py
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./frontend
+          path: ./dist/frontend
 
       - name: Deploy to GitHub Pages
         id: deployment

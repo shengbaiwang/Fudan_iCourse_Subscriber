@@ -54,6 +54,20 @@ class Database:
                         f"ALTER TABLE lectures ADD COLUMN {col} {typedef}"
                     )
 
+            # Upgrade existing notes into the comparison library on first
+            # startup after the feature is introduced.  A later rerun with
+            # the same model intentionally refreshes that model's version.
+            self.conn.execute(
+                """INSERT OR IGNORE INTO summary_versions
+                       (sub_id, model, summary, generated_at)
+                   SELECT sub_id,
+                          COALESCE(NULLIF(summary_model, ''), 'unknown'),
+                          summary,
+                          COALESCE(NULLIF(processed_at, ''), datetime('now'))
+                   FROM lectures
+                   WHERE TRIM(COALESCE(summary, '')) != ''"""
+            )
+
             existing_ppt = {
                 row[1]
                 for row in self.conn.execute(
@@ -388,13 +402,23 @@ class Database:
         return int(row[0]) if row and row[0] is not None else 0
 
     def update_summary(self, sub_id: str, summary: str, model: str):
-        """Save summary and model name."""
+        """Save the active summary and the model's comparison version."""
+        generated_at = datetime.now().isoformat()
         with self._lock, self.conn:
             self.conn.execute(
                 """UPDATE lectures
                    SET summary = ?, summary_model = ?
                    WHERE sub_id = ?""",
                 (summary, model, sub_id),
+            )
+            self.conn.execute(
+                """INSERT INTO summary_versions
+                       (sub_id, model, summary, generated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(sub_id, model) DO UPDATE SET
+                       summary=excluded.summary,
+                       generated_at=excluded.generated_at""",
+                (sub_id, model or "unknown", summary, generated_at),
             )
 
     def get_lecture(self, sub_id: str) -> dict | None:

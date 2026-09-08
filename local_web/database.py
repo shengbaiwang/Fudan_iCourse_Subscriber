@@ -183,7 +183,7 @@ class DatabaseManager:
                 "SELECT COUNT(*) FROM lectures WHERE summary IS NOT NULL"
             ).fetchone()[0]
             failed = db.execute(
-                "SELECT COUNT(*) FROM lectures WHERE error_stage IS NOT NULL"
+                "SELECT COUNT(*) FROM lectures WHERE error_stage IS NOT NULL AND error_stage != 'no_video'"
             ).fetchone()[0]
         return {
             "commit_sha": self.commit_sha,
@@ -211,12 +211,25 @@ class DatabaseManager:
         sql = """
             SELECT sub_id, course_id, sub_title, date, processed_at,
                    error_stage, error_msg, summary_model,
-                   CASE WHEN summary IS NOT NULL THEN 1 ELSE 0 END AS has_summary
+                   CASE WHEN summary IS NOT NULL THEN 1 ELSE 0 END AS has_summary,
+                   CASE WHEN TRIM(COALESCE(transcript, '')) != ''
+                        THEN 1 ELSE 0 END AS transcript_available
             FROM lectures WHERE course_id = ?
             ORDER BY COALESCE(date, ''), sub_title
         """
         with closing(self._connect()) as db:
             return [dict(row) for row in db.execute(sql, (course_id,))]
+
+    def rerunnable_lecture_ids(self, course_id: str) -> list[str]:
+        """Return a course's lectures which have material for a summary rerun."""
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                """SELECT sub_id FROM lectures
+                   WHERE course_id = ? AND TRIM(COALESCE(transcript, '')) != ''
+                   ORDER BY COALESCE(date, ''), sub_title, sub_id""",
+                (course_id,),
+            )
+            return [str(row["sub_id"]) for row in rows]
 
     def lecture(self, sub_id: str) -> dict[str, Any] | None:
         sql = """
@@ -229,6 +242,25 @@ class DatabaseManager:
             if not row:
                 return None
             result = dict(row)
+            has_versions = db.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type = 'table' AND name = 'summary_versions'"""
+            ).fetchone()
+            if has_versions:
+                result["summary_versions"] = [
+                    dict(version)
+                    for version in db.execute(
+                        """SELECT model, summary, generated_at
+                           FROM summary_versions
+                           WHERE sub_id = ?
+                           ORDER BY generated_at DESC, model""",
+                        (sub_id,),
+                    )
+                ]
+            else:
+                # The deployed data branch may still contain a pre-version
+                # database while an updated local console is already open.
+                result["summary_versions"] = []
             result["ppt_pages"] = [
                 dict(page)
                 for page in db.execute(
@@ -289,29 +321,52 @@ class DatabaseManager:
             note["ocr_pages"] = pages_by_sub_id[str(note["sub_id"])]
         return notes
 
-    def search(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
-        needle = f"%{query.strip()}%"
-        if needle == "%%":
+    def search(
+        self, query: str, limit: int = 50, *, page: int = 1,
+        course_ids: list[str] | None = None,
+        summary: bool = True, transcript: bool = True, ocr: bool = True,
+    ) -> list[dict[str, Any]]:
+        if not query.strip() or not any((summary, transcript, ocr)):
             return []
-        sql = """
+        needle = f"%{query.strip()}%"
+        conditions = []
+        domains = []
+        if summary:
+            conditions.append("l.summary LIKE ?")
+            domains.append("summary")
+        if transcript:
+            conditions.append("l.transcript LIKE ?")
+            domains.append("transcript")
+        if ocr:
+            conditions.append("EXISTS (SELECT 1 FROM ppt_pages p WHERE p.sub_id = l.sub_id AND p.ocr_status = 'done' AND p.text LIKE ?)")
+            domains.append("ocr")
+        cases = " ".join(f"WHEN {condition} THEN '{domain}'" for condition, domain in zip(conditions, domains))
+        filters = " OR ".join(conditions)
+        params: list[Any] = [needle, *([needle] * len(conditions) * 2)]
+        if course_ids:
+            filters = f"({filters}) AND l.course_id IN ({','.join('?' for _ in course_ids)})"
+            params.extend(course_ids)
+        page_size = max(1, min(limit, 100))
+        params.extend([page_size, (max(1, page) - 1) * page_size])
+        sql = f"""
             SELECT l.sub_id, l.sub_title, l.course_id, c.title AS course_title,
-                   CASE
-                     WHEN l.summary LIKE ? THEN 'summary'
-                     WHEN l.transcript LIKE ? THEN 'transcript'
-                     ELSE 'ocr'
-                   END AS hit_field,
-                   substr(COALESCE(l.summary, l.transcript, ''), 1, 240) AS snippet
+                   l.summary, l.transcript,
+                   (SELECT p.text FROM ppt_pages p WHERE p.sub_id = l.sub_id
+                    AND p.ocr_status = 'done' AND p.text LIKE ? LIMIT 1) AS ppt_text,
+                   CASE {cases} ELSE 'other' END AS hit_field
             FROM lectures l JOIN courses c ON c.course_id = l.course_id
-            WHERE l.summary LIKE ? OR l.transcript LIKE ? OR EXISTS (
-                SELECT 1 FROM ppt_pages p
-                WHERE p.sub_id = l.sub_id AND p.text LIKE ?
-            )
-            ORDER BY l.processed_at DESC
-            LIMIT ?
+            WHERE {filters}
+            ORDER BY l.processed_at DESC, l.sub_id DESC LIMIT ? OFFSET ?
         """
-        params = (needle, needle, needle, needle, needle, max(1, min(limit, 100)))
         with closing(self._connect()) as db:
-            return [dict(row) for row in db.execute(sql, params)]
+            results = [dict(row) for row in db.execute(sql, params)]
+        for row in results:
+            content = str(row.get('ppt_text' if row['hit_field'] == 'ocr' else row['hit_field']) or '')
+            start = max(0, content.lower().find(query.strip().lower()) - 70)
+            row['snippet'] = content[start:start + 240]
+            for field in ('summary', 'transcript', 'ppt_text'):
+                row.pop(field, None)
+        return results
 
     def subscription_ids(self) -> list[str]:
         """Return the last subscription snapshot published with the data DB.

@@ -1,11 +1,11 @@
 /**
- * MIRRORS src/schema.py — keep in sync.
+ * MIRRORS src/data/schema.py — keep in sync.
  *
  * When you change SCHEMA_SQL or add a migration column on the Python side,
  * update the same content here.  There is no automated sync; the browser
  * builds an in-memory shard set from the same shape the CI runner ships.
  *
- * Differences from src/schema.py: foreign-key clauses and the
+ * Differences from src/data/schema.py: foreign-key clauses and the
  * idx_ppt_pages_sub_status index are dropped because sql.js does not
  * enforce FKs by default and the frontend's row counts are too small for
  * the index to matter.
@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS lectures (
     processed_at TEXT, emailed_at TEXT,
     error_msg TEXT, error_count INTEGER DEFAULT 0,
     error_stage TEXT, summary_model TEXT
+);
+CREATE TABLE IF NOT EXISTS summary_versions (
+    sub_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    PRIMARY KEY (sub_id, model)
 );
 CREATE TABLE IF NOT EXISTS ppt_pages (
     sub_id TEXT NOT NULL,

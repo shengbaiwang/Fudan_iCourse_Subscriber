@@ -2,7 +2,8 @@
  * sql.js wrapper — load lecture data from sharded encrypted shards.
  *
  * In the sharded layout (current), each shard is a self-contained sqlite
- * file holding only the courses + lectures + ppt_pages rows for the courses
+ * file holding only the courses + lectures + summary_versions + ppt_pages
+ * rows for the courses
  * it owns. The page reassembles them in-memory by copying every shard's
  * rows into a single working SQL.Database. This avoids ATTACH'ing across
  * sql.js DB instances — sql.js doesn't support cross-file ATTACH cleanly,
@@ -21,11 +22,11 @@ let _SQL = null;
 
 function _schemaSql() {
   // schema.js loads before this file via index.html and registers the SQL
-  // on window.ICS.schema so backend (src/schema.py) and frontend share one
+  // on window.ICS.schema so backend (src/data/schema.py) and frontend share one
   // source of truth.  Throw early if it's missing — silent NULL would
   // produce "no such table" later, which is a worse failure mode.
   var s = window.ICS && window.ICS.schema && window.ICS.schema.SCHEMA_SQL;
-  if (!s) throw new Error("ICS.schema.SCHEMA_SQL missing — load js/schema.js first");
+  if (!s) throw new Error("ICS.schema.SCHEMA_SQL missing — load browser/schema.js first");
   return s;
 }
 
@@ -41,14 +42,21 @@ async function _initFromBytes(dbBytes) {
   // Legacy path — accepts a single monolithic sqlite file.
   // Kept so older deployments (pre-shard data branch) still load.
   const SQL = await _ensureSqlJs();
+  if (_db) _db.close();
   _db = dbBytes ? new SQL.Database(dbBytes) : new SQL.Database();
   if (!dbBytes) _db.exec(_schemaSql());
   // Ensure new tables exist when loading a cached DB from an older version
   _db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
+  _db.exec(
+    "CREATE TABLE IF NOT EXISTS summary_versions (" +
+    "sub_id TEXT NOT NULL, model TEXT NOT NULL, summary TEXT NOT NULL, " +
+    "generated_at TEXT NOT NULL, PRIMARY KEY (sub_id, model))"
+  );
 }
 
 async function _initEmpty() {
   const SQL = await _ensureSqlJs();
+  if (_db) _db.close();
   _db = new SQL.Database();
   _db.exec(_schemaSql());
   _db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
@@ -128,6 +136,7 @@ async function _attachShard(shardBytes) {
   try {
     _copyRows(shard, _db, "courses");
     _copyRows(shard, _db, "lectures");
+    if (shardTables["summary_versions"]) _copyRows(shard, _db, "summary_versions");
     _copyRows(shard, _db, "ppt_pages");
     _copyRows(shard, _db, "all_courses");
     if (shardTables["meta"]) _copyRows(shard, _db, "meta");
@@ -216,6 +225,8 @@ function _getLectures(courseId) {
   });
   return rows.map((r) => {
     r.state = _deriveState(r);
+    r.has_summary = r.summary !== null;
+    r.transcript_available = Boolean(String(r.transcript || '').trim());
     delete r.transcript;
     return r;
   });
@@ -449,6 +460,9 @@ function _getMeta(key) {
 }
 
 window.ICS.db = {
+  close: () => { if (_db) _db.close(); _db = null; },
+  queryAll: _queryAll,
+  getSummaryVersions: subId => _queryAll("SELECT model, summary, generated_at FROM summary_versions WHERE sub_id = ? ORDER BY generated_at DESC, model", [subId]),
   initDB: _initFromBytes,
   initEmpty: _initEmpty,
   attachShard: _attachShard,

@@ -4,7 +4,7 @@ This module is imported by every Python component that creates or migrates
 the database (Database, sharder, merge_db) so the column list lives in
 exactly one place.
 
-frontend/js/schema.js is a **manual mirror** of these constants.  When you
+local_web/static/browser/schema.js is a **manual mirror** of these constants.  When you
 change SCHEMA_SQL, LECTURES_MIGRATION_COLUMNS, or PPT_PAGES_MIGRATION_COLUMNS
 here, update that file too — there is no automated sync.  Both run in
 different processes (Python on the CI runner, JS in the browser) and have
@@ -30,6 +30,19 @@ CREATE TABLE IF NOT EXISTS lectures (
     error_stage TEXT, summary_model TEXT,
     FOREIGN KEY (course_id) REFERENCES courses(course_id)
 );
+-- A lecture's current summary remains on ``lectures`` for compatibility
+-- with email/export.  This table keeps one current version per model so
+-- people can compare model output without losing a previous rerun.
+CREATE TABLE IF NOT EXISTS summary_versions (
+    sub_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    PRIMARY KEY (sub_id, model),
+    FOREIGN KEY (sub_id) REFERENCES lectures(sub_id)
+);
+CREATE INDEX IF NOT EXISTS idx_summary_versions_sub_generated
+    ON summary_versions(sub_id, generated_at DESC);
 CREATE TABLE IF NOT EXISTS ppt_pages (
     sub_id TEXT NOT NULL,
     page_num INTEGER NOT NULL,
