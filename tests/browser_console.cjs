@@ -26,7 +26,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   database.run("INSERT INTO meta VALUES ('subscribed_course_ids','1')");
   database.run("INSERT INTO lectures(sub_id,course_id,sub_title,summary,transcript,processed_at,summary_model) VALUES ('10','1','2026-03-09第11-12节', '# 导论\n\n**理论**与实践。<script>window.pwned=1</script>','专属转录关键词','2026-09-08','test/model-a'), ('11','1','2026-03-09第6-8节','第二篇笔记','第二份转录','2026-09-07','test/model-b')");
   database.run("INSERT INTO lectures(sub_id,course_id,sub_title,error_stage) VALUES ('12','1','2026-03-10第1-2节','no_video')");
-  database.run("INSERT INTO summary_versions VALUES ('10','test/model-a','# 导论\n\n理论与实践','2026-09-08'), ('10','test/model-b','# 另一个版本\n\n观点比较','2026-09-07')");
+  database.run("INSERT INTO summary_versions VALUES ('10','test/model-a','# 导论\n\n理论与实践','2026-09-08'), ('10','test/model-b','# 另一个版本\n\n观点比较','2026-09-07'), ('10','test/model-a','# 历史版本\n\n第一次输出','2026-09-06')");
   database.run("INSERT INTO ppt_pages(sub_id,page_num,created_sec,text,ocr_status) VALUES ('10',1,62,'专属 OCR 关键词','done')");
   const bytes = Buffer.from(database.export());
   const password = crypto.createHash('sha256').update('ICSv2:student:password').digest('hex');
@@ -42,7 +42,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   const courses = rows("SELECT c.*,COUNT(l.sub_id) total_count,SUM(l.summary IS NOT NULL) summary_count FROM courses c LEFT JOIN lectures l USING(course_id) GROUP BY c.course_id");
   const lectures = rows("SELECT *,summary IS NOT NULL has_summary,transcript IS NOT NULL transcript_available FROM lectures WHERE course_id='1'");
   const lecture = {...rows("SELECT l.*,c.title course_title,c.teacher FROM lectures l JOIN courses c USING(course_id) WHERE sub_id='10'")[0],summary_versions:rows("SELECT * FROM summary_versions"),ppt_pages:rows("SELECT * FROM ppt_pages")};
-  let zones = {}, version = 'commit-1', missingShard = false, legacy = false;
+  let zones = {}, names = {}, version = 'commit-1', missingShard = false, legacy = false;
   let dispatches = [];
   const server = http.createServer((req,res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
@@ -59,7 +59,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   let browser;
   try {
     browser = await chromium.launch({headless:true, channel: process.env.BROWSER_CHANNEL || 'chrome'});
-    const context = await browser.newContext({viewport: {width:1280,height:900}});
+    const context = await browser.newContext({viewport: {width:1280,height:900}, colorScheme: 'dark'});
     await context.route('**/*', async route => {
       const request=route.request(), url=new URL(request.url());
       const json = data => route.fulfill({json:data});
@@ -87,12 +87,13 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         const p=url.pathname.slice('/api/local'.length);
         if (p==='/status') return json({configured:true,keychain_available:false,database_ready:true,repository:{owner:'alice',repo:'fork',branch:'data'},database:{courses:2,lectures:3,ready:2,failed:0,commit_sha:'fixture'},update:{state:'current'}});
         if (p==='/courses') return json(courses);
+        if (p==='/lecture-names') {if(request.method()==='PUT') {const body=request.postDataJSON();names[body.sub_id]=body.name;} return json({names});}
         if (p==='/course-zones') {if(request.method()==='PUT') {const body=request.postDataJSON();zones[body.course_id]=body.zone;} return json({zones});}
         if (p==='/workflows') return json([]);
         if (p==='/courses/1/lectures') return json(lectures);
         if (p==='/lectures/10') return json(lecture);
         if (p==='/model-providers') return json({source:'github-variable',providers:[provider]});
-        if (p==='/search') return json([{sub_id:'10',course_id:'1',course_title:'现代思想史',sub_title:lecture.sub_title,hit_field:'ocr',snippet:'专属 OCR 关键词'}]);
+        if (p==='/search') return json({total:1,page:1,has_more:false,results:[{sub_id:'10',course_id:'1',course_title:'现代思想史',sub_title:lecture.sub_title,hit_field:'ocr',snippet:'专属 OCR 关键词'}]});
         if (p==='/subscriptions') return json({course_ids:['1'],courses:[courses[0]]});
         if (p==='/subscription-catalog') return json({terms:['2026-秋'],courses});
         if (p.endsWith('/dispatch')) {dispatches.push({path:p,body:request.postDataJSON()});return json({ok:true});}
@@ -125,9 +126,22 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       assert.match(await page.locator('.lecture-open').first().innerText(), /第6-8节/);
       assert.equal(await page.getByText('暂无录播',{exact:true}).count(),1);
       await page.locator('.lecture-open').filter({hasText:'第11-12节'}).click();
+      assert.equal(await page.locator('.summary-version-choice').count(),3);
       await page.locator('.summary-version-choice').last().locator('input').check();
       assert.equal(await page.locator('.summary-version-panel').count(),2);
       assert.equal(await page.evaluate(()=>window.pwned),undefined);
+      await page.locator('#theme-toggle').click();
+      assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'light');
+      await page.locator('#theme-toggle').click();
+      const markdown = await page.evaluate(()=>renderMarkdown('| A | B |\n| --- | --- |\n| x | y |\n\n$P_n$ <img src=x onerror=alert(1)>'));
+      assert.match(markdown, /<table>/);
+      assert.match(markdown, /P_n/);
+      assert.ok(!markdown.includes('<img'));
+      await page.evaluate(async()=>{
+        await api('/api/local/lecture-names',{method:'PUT',body:JSON.stringify({sub_id:'10',name:'自定义名称'})});
+        await loadLectureNames(); await openLecture('10');
+      });
+      assert.equal(await page.locator('#detail-title').innerText(),'自定义名称');
       await page.locator('#detail-data-actions').click();
       await page.locator('#data-actions-dialog').waitFor();
       assert.equal(await page.locator('#data-actions-all').isChecked(),false);
@@ -136,8 +150,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       assert.equal(dispatches.at(-1).body.inputs.sub_ids,'10');
       assert.equal(dispatches.at(-1).body.inputs.export_type,'PDF');
       await page.locator('.desktop-nav [data-view="search"]').click();
-      await page.locator('#search-summary').uncheck();
-      await page.locator('#search-transcript').uncheck();
+      for (const domain of ['title', 'summary', 'transcript']) await page.locator(`[data-domain="${domain}"]`).click();
       await page.locator('#search').fill('关键词');
       await page.locator('.search-card').waitFor();
       assert.match(await page.locator('.search-card').innerText(),/专属 OCR/);
@@ -159,9 +172,15 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         const failed=await page.evaluate(async()=>{try{await window.ICOURSE_API('/api/local/sync',{method:'POST'});return '';}catch(e){return e.message;}});
         assert.match(failed,/缺少分片/);
         assert.equal((await page.evaluate(()=>window.ICOURSE_API('/api/local/courses'))).length,2);
+        const filtered = await page.evaluate(()=>window.ICOURSE_API('/api/local/search?q=理论%20实践&domains=summary&course_id=1&page_size=1'));
+        assert.equal(filtered.total,1);
+        assert.equal(filtered.results[0].sub_id,'10');
+        assert.equal(filtered.has_more,false);
+        const missed = await page.evaluate(()=>window.ICOURSE_API('/api/local/search?q=理论%20缺失&domains=summary'));
+        assert.equal(missed.total,0);
         missingShard=false;legacy=true;version='commit-3';
         await page.evaluate(()=>window.ICOURSE_API('/api/local/sync',{method:'POST'}));
-        assert.equal((await page.evaluate(()=>window.ICOURSE_API('/api/local/lectures/10'))).summary_versions.length,2);
+        assert.equal((await page.evaluate(()=>window.ICOURSE_API('/api/local/lectures/10'))).summary_versions.length,3);
         const badLogin=await page.evaluate(async()=>{try{await window.ICOURSE_API('/api/local/configure',{method:'POST',body:JSON.stringify({owner:'alice',repo:'fork',token:'synthetic-token',stuid:'student',uispsw:'wrong'})});return '';}catch(e){return e.message;}});
         assert.ok(badLogin);
         assert.equal((await page.evaluate(()=>window.ICOURSE_API('/api/local/status'))).database_ready,true);

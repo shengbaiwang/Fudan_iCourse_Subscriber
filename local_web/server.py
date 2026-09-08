@@ -94,6 +94,11 @@ class CourseZoneRequest(BaseModel):
     zone: str = Field(min_length=1, max_length=32)
 
 
+class LectureNameRequest(BaseModel):
+    sub_id: str = Field(min_length=1, max_length=100)
+    name: str = Field(default="", max_length=100)
+
+
 class SummaryRerunRequest(BaseModel):
     provider: str = Field(min_length=1, max_length=50)
     model: str = Field(min_length=1, max_length=200)
@@ -489,6 +494,20 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"zones": dict(runtime.course_zones)}
 
+    @app.get("/api/local/lecture-names")
+    async def lecture_names() -> dict[str, dict[str, str]]:
+        return {"names": dict(runtime.lecture_names)}
+
+    @app.put("/api/local/lecture-names")
+    async def save_lecture_name(payload: LectureNameRequest) -> dict[str, dict[str, str]]:
+        try:
+            await run_in_threadpool(
+                runtime.save_lecture_name, payload.sub_id, payload.name
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"names": dict(runtime.lecture_names)}
+
     def normalized_subscription_ids(values: list[str]) -> list[str]:
         result: list[str] = []
         seen: set[str] = set()
@@ -666,13 +685,20 @@ def create_app(
 
     @app.get("/api/local/search")
     async def search(
-        q: str, limit: int = 50, page: int = 1, courses: str = "",
-        summary: bool = True, transcript: bool = True, ocr: bool = True,
+        q: str,
+        course_id: str = "",
+        domains: str = "",
+        page: int = 1,
+        page_size: int = 50,
     ):
+        domain_list = [d.strip() for d in domains.split(",") if d.strip()] or None
         return await run_in_threadpool(
-            require_db().search, q, limit, page=page,
-            course_ids=[item.strip() for item in courses.split(",") if item.strip()],
-            summary=summary, transcript=transcript, ocr=ocr,
+            require_db().search,
+            q,
+            course_id=course_id,
+            domains=domain_list,
+            page=page,
+            page_size=page_size,
         )
 
     @app.get("/api/local/workflows")

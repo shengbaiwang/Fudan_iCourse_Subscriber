@@ -49,18 +49,18 @@ class SharedConsoleTest(unittest.TestCase):
                         ('b', 1, '未完成 OCR 关键词', 'pending'),
                     ])
                     db.commit()
-                rows = manager.search('关键词', summary=False, ocr=False)
+                rows = manager.search('关键词', domains=['transcript'])['results']
                 self.assertEqual([row['sub_id'] for row in rows], ['a'])
                 self.assertIn('专属转录', rows[0]['snippet'])
-                rows = manager.search('关键词', summary=False, transcript=False)
+                rows = manager.search('关键词', domains=['ocr'])['results']
                 self.assertEqual([row['sub_id'] for row in rows], ['a'])
                 self.assertIn('专属 OCR', rows[0]['snippet'])
-                self.assertEqual(manager.search('关键词', summary=False, transcript=False, ocr=False), [])
-                self.assertEqual(manager.search('关键词', course_ids=['missing']), [])
-                first = manager.search('关键词', limit=1, course_ids=['1'])
-                second = manager.search('关键词', limit=1, page=2, course_ids=['1'])
+                self.assertEqual(manager.search('关键词', domains=[])['results'], [])
+                self.assertEqual(manager.search('关键词', course_id='missing')['results'], [])
+                first = manager.search('关键词', page_size=1, course_id='1')['results']
+                second = manager.search('关键词', page_size=1, page=2, course_id='1')['results']
                 self.assertNotEqual(first[0]['sub_id'], second[0]['sub_id'])
-                self.assertEqual(manager.search('关键词', limit=1, page=3, course_ids=['1']), [])
+                self.assertEqual(manager.search('关键词', page_size=1, page=3, course_id='1')['results'], [])
             finally:
                 manager.close()
 

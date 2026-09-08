@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -19,6 +20,83 @@ from .state import RuntimeCredentials, default_cache_dir, default_config_dir
 
 class DatabaseNotReady(RuntimeError):
     pass
+
+
+_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
+
+
+def _strip_markdown(value: str) -> str:
+    """Reduce one markdown fragment to plain readable text for a note name."""
+    text = re.sub(r"\$\$[\s\S]*?\$\$", " ", value)      # display math
+    text = re.sub(r"\\\[[\s\S]*?\\\]", " ", text)       # display math \[...\]
+    text = re.sub(r"\$[^$\n]+\$", " ", text)            # inline math
+    text = re.sub(r"\\\([\s\S]*?\\\)", " ", text)       # inline math \(...\)
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)   # images
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)  # links keep label
+    text = re.sub(r"<[^>]+>", " ", text)                # html tags
+    text = re.sub(r"(?m)^\s*\|?[\s:|-]*--[\s:|-]*$", " ", text)  # table delimiter rows
+    text = re.sub(r"[*_`~#>|]", "", text)               # emphasis/code/quote marks
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def auto_lecture_title(
+    summary: str | None, sub_title: str | None, *, max_length: int = 40
+) -> str:
+    """Derive a readable note name from the summary.
+
+    Prefers the first Markdown heading, then the first non-empty line; falls
+    back to ``sub_title`` (the raw date/period label) when there is no usable
+    text.  Local derivation only — no LLM involved.
+    """
+    fallback = str(sub_title or "").strip()
+    text = str(summary or "")
+    if text.strip():
+        candidates: list[str] = []
+        heading = _HEADING_PATTERN.search(text)
+        if heading:
+            candidates.append(heading.group(1))
+        for line in text.splitlines():
+            if line.strip():
+                candidates.append(line)
+                break
+        for candidate in candidates:
+            clean = _strip_markdown(candidate)
+            if clean:
+                if len(clean) > max_length:
+                    clean = clean[: max_length - 1].rstrip() + "…"
+                return clean
+    return fallback
+
+
+def _center_snippet(text: object, terms: list[str], radius: int = 80) -> str:
+    """Center a plain-text snippet on the first keyword occurrence.
+
+    Whitespace is collapsed and Markdown syntax stripped *before* slicing so
+    raw ``**``/``#``/table pipes from summaries never leak into the result
+    list — and a slice boundary can never cut through a ``$$...$$`` formula,
+    which would leave unbalanced math delimiters behind.  Falls back to the
+    text head when no keyword is literally present (e.g. LIKE matched with
+    different case folding than Python's lower()).
+    """
+    plain = _strip_markdown(str(text or ""))
+    if not plain:
+        return ""
+    lower = plain.lower()
+    hit, hit_term = -1, ""
+    for term in terms:
+        hit = lower.find(term.lower())
+        if hit != -1:
+            hit_term = term
+            break
+    if hit == -1:
+        return plain[: 2 * radius] + ("…" if len(plain) > 2 * radius else "")
+    start = max(0, hit - radius)
+    end = min(len(plain), hit + len(hit_term) + radius)
+    return (
+        ("…" if start > 0 else "")
+        + plain[start:end]
+        + ("…" if end < len(plain) else "")
+    )
 
 
 class DatabaseManager:
@@ -208,17 +286,30 @@ class DatabaseManager:
             return [dict(row) for row in db.execute(sql)]
 
     def lectures(self, course_id: str) -> list[dict[str, Any]]:
-        sql = """
-            SELECT sub_id, course_id, sub_title, date, processed_at,
-                   error_stage, error_msg, summary_model,
-                   CASE WHEN summary IS NOT NULL THEN 1 ELSE 0 END AS has_summary,
-                   CASE WHEN TRIM(COALESCE(transcript, '')) != ''
-                        THEN 1 ELSE 0 END AS transcript_available
-            FROM lectures WHERE course_id = ?
-            ORDER BY COALESCE(date, ''), sub_title
-        """
         with closing(self._connect()) as db:
-            return [dict(row) for row in db.execute(sql, (course_id,))]
+            # ai_title is a new column; a persistent library saved by an older
+            # build may lack it (read-only here — the next sync rebuilds it).
+            has_ai_title = db.execute(
+                "SELECT 1 FROM pragma_table_info('lectures') WHERE name = 'ai_title'"
+            ).fetchone()
+            sql = f"""
+                SELECT sub_id, course_id, sub_title, date, processed_at,
+                       error_stage, error_msg, summary_model, summary,
+                       {"ai_title" if has_ai_title else "NULL AS ai_title"},
+                       CASE WHEN summary IS NOT NULL THEN 1 ELSE 0 END AS has_summary,
+                       CASE WHEN TRIM(COALESCE(transcript, '')) != ''
+                            THEN 1 ELSE 0 END AS transcript_available
+                FROM lectures WHERE course_id = ?
+                ORDER BY COALESCE(date, ''), sub_title
+            """
+            rows = [dict(row) for row in db.execute(sql, (course_id,))]
+        for row in rows:
+            # Display name: AI title from the pipeline when present, else
+            # local derivation.  The bulky summary text is dropped either way.
+            row["auto_title"] = row.get("ai_title") or auto_lecture_title(
+                row.pop("summary", ""), row.get("sub_title")
+            )
+        return rows
 
     def rerunnable_lecture_ids(self, course_id: str) -> list[str]:
         """Return a course's lectures which have material for a summary rerun."""
@@ -242,6 +333,9 @@ class DatabaseManager:
             if not row:
                 return None
             result = dict(row)
+            result["auto_title"] = result.get("ai_title") or auto_lecture_title(
+                result.get("summary"), result.get("sub_title")
+            )
             has_versions = db.execute(
                 """SELECT 1 FROM sqlite_master
                    WHERE type = 'table' AND name = 'summary_versions'"""
@@ -285,17 +379,23 @@ class DatabaseManager:
         a Vault substantially larger and are not needed for the usual note.
         """
         transcript_column = ", l.transcript" if include_transcript else ""
-        sql = f"""
-            SELECT l.sub_id, l.course_id, l.sub_title, l.date, l.processed_at,
-                   l.summary, l.summary_model, c.title AS course_title,
-                   c.teacher{transcript_column}
-            FROM lectures l
-            JOIN courses c ON c.course_id = l.course_id
-            WHERE TRIM(COALESCE(l.summary, '')) != ''
-            ORDER BY COALESCE(c.title, ''), c.course_id,
-                     COALESCE(l.date, ''), COALESCE(l.sub_title, ''), l.sub_id
-        """
         with closing(self._connect()) as db:
+            # ai_title is a new column; a persistent library saved by an
+            # older build may lack it (read-only here — next sync rebuilds).
+            has_ai_title = db.execute(
+                "SELECT 1 FROM pragma_table_info('lectures') WHERE name = 'ai_title'"
+            ).fetchone()
+            ai_column = ", l.ai_title" if has_ai_title else ", NULL AS ai_title"
+            sql = f"""
+                SELECT l.sub_id, l.course_id, l.sub_title, l.date, l.processed_at,
+                       l.summary, l.summary_model, c.title AS course_title,
+                       c.teacher{transcript_column}{ai_column}
+                FROM lectures l
+                JOIN courses c ON c.course_id = l.course_id
+                WHERE TRIM(COALESCE(l.summary, '')) != ''
+                ORDER BY COALESCE(c.title, ''), c.course_id,
+                         COALESCE(l.date, ''), COALESCE(l.sub_title, ''), l.sub_id
+            """
             notes = [dict(row) for row in db.execute(sql)]
             if not include_ocr or not notes:
                 return notes
@@ -321,52 +421,165 @@ class DatabaseManager:
             note["ocr_pages"] = pages_by_sub_id[str(note["sub_id"])]
         return notes
 
+    _SEARCH_DOMAINS = ("title", "summary", "transcript", "ocr")
+    _SEARCH_SNIPPET_RADIUS = 80
+
     def search(
-        self, query: str, limit: int = 50, *, page: int = 1,
-        course_ids: list[str] | None = None,
-        summary: bool = True, transcript: bool = True, ocr: bool = True,
-    ) -> list[dict[str, Any]]:
-        if not query.strip() or not any((summary, transcript, ocr)):
-            return []
-        needle = f"%{query.strip()}%"
-        conditions = []
-        domains = []
-        if summary:
-            conditions.append("l.summary LIKE ?")
-            domains.append("summary")
-        if transcript:
-            conditions.append("l.transcript LIKE ?")
-            domains.append("transcript")
-        if ocr:
-            conditions.append("EXISTS (SELECT 1 FROM ppt_pages p WHERE p.sub_id = l.sub_id AND p.ocr_status = 'done' AND p.text LIKE ?)")
-            domains.append("ocr")
-        cases = " ".join(f"WHEN {condition} THEN '{domain}'" for condition, domain in zip(conditions, domains))
-        filters = " OR ".join(conditions)
-        params: list[Any] = [needle, *([needle] * len(conditions) * 2)]
-        if course_ids:
-            filters = f"({filters}) AND l.course_id IN ({','.join('?' for _ in course_ids)})"
-            params.extend(course_ids)
-        page_size = max(1, min(limit, 100))
-        params.extend([page_size, (max(1, page) - 1) * page_size])
-        sql = f"""
-            SELECT l.sub_id, l.sub_title, l.course_id, c.title AS course_title,
-                   l.summary, l.transcript,
-                   (SELECT p.text FROM ppt_pages p WHERE p.sub_id = l.sub_id
-                    AND p.ocr_status = 'done' AND p.text LIKE ? LIMIT 1) AS ppt_text,
-                   CASE {cases} ELSE 'other' END AS hit_field
-            FROM lectures l JOIN courses c ON c.course_id = l.course_id
-            WHERE {filters}
-            ORDER BY l.processed_at DESC, l.sub_id DESC LIMIT ? OFFSET ?
+        self,
+        query: str,
+        *,
+        course_id: str = "",
+        domains: list[str] | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        """Full-text search over titles, summaries, transcripts and PPT OCR.
+
+        Multiple whitespace-separated keywords are AND-combined.  The result
+        snippet is centered on the first keyword occurrence in the hit field
+        so users always see the match in context.  Ranking prefers title
+        hits, then summary, transcript, and finally OCR.
         """
+        empty = {"results": [], "total": 0, "page": 1, "has_more": False}
+        terms = [term for term in query.split() if term]
+        if not terms:
+            return empty
+        active = [d for d in (self._SEARCH_DOMAINS if domains is None else domains) if d in self._SEARCH_DOMAINS]
+        if not active:
+            return empty
+        page = max(1, int(page or 1))
+        page_size = max(1, min(int(page_size or 50), 100))
+
         with closing(self._connect()) as db:
-            results = [dict(row) for row in db.execute(sql, params)]
-        for row in results:
-            content = str(row.get('ppt_text' if row['hit_field'] == 'ocr' else row['hit_field']) or '')
-            start = max(0, content.lower().find(query.strip().lower()) - 70)
-            row['snippet'] = content[start:start + 240]
-            for field in ('summary', 'transcript', 'ppt_text'):
-                row.pop(field, None)
-        return results
+            # ai_title is a newer column; a library saved by an older build
+            # may lack it (read-only here — next sync rebuilds).
+            has_ai_title = bool(
+                db.execute(
+                    "SELECT 1 FROM pragma_table_info('lectures') WHERE name = 'ai_title'"
+                ).fetchone()
+            )
+
+            def domain_cond(domain: str, term: str) -> tuple[str, list[str]]:
+                needle = f"%{term}%"
+                if domain == "title":
+                    if has_ai_title:
+                        return (
+                            "(l.sub_title LIKE ? OR l.ai_title LIKE ?)",
+                            [needle, needle],
+                        )
+                    return "l.sub_title LIKE ?", [needle]
+                if domain == "summary":
+                    return "l.summary LIKE ?", [needle]
+                if domain == "transcript":
+                    return "l.transcript LIKE ?", [needle]
+                return (
+                    "EXISTS(SELECT 1 FROM ppt_pages p WHERE p.sub_id = l.sub_id "
+                    "AND p.ocr_status = 'done' AND p.text LIKE ?)",
+                    [needle],
+                )
+
+            def domain_hit(domain: str) -> tuple[str, list[str]]:
+                conds, values = [], []
+                for term in terms:
+                    sql, term_values = domain_cond(domain, term)
+                    conds.append(sql)
+                    values.extend(term_values)
+                return "(" + " OR ".join(conds) + ")", values
+
+            # WHERE: every keyword must hit at least one active domain.
+            where_parts, where_params = [], []
+            for term in terms:
+                conds, values = [], []
+                for domain in active:
+                    sql, term_values = domain_cond(domain, term)
+                    conds.append(sql)
+                    values.extend(term_values)
+                where_parts.append("(" + " OR ".join(conds) + ")")
+                where_params.extend(values)
+            if course_id.strip():
+                where_parts.append("l.course_id = ?")
+                where_params.append(course_id.strip())
+            where_sql = " AND ".join(where_parts)
+
+            # hit_field: first active domain (priority order) hit by ANY keyword.
+            case_parts, case_params = [], []
+            for domain in self._SEARCH_DOMAINS:
+                if domain not in active:
+                    continue
+                hit_sql, hit_values = domain_hit(domain)
+                case_parts.append(f"WHEN {hit_sql} THEN '{domain}'")
+                case_params.extend(hit_values)
+            hit_field_sql = (
+                "CASE " + " ".join(case_parts) + " ELSE 'other' END"
+            )
+
+            # Snippet source mirrors the hit_field decision; OCR falls back to
+            # the first matching page's text.
+            text_parts, text_params = [], []
+            for domain in self._SEARCH_DOMAINS:
+                if domain not in active or domain == "ocr":
+                    continue
+                hit_sql, hit_values = domain_hit(domain)
+                column = {"title": "l.sub_title", "summary": "l.summary",
+                          "transcript": "l.transcript"}[domain]
+                text_parts.append(f"WHEN {hit_sql} THEN {column}")
+                text_params.extend(hit_values)
+            if "ocr" in active:
+                ocr_conds = " OR ".join("p.text LIKE ?" for _ in terms)
+                ocr_sql = (
+                    "(SELECT p.text FROM ppt_pages p WHERE p.sub_id = l.sub_id "
+                    f"AND p.ocr_status = 'done' AND ({ocr_conds}) "
+                    "ORDER BY p.page_num LIMIT 1)"
+                )
+                ocr_params: list[str] = [f"%{t}%" for t in terms]
+            else:
+                ocr_sql, ocr_params = "NULL", []
+            hit_text_sql = (
+                ("CASE " + " ".join(text_parts) + f" ELSE {ocr_sql} END")
+                if text_parts
+                else ocr_sql
+            )
+
+            base_sql = (
+                "FROM lectures l JOIN courses c ON c.course_id = l.course_id "
+                f"WHERE {where_sql}"
+            )
+            total = db.execute(
+                f"SELECT COUNT(*) {base_sql}", where_params
+            ).fetchone()[0]
+            rows = db.execute(
+                f"""SELECT l.sub_id, l.sub_title, l.course_id,
+                           c.title AS course_title,
+                           {"l.ai_title" if has_ai_title else "NULL"} AS ai_title,
+                           l.summary AS auto_title_source,
+                           {hit_field_sql} AS hit_field,
+                           {hit_text_sql} AS hit_text
+                    {base_sql}
+                    ORDER BY CASE hit_field
+                               WHEN 'title' THEN 0 WHEN 'summary' THEN 1
+                               WHEN 'transcript' THEN 2 ELSE 3
+                             END,
+                             l.processed_at DESC, l.sub_id DESC
+                    LIMIT ? OFFSET ?""",
+                case_params + text_params + ocr_params + where_params
+                + [page_size + 1, (page - 1) * page_size],
+            ).fetchall()
+
+        has_more = len(rows) > page_size
+        results = []
+        for row in rows[:page_size]:
+            item = dict(row)
+            # 与课次列表同一套显示名：AI 标题 > 本地派生标题 > 原始节次。
+            ai_title = item.pop("ai_title", None)
+            item["auto_title"] = ai_title or auto_lecture_title(
+                item.pop("auto_title_source", ""), item.get("sub_title")
+            )
+            item["snippet"] = _center_snippet(
+                item.pop("hit_text"), terms, self._SEARCH_SNIPPET_RADIUS
+            )
+            results.append(item)
+        return {"results": results, "total": total, "page": page,
+                "has_more": has_more}
 
     def subscription_ids(self) -> list[str]:
         """Return the last subscription snapshot published with the data DB.

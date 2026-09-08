@@ -10,21 +10,17 @@ let currentLecture = null;
 let detailTab = "summary";
 let courseRows = [];
 let searchTimer = null;
-let searchPage = 1;
-let searchRequestId = 0;
 let subscribedCourseIds = [];
 let subscriptionCourses = [];
 let subscriptionTerms = [];
 let subscriptionTimer = null;
 let catalogRows = [];
 let courseZones = {};
+let lectureNames = {};
 let activeCourseZone = "all";
 let updatePollTimer = null;
 let rerunModelOptions = [];
-let courseBulkMode = false;
-const selectedCourseIdsForRerun = new Set();
-const selectedLectureIdsForRerun = new Set();
-let selectedSummaryVersionModels = new Set();
+let selectedSummaryVersionKeys = new Set();
 const courseZoneRequests = new Map();
 let loadedLibraryIdentity = "";
 const isPages = window.ICOURSE_RUNTIME === "pages";
@@ -34,6 +30,12 @@ const COURSE_ZONE_LABELS = {
   study: "学习区",
   reference: "查阅区",
   archive: "归档区",
+};
+const RUN_STATUS_LABELS = {
+  success: "成功", failure: "失败", cancelled: "已取消", timed_out: "超时",
+  in_progress: "进行中", queued: "排队中", requested: "已请求", waiting: "等待中",
+  pending: "排队中", completed: "已完成", neutral: "已完成", skipped: "已跳过",
+  stale: "已过期", action_required: "需要处理", startup_failure: "启动失败",
 };
 
 function loadStarred() {
@@ -65,12 +67,30 @@ function message(value, error = false) {
   const node = $("#message");
   node.textContent = value;
   node.className = `message${error ? " error" : ""}`;
+  // Restart the entrance animation for consecutive messages.
+  node.classList.remove("pop");
+  void node.offsetWidth;
+  node.classList.add("pop");
   clearTimeout(messageTimer);
   messageTimer = setTimeout(() => node.classList.add("hidden"), 5000);
 }
 
 function text(value) {
   return value == null || value === "" ? "—" : String(value);
+}
+
+function relativeTime(iso) {
+  if (!iso) return "";
+  const time = new Date(iso).getTime();
+  if (Number.isNaN(time)) return "";
+  const minutes = Math.floor((Date.now() - time) / 60000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} 天前`;
+  return new Date(time).toLocaleDateString();
 }
 
 function escapeHtml(value) {
@@ -109,9 +129,69 @@ function markdownInline(value) {
   return output.replace(/\u0000(\d+)\u0000/g, (_match, index) => tokens[Number(index)] || "");
 }
 
+function _splitTableRow(line) {
+  // GFM pipe-table row → cell array; escaped \| stays inside a cell.
+  let text = line.trim();
+  if (text.startsWith("|")) text = text.slice(1);
+  if (text.endsWith("|") && !text.endsWith("\\|")) text = text.slice(0, -1);
+  return text.split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, "|"));
+}
+
+function _isTableDelimiter(line) {
+  // e.g. | --- | :---: | ---: |
+  const cells = _splitTableRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{1,}:?$/.test(cell));
+}
+
+function _tableAlignments(delimiterLine) {
+  return _splitTableRow(delimiterLine).map((cell) => {
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    if (left && right) return "center";
+    if (right) return "right";
+    if (left) return "left";
+    return "";
+  });
+}
+
+function _stashFormulas(mdText) {
+  // Stash $...$ / $$...$$ / \(...\) / \[...\] before markdown processing so
+  // characters like * and _ inside LaTeX (P_n, D^*) aren't treated as emphasis.
+  const formulas = [];
+  const stash = (replacement) => {
+    const token = `\u0001${formulas.length}\u0002`;
+    formulas.push(replacement);
+    return token;
+  };
+  let text = String(mdText || "");
+  text = text.replace(/(\\\([\s\S]*?\\\))|(\\\[[\s\S]*?\\\])/g, (match) => stash(match));
+  text = text.replace(/\$\$([\s\S]+?)\$\$/g, (_match, formula) => stash(`\\[${formula}\\]`));
+  text = text.replace(/\$([^$\n]+?)\$/g, (_match, formula) => stash(`\\(${formula}\\)`));
+  return { text, formulas };
+}
+
+function _restoreFormulas(html, formulas) {
+  return html.replace(/\u0001(\d+)\u0002/g, (_match, index) => escapeHtml(formulas[Number(index)] || ""));
+}
+
+function activateMath(element) {
+  // No-op when the KaTeX CDN scripts failed to load (e.g. offline).
+  if (typeof renderMathInElement !== "function" || !element) return;
+  renderMathInElement(element, {
+    delimiters: [
+      { left: "\\[", right: "\\]", display: true },
+      { left: "\\(", right: "\\)", display: false },
+    ],
+    throwOnError: false,
+  });
+}
+
 function renderMarkdown(value) {
-  if (window.ICS?.render && window.marked && window.DOMPurify) return window.ICS.render.renderMarkdown(value || "暂无摘要");
-  const lines = String(value || "").replace(/\r\n?/g, "\n").split("\n");
+  const stashed = _stashFormulas(value);
+  if (window.ICS?.render && window.marked && window.DOMPurify) {
+    return _restoreFormulas(window.ICS.render.renderMarkdown(stashed.text || "暂无摘要"), stashed.formulas);
+  }
+  const lines = stashed.text.replace(/\r\n?/g, "\n").split("\n");
   const html = [];
   let paragraph = [];
   const flushParagraph = () => {
@@ -123,6 +203,10 @@ function renderMarkdown(value) {
     const heading = /^(#{1,6})\s+(.+)$/.exec(line);
     const unordered = /^\s*[-*+]\s+(.+)$/.exec(line);
     const ordered = /^\s*\d+[.)]\s+(.+)$/.exec(line);
+    const isTable = line.includes("|")
+      && index + 1 < lines.length
+      && _isTableDelimiter(lines[index + 1])
+      && _splitTableRow(line).length === _splitTableRow(lines[index + 1]).length;
     if (/^\s*```/.test(line)) {
       flushParagraph();
       const language = line.trim().slice(3).trim();
@@ -130,6 +214,27 @@ function renderMarkdown(value) {
       index += 1;
       while (index < lines.length && !/^\s*```/.test(lines[index])) code.push(lines[index++]);
       html.push(`<pre${language ? ` data-language="${escapeHtml(language)}"` : ""}><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+    } else if (isTable) {
+      flushParagraph();
+      const aligns = _tableAlignments(lines[index + 1]);
+      const alignAttr = (cellIndex) => aligns[cellIndex] ? ` style="text-align:${aligns[cellIndex]}"` : "";
+      const headCells = _splitTableRow(line)
+        .map((cell, cellIndex) => `<th${alignAttr(cellIndex)}>${markdownInline(cell)}</th>`)
+        .join("");
+      index += 2; // skip header + delimiter
+      const bodyRows = [];
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        const cells = _splitTableRow(lines[index])
+          .map((cell, cellIndex) => `<td${alignAttr(cellIndex)}>${markdownInline(cell)}</td>`)
+          .join("");
+        bodyRows.push(`<tr>${cells}</tr>`);
+        index += 1;
+      }
+      index -= 1; // while 停在下一条非表格行，交还给外层 for 处理
+      html.push(
+        `<div class="table-wrap"><table><thead><tr>${headCells}</tr></thead>`
+        + `<tbody>${bodyRows.join("")}</tbody></table></div>`
+      );
     } else if (heading) {
       flushParagraph();
       const level = heading[1].length;
@@ -162,7 +267,8 @@ function renderMarkdown(value) {
     }
   }
   flushParagraph();
-  return html.join("") || "<p>暂无摘要</p>";
+  const rendered = html.join("");
+  return rendered ? _restoreFormulas(rendered, stashed.formulas) : "<p>暂无摘要</p>";
 }
 
 function createButton(label, onClick, className = "") {
@@ -220,6 +326,7 @@ async function refreshStatus() {
   // Rebuild the library only on first load or when the data commit changes.
   if (statusState.database_ready && loadedLibraryIdentity !== libraryIdentity) {
     await loadCourseZones();
+    await loadLectureNames();
     await loadCourses();
     loadedLibraryIdentity = libraryIdentity;
   }
@@ -258,6 +365,19 @@ function courseZone(courseId) {
 async function loadCourseZones() {
   const result = await api("/api/local/course-zones");
   courseZones = result.zones || {};
+}
+
+async function loadLectureNames() {
+  const result = await api("/api/local/lecture-names");
+  lectureNames = result.names || {};
+}
+
+// Display name for a lecture note: custom rename > auto-derived from the
+// summary > the raw sub_title (date/period label).
+function lectureDisplayName(lecture) {
+  if (!lecture) return "";
+  const custom = lectureNames[String(lecture.sub_id)];
+  return custom || lecture.auto_title || lecture.sub_title || String(lecture.sub_id);
 }
 
 async function moveCourseToZone(courseId, zone, select) {
@@ -304,11 +424,6 @@ async function moveCourseToZone(courseId, zone, select) {
 
 async function loadCourses() {
   courseRows = await api("/api/local/courses");
-  const searchCourse = $("#search-course");
-  const selectedSearchCourse = searchCourse.value;
-  searchCourse.replaceChildren(new Option("全部课程", ""));
-  courseRows.forEach(course => searchCourse.append(new Option(course.title || course.course_id, String(course.course_id))));
-  searchCourse.value = selectedSearchCourse;
   courseRows.sort((a, b) => Number(starredCourses.has(String(b.course_id))) - Number(starredCourses.has(String(a.course_id))));
   const list = $("#course-list");
   list.replaceChildren();
@@ -348,34 +463,24 @@ async function loadCourses() {
     const title = document.createElement("strong");
     title.className = "course-title";
     title.textContent = course.title || course.course_id;
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    meta.textContent = text(course.teacher);
-    textBlock.append(title, meta);
+    textBlock.append(title);
+    const metaParts = [];
+    if (course.teacher) metaParts.push(String(course.teacher));
+    const updated = relativeTime(course.last_updated);
+    if (updated) metaParts.push(`${updated}更新`);
+    if (metaParts.length) {
+      const meta = document.createElement("p");
+      meta.className = "course-meta";
+      meta.textContent = metaParts.join(" · ");
+      textBlock.append(meta);
+    }
     open.append(textBlock);
-    titleRow.append(open);
+    titleRow.append(open, star);
+    const aside = document.createElement("div");
+    aside.className = "course-aside";
     const count = document.createElement("span");
     count.className = "count-badge";
-    count.textContent = `${course.summary_count}/${course.total_count} 篇笔记`;
-    row.append(titleRow, count);
-    const footer = document.createElement("div");
-    footer.className = "course-card-footer";
-    if (courseBulkMode) {
-      const rerunSelect = document.createElement("label");
-      rerunSelect.className = "rerun-check-option";
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.checked = selectedCourseIdsForRerun.has(String(course.course_id));
-      checkbox.onchange = () => {
-        const id = String(course.course_id);
-        if (checkbox.checked) selectedCourseIdsForRerun.add(id);
-        else selectedCourseIdsForRerun.delete(id);
-        renderCourseBulkCount();
-      };
-      rerunSelect.append(checkbox, document.createTextNode(" 重跑本课程"));
-      footer.append(rerunSelect);
-    }
-    footer.append(star, createButton("导出 / 删除", () => openDataActions(course).catch(error => message(error.message, true))));
+    count.textContent = `笔记 ${course.summary_count}/${course.total_count}`;
     const zoneControl = document.createElement("label");
     zoneControl.className = "course-zone-select";
     const select = document.createElement("select");
@@ -385,45 +490,45 @@ async function loadCourses() {
     });
     select.onchange = () => moveCourseToZone(course.course_id, select.value, select);
     zoneControl.append(select);
-    footer.append(zoneControl);
-    card.append(row, footer);
+    aside.append(count, zoneControl, createButton("导出 / 删除", () => openDataActions(course).catch(error => message(error.message, true))));
+    row.append(titleRow, aside);
+    card.append(row);
     list.append(card);
   });
+  syncSearchCourseOptions();
 }
 
 async function openCourse(course) {
   currentCourse = course;
-  selectedLectureIdsForRerun.clear();
   courseLectures = await api(`/api/local/courses/${encodeURIComponent(course.course_id)}/lectures`);
-  courseLectures.sort(compareLectures);
   $("#course-title").textContent = course.title || course.course_id;
   $("#course-teacher").textContent = text(course.teacher);
+  courseLectures.sort(compareLectures);
+  renderLectureList();
+  showView("lectures");
+}
+
+function renderLectureList() {
   const list = $("#lecture-list");
   list.replaceChildren();
   courseLectures.forEach((lecture) => {
     const card = document.createElement("article");
     card.className = "lecture-card";
-    const rerunnable = Boolean(Number(lecture.transcript_available));
-    const selection = document.createElement("label");
-    selection.className = "rerun-check-option lecture-rerun-select";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.disabled = !rerunnable;
-    checkbox.checked = selectedLectureIdsForRerun.has(String(lecture.sub_id));
-    checkbox.title = rerunnable ? "选择此课次重跑" : "没有可用转录，不能只重跑摘要";
-    checkbox.onchange = () => {
-      const id = String(lecture.sub_id);
-      if (checkbox.checked) selectedLectureIdsForRerun.add(id);
-      else selectedLectureIdsForRerun.delete(id);
-      renderLectureBulkCount();
-    };
-    selection.append(checkbox, document.createTextNode(" 重跑"));
     const row = document.createElement("div");
     row.className = "lecture-row";
     const left = document.createElement("div");
+    const displayName = lectureDisplayName(lecture);
     const title = document.createElement("strong");
-    title.textContent = lecture.sub_title || lecture.sub_id;
+    title.textContent = displayName;
     left.append(title);
+    // Original date/period label demoted to a small caption — shown only
+    // when the display name differs (a real name was derived or renamed).
+    const timeLabel = lecture.sub_title || String(lecture.sub_id);
+    if (displayName !== timeLabel) {
+      const time = document.createElement("p");
+      time.textContent = timeLabel;
+      left.append(time);
+    }
     if (lecture.error_msg) {
       const error = document.createElement("p");
       error.textContent = lecture.error_msg;
@@ -438,15 +543,12 @@ async function openCourse(course) {
     open.className = "lecture-open";
     open.append(row);
     open.onclick = () => openLecture(lecture.sub_id);
-    card.append(selection, open);
+    card.append(open);
     list.append(card);
   });
-  renderLectureBulkCount();
-  populateRerunModelSelect("#lecture-bulk-model-select").catch((error) => message(error.message, true));
-  showView("lectures");
 }
 
-async function openLecture(subId) {
+async function openLecture(subId, options = {}) {
   currentLecture = await api(`/api/local/lectures/${encodeURIComponent(subId)}`);
   if (!currentCourse || String(currentCourse.course_id) !== String(currentLecture.course_id)) {
     currentCourse = courseRows.find((course) => String(course.course_id) === String(currentLecture.course_id)) || {
@@ -455,17 +557,28 @@ async function openLecture(subId) {
       teacher: currentLecture.teacher,
     };
     courseLectures = await api(`/api/local/courses/${encodeURIComponent(currentLecture.course_id)}/lectures`);
-    courseLectures.sort(compareLectures);
   }
-  $("#detail-title").textContent = currentLecture.sub_title || currentLecture.sub_id;
-  $("#detail-course").textContent = currentLecture.course_title || "";
-  detailTab = "summary";
-  selectedSummaryVersionModels = new Set(
-    currentLecture.summary_model ? [String(currentLecture.summary_model)] : []
+  courseLectures.sort(compareLectures);
+  $("#detail-title").textContent = lectureDisplayName(currentLecture);
+  const detailSubtitle = currentLecture.sub_title || "";
+  $("#detail-subtitle").textContent = detailSubtitle;
+  $("#detail-subtitle").classList.toggle(
+    "hidden", !detailSubtitle || lectureDisplayName(currentLecture) === detailSubtitle
   );
-  closeRerunSummary();
+  $("#detail-course").textContent = currentLecture.course_title || "";
+  // 搜索结果可指定落地 tab（命中转录/OCR 时直接打开对应内容）。
+  detailTab = ["summary", "transcript", "ppt"].includes(options.tab) ? options.tab : "summary";
+  // Empty on purpose — renderSummaryVersions auto-selects the latest version.
+  selectedSummaryVersionKeys = new Set();
   renderDetail();
   showView("detail");
+  // 搜索定位：高亮关键词并滚动到首个命中处。
+  if (Array.isArray(options.terms) && options.terms.length) {
+    const root = $("#detail-content");
+    applySearchHits(root, options.terms);
+    const first = root.querySelector("mark.search-hit");
+    if (first) first.scrollIntoView({ block: "center" });
+  }
 }
 
 function compareLectures(a, b) {
@@ -504,9 +617,6 @@ function formatTimestamp(seconds) {
 
 function renderDetail() {
   if (!currentLecture) return;
-  const rerunButton = $("#rerun-summary-button");
-  rerunButton.disabled = !String(currentLecture.transcript || "").trim();
-  rerunButton.classList.toggle("hidden", detailTab !== "summary");
   const root = $("#detail-content");
   root.replaceChildren();
   if (detailTab === "summary") {
@@ -534,29 +644,298 @@ function renderDetail() {
       root.append(item);
     });
   }
-  window.ICS?.render?.activateKaTeX(root);
   document.querySelectorAll(".detail-tab").forEach((button) => {
-    button.classList.toggle("active", button.dataset.detailTab === detailTab);
+    const active = button.dataset.detailTab === detailTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
   });
   const index = courseLectures.findIndex((lecture) => String(lecture.sub_id) === String(currentLecture.sub_id));
   $("#previous-lecture").disabled = index <= 0;
   $("#next-lecture").disabled = index < 0 || index >= courseLectures.length - 1;
+  applyStoredHighlights(root);
 }
 
-function summaryVersions() {
-  const byModel = new Map();
-  (currentLecture?.summary_versions || []).forEach((version) => {
-    if (String(version?.summary || "").trim()) byModel.set(String(version.model || "unknown"), version);
+/* ── 笔记选中高亮 ─────────────────────────────────────────
+   选中正文 → 浮动“高亮”按钮 → 用 <mark> 包裹；高亮片段按
+   sub_id 存入 localStorage，重新渲染后按原文找回并复原。
+   点击已高亮文本会浮出“取消高亮”按钮，再点一次确认取消。 */
+const HIGHLIGHTS_KEY = "icourse-local-highlights";
+
+function loadHighlightStore() {
+  try { return JSON.parse(localStorage.getItem(HIGHLIGHTS_KEY)) || {}; }
+  catch (_) { return {}; }
+}
+
+function highlightsFor(subId) {
+  return loadHighlightStore()[String(subId)] || [];
+}
+
+function storeHighlights(subId, list) {
+  const store = loadHighlightStore();
+  if (list.length) store[String(subId)] = list;
+  else delete store[String(subId)];
+  localStorage.setItem(HIGHLIGHTS_KEY, JSON.stringify(store));
+}
+
+// 收集 root 下的文本节点；skipHighlights 时跳过已高亮 mark 内部，
+// 避免重复包裹同一片段。
+function _textNodes(root, skipHighlights = false) {
+  const walker = document.createTreeWalker(
+    root,
+    NodeFilter.SHOW_TEXT,
+    skipHighlights
+      ? {
+        acceptNode(node) {
+          return node.parentElement && node.parentElement.closest("mark.user-highlight, mark.search-hit")
+            ? NodeFilter.FILTER_REJECT
+            : NodeFilter.FILTER_ACCEPT;
+        },
+      }
+      : null,
+  );
+  const nodes = [];
+  let node;
+  while ((node = walker.nextNode())) nodes.push(node);
+  return nodes;
+}
+
+// 把跨节点的 [start, end) 区间（按文本节点拼接偏移）逐段包进 <mark>。
+// 倒序处理：splitText 只影响当前节点之后的部分，前面节点的偏移保持有效。
+// className 区分持久化的用户高亮（user-highlight）与搜索定位的临时高亮（search-hit）。
+function _wrapOffsets(nodes, start, end, className = "user-highlight") {
+  let offset = 0;
+  const segments = [];
+  nodes.forEach((node) => {
+    const nodeStart = offset;
+    offset += node.data.length;
+    const overlapStart = Math.max(start, nodeStart);
+    const overlapEnd = Math.min(end, offset);
+    if (overlapStart < overlapEnd) {
+      segments.push([node, overlapStart - nodeStart, overlapEnd - nodeStart]);
+    }
   });
-  const currentModel = String(currentLecture?.summary_model || "unknown");
-  if (String(currentLecture?.summary || "").trim() && !byModel.has(currentModel)) {
-    byModel.set(currentModel, {
-      model: currentModel,
-      summary: currentLecture.summary,
-      generated_at: currentLecture.processed_at || "",
-    });
+  for (let i = segments.length - 1; i >= 0; i -= 1) {
+    const [node, segStart, segEnd] = segments[i];
+    if (segEnd < node.data.length) node.splitText(segEnd);
+    const mid = segStart > 0 ? node.splitText(segStart) : node;
+    const mark = document.createElement("mark");
+    mark.className = className;
+    if (className === "user-highlight") mark.title = "点击后可取消高亮";
+    mid.parentNode.replaceChild(mark, mid);
+    mark.appendChild(mid);
   }
-  return [...byModel.values()].sort((a, b) => String(b.generated_at || "").localeCompare(String(a.generated_at || "")));
+}
+
+// 选区起止点换算为文本节点拼接偏移（与 _textNodes 的顺序一致）。
+function _rangeOffsets(root, range) {
+  const nodes = _textNodes(root);
+  let offset = 0;
+  let start = -1;
+  let end = -1;
+  for (const node of nodes) {
+    if (start === -1 && node === range.startContainer) start = offset + range.startOffset;
+    if (node === range.endContainer) { end = offset + range.endOffset; break; }
+    offset += node.data.length;
+  }
+  if (start === -1 || end === -1 || end <= start) return null;
+  return [start, end];
+}
+
+// 按原文找回一个已存片段并包裹所有尚未高亮的出现。
+function _applyHighlightSnippet(root, snippet) {
+  if (!snippet) return;
+  for (let guard = 0; guard < 500; guard += 1) {
+    const nodes = _textNodes(root, true);
+    let full = "";
+    nodes.forEach((node) => { full += node.data; });
+    const index = full.indexOf(snippet);
+    if (index === -1) return;
+    _wrapOffsets(nodes, index, index + snippet.length);
+  }
+}
+
+function applyStoredHighlights(root) {
+  if (!currentLecture) return;
+  highlightsFor(currentLecture.sub_id).forEach((snippet) => {
+    _applyHighlightSnippet(root, snippet);
+  });
+}
+
+/* 搜索定位：把关键词在正文中的所有出现包成临时 <mark class="search-hit">
+   （不落盘、不参与用户高亮逻辑，重新渲染即消失），大小写不敏感。 */
+function applySearchHits(root, terms) {
+  terms.forEach((term) => {
+    const needle = String(term || "").toLowerCase();
+    if (!needle) return;
+    for (let guard = 0; guard < 200; guard += 1) {
+      const nodes = _textNodes(root, true);
+      let full = "";
+      nodes.forEach((node) => { full += node.data; });
+      const index = full.toLowerCase().indexOf(needle);
+      if (index === -1) break;
+      _wrapOffsets(nodes, index, index + needle.length, "search-hit");
+    }
+  });
+}
+
+const highlightToolbar = document.createElement("button");
+highlightToolbar.type = "button";
+highlightToolbar.className = "highlight-toolbar hidden";
+highlightToolbar.textContent = "高亮";
+document.body.append(highlightToolbar);
+
+// 点击已高亮文本时不立即取消，先记录待取消片段并浮出“取消高亮”按钮，
+// 再点一次该按钮才真正移除——避免阅读时误触。
+let pendingUnhighlight = null;
+
+function hideHighlightToolbar() {
+  highlightToolbar.classList.add("hidden");
+}
+
+function clearPendingUnhighlight() {
+  pendingUnhighlight = null;
+  highlightToolbar.textContent = "高亮";
+  hideHighlightToolbar();
+}
+
+function _positionToolbar(rect) {
+  highlightToolbar.style.top = `${Math.max(8, rect.top - 40)}px`;
+  highlightToolbar.style.left = `${Math.min(
+    window.innerWidth - 70,
+    Math.max(8, rect.left + rect.width / 2 - 28),
+  )}px`;
+}
+
+function _detailSelectionRange() {
+  const selection = window.getSelection();
+  if (!selection.rangeCount || selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0);
+  const root = $("#detail-content");
+  if (!root.contains(range.commonAncestorContainer)) return null;
+  if (!range.toString().trim()) return null;
+  return range;
+}
+
+function updateHighlightToolbar() {
+  const range = _detailSelectionRange();
+  if (!range) {
+    // 选区塌陷：若正处于“待确认取消”状态则保留工具条，否则隐藏。
+    if (!pendingUnhighlight) hideHighlightToolbar();
+    return;
+  }
+  // 新选区出现：回到“高亮”模式。
+  pendingUnhighlight = null;
+  highlightToolbar.textContent = "高亮";
+  _positionToolbar(range.getBoundingClientRect());
+  highlightToolbar.classList.remove("hidden");
+}
+
+document.addEventListener("selectionchange", () => {
+  window.requestAnimationFrame(updateHighlightToolbar);
+});
+document.addEventListener("scroll", () => clearPendingUnhighlight(), true);
+
+// 点击其他位置（非高亮文本、非工具条）时，放弃待确认的取消操作。
+document.addEventListener("click", (event) => {
+  if (!pendingUnhighlight) return;
+  if (event.target.closest("mark.user-highlight") || event.target === highlightToolbar) return;
+  clearPendingUnhighlight();
+});
+
+// mousedown 阻止默认行为，点击按钮时选区不会丢失。
+highlightToolbar.addEventListener("mousedown", (event) => event.preventDefault());
+highlightToolbar.addEventListener("click", () => {
+  const root = $("#detail-content");
+  // 二次确认分支：工具条处于“取消高亮”模式时执行移除。
+  if (pendingUnhighlight) {
+    const snippet = pendingUnhighlight;
+    clearPendingUnhighlight();
+    removeHighlightSnippet(snippet);
+    return;
+  }
+  const range = _detailSelectionRange();
+  hideHighlightToolbar();
+  if (!range || !currentLecture) return;
+  const offsets = _rangeOffsets(root, range);
+  if (!offsets) {
+    message("该选区无法高亮", true);
+    return;
+  }
+  const [start, end] = offsets;
+  let full = "";
+  _textNodes(root).forEach((node) => { full += node.data; });
+  const snippet = full.slice(start, end);
+  if (!snippet.trim()) return;
+  _wrapOffsets(_textNodes(root), start, end);
+  const list = highlightsFor(currentLecture.sub_id);
+  if (!list.includes(snippet)) list.push(snippet);
+  storeHighlights(currentLecture.sub_id, list);
+  window.getSelection().removeAllRanges();
+  message("已高亮");
+});
+
+// 移除某一片段的全部高亮（二次确认后由工具条调用）。
+function removeHighlightSnippet(snippet) {
+  if (!currentLecture) return;
+  const root = $("#detail-content");
+  root.querySelectorAll("mark.user-highlight").forEach((item) => {
+    if (item.textContent === snippet) {
+      item.replaceWith(document.createTextNode(item.textContent));
+    }
+  });
+  root.normalize();
+  storeHighlights(
+    currentLecture.sub_id,
+    highlightsFor(currentLecture.sub_id).filter((item) => item !== snippet),
+  );
+  message("已取消高亮");
+}
+
+// 点击已高亮文本：不立即取消，浮出“取消高亮”按钮等待二次确认。
+$("#detail-content").addEventListener("click", (event) => {
+  const mark = event.target.closest("mark.user-highlight");
+  if (!mark || !currentLecture) return;
+  pendingUnhighlight = mark.textContent;
+  highlightToolbar.textContent = "取消高亮";
+  _positionToolbar(mark.getBoundingClientRect());
+  highlightToolbar.classList.remove("hidden");
+});
+
+function summaryVersions() {
+  // One entry per rerun — the backend keys versions by (model, generated_at),
+  // so same-model reruns all survive.  Returned latest first.
+  const versions = [];
+  const seen = new Set();
+  (currentLecture?.summary_versions || []).forEach((version) => {
+    if (!String(version?.summary || "").trim()) return;
+    const key = `${version.model || "unknown"}@${version.generated_at || ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    versions.push({
+      key,
+      model: String(version.model || "unknown"),
+      summary: version.summary,
+      generated_at: version.generated_at || "",
+    });
+  });
+  // The lecture row's active summary is authoritative — list it even when
+  // the versions table predates the feature (legacy databases).
+  if (String(currentLecture?.summary || "").trim()) {
+    const activeModel = String(currentLecture.summary_model || "unknown");
+    const listed = versions.some(
+      (version) => version.model === activeModel && version.summary === currentLecture.summary
+    );
+    if (!listed) {
+      versions.push({
+        key: "__active__",
+        model: activeModel,
+        summary: currentLecture.summary,
+        generated_at: currentLecture.processed_at || "",
+      });
+    }
+  }
+  versions.sort((a, b) => String(b.generated_at || "").localeCompare(String(a.generated_at || "")));
+  return versions;
 }
 
 function formatVersionDate(value) {
@@ -572,36 +951,44 @@ function renderSummaryVersions(root) {
   if (!versions.length) {
     controls.classList.add("hidden");
     root.innerHTML = `<div class="summary">${renderMarkdown(currentLecture.summary)}</div>`;
+    activateMath(root);
     return;
   }
-  if (!selectedSummaryVersionModels.size) selectedSummaryVersionModels.add(String(versions[0].model));
+  if (!selectedSummaryVersionKeys.size) selectedSummaryVersionKeys.add(versions[0].key);
   controls.classList.remove("hidden");
   const title = document.createElement("strong");
   title.textContent = versions.length > 1 ? "版本对比（可多选）" : "当前笔记版本";
   controls.append(title);
   const choices = document.createElement("div");
   choices.className = "summary-version-choices";
+  const activeModel = String(currentLecture.summary_model || "unknown");
   versions.forEach((version) => {
     const label = document.createElement("label");
     label.className = "summary-version-choice";
     const input = document.createElement("input");
     input.type = "checkbox";
-    input.checked = selectedSummaryVersionModels.has(String(version.model));
+    input.checked = selectedSummaryVersionKeys.has(version.key);
     input.onchange = () => {
-      const model = String(version.model);
-      if (input.checked) selectedSummaryVersionModels.add(model);
-      else selectedSummaryVersionModels.delete(model);
+      if (input.checked) selectedSummaryVersionKeys.add(version.key);
+      else selectedSummaryVersionKeys.delete(version.key);
       renderDetail();
     };
     const name = document.createElement("span");
-    name.textContent = version.model || "unknown";
+    name.textContent = version.model;
     const timestamp = document.createElement("small");
     timestamp.textContent = formatVersionDate(version.generated_at);
     label.append(input, name, timestamp);
+    // Mark the version that matches the lecture's active summary.
+    if (version.model === activeModel && version.summary === currentLecture.summary) {
+      const current = document.createElement("small");
+      current.className = "summary-version-current";
+      current.textContent = "当前";
+      label.append(current);
+    }
     choices.append(label);
   });
   controls.append(choices);
-  const selected = versions.filter((version) => selectedSummaryVersionModels.has(String(version.model)));
+  const selected = versions.filter((version) => selectedSummaryVersionKeys.has(version.key));
   if (!selected.length) {
     root.textContent = "请选择至少一个版本。";
     return;
@@ -622,56 +1009,7 @@ function renderSummaryVersions(root) {
     grid.append(panel);
   });
   root.append(grid);
-}
-
-function closeRerunSummary() {
-  $("#rerun-summary-panel").classList.add("hidden");
-  rerunModelOptions = [];
-  $("#rerun-model-select").replaceChildren();
-}
-
-async function openRerunSummary() {
-  if (!currentLecture || !String(currentLecture.transcript || "").trim()) {
-    message("这节课没有可用转录，暂时不能只重新生成笔记。", true);
-    return;
-  }
-  const button = $("#rerun-summary-button");
-  button.disabled = true;
-  try {
-    await populateRerunModelSelect("#rerun-model-select", true);
-    $("#rerun-summary-panel").classList.remove("hidden");
-  } catch (error) {
-    message(error.message, true);
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function confirmRerunSummary() {
-  if (!currentLecture) return;
-  const option = rerunModelOptions[Number($("#rerun-model-select").value)];
-  if (!option) {
-    message("请先选择模型。", true);
-    return;
-  }
-  if (!confirm(`使用 ${option.provider} / ${option.model} 重新生成这节课的笔记？\n\n将保留转录与 PPT OCR，且保留其他模型版本用于对比。这会产生模型费用。`)) return;
-  const button = $("#rerun-summary-confirm");
-  button.disabled = true;
-  button.textContent = "已提交…";
-  try {
-    await api(`/api/local/lectures/${encodeURIComponent(currentLecture.sub_id)}/rerun-summary`, {
-      method: "POST",
-      body: JSON.stringify(option),
-    });
-    closeRerunSummary();
-    message(`已提交 ${option.provider} / ${option.model} 重跑；完成后检查更新即可看到新版本。`);
-    setTimeout(() => loadRuns().catch(() => {}), 1500);
-  } catch (error) {
-    message(error.message, true);
-  } finally {
-    button.disabled = false;
-    button.textContent = "开始重跑";
-  }
+  activateMath(root);
 }
 
 async function populateRerunModelSelect(selector, refresh = false) {
@@ -697,18 +1035,6 @@ async function populateRerunModelSelect(selector, refresh = false) {
 
 function selectedRerunModel(selector) {
   return rerunModelOptions[Number($(selector).value)];
-}
-
-function renderLectureBulkCount() {
-  const count = selectedLectureIdsForRerun.size;
-  $("#lecture-bulk-count").textContent = `已选 ${count} 节`;
-  $("#lecture-bulk-confirm").disabled = count === 0;
-}
-
-function renderCourseBulkCount() {
-  const count = selectedCourseIdsForRerun.size;
-  $("#course-bulk-count").textContent = `已选 ${count} 门`;
-  $("#course-bulk-confirm").disabled = count === 0;
 }
 
 async function submitBatchRerun(subIds, courseIds, option, button) {
@@ -738,26 +1064,152 @@ async function submitBatchRerun(subIds, courseIds, option, button) {
   }
 }
 
-async function openCourseBulkRerun() {
-  courseBulkMode = true;
-  selectedCourseIdsForRerun.clear();
-  $("#course-bulk-panel").classList.remove("hidden");
-  renderCourseBulkCount();
-  try {
-    await populateRerunModelSelect("#course-bulk-model-select", true);
-    await loadCourses();
-  } catch (error) {
-    message(error.message, true);
+/* ── 重跑视图 ─────────────────────────────────────────────
+   课程级勾选走 course_ids（该课全部有转录的课次）；展开课程
+   可改选单个课次走 sub_ids。整课勾选时清空其课次选择。 */
+const rerunSelectedCourseIds = new Set();
+const rerunSelectedSubIds = new Set();
+const rerunOpenCourseIds = new Set();
+const rerunLectureCache = new Map();
+
+function updateRerunSubmit() {
+  const courses = rerunSelectedCourseIds.size;
+  const subs = rerunSelectedSubIds.size;
+  const button = $("#rerun-page-submit");
+  button.disabled = !courses && !subs;
+  const parts = [];
+  if (courses) parts.push(`${courses} 门课程`);
+  if (subs) parts.push(`${subs} 节课次`);
+  button.textContent = parts.length ? `重跑已选（${parts.join(" + ")}）` : "重跑已选";
+}
+
+async function toggleRerunCourseExpand(courseId) {
+  const cid = String(courseId);
+  if (rerunOpenCourseIds.has(cid)) {
+    rerunOpenCourseIds.delete(cid);
+    renderRerunView();
+    return;
+  }
+  rerunOpenCourseIds.add(cid);
+  renderRerunView();
+  if (!rerunLectureCache.has(cid)) {
+    try {
+      const lectures = await api(`/api/local/courses/${encodeURIComponent(cid)}/lectures`);
+      rerunLectureCache.set(cid, lectures);
+    } catch (error) {
+      rerunOpenCourseIds.delete(cid);
+      message(error.message, true);
+    }
+    renderRerunView();
   }
 }
 
-async function closeCourseBulkRerun() {
-  courseBulkMode = false;
-  selectedCourseIdsForRerun.clear();
-  $("#course-bulk-panel").classList.add("hidden");
-  renderCourseBulkCount();
-  await loadCourses();
+function renderRerunView() {
+  const list = $("#rerun-course-list");
+  list.replaceChildren();
+  if (!courseRows.length) {
+    list.textContent = "数据库中还没有课程。";
+    list.classList.add("empty");
+    return;
+  }
+  list.classList.remove("empty");
+  courseRows.forEach((course) => {
+    const cid = String(course.course_id);
+    const courseChecked = rerunSelectedCourseIds.has(cid);
+    const card = document.createElement("div");
+    card.className = "rerun-course";
+
+    const head = document.createElement("div");
+    head.className = "rerun-course-head";
+    const label = document.createElement("label");
+    label.className = "rerun-course-check";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = courseChecked;
+    checkbox.onchange = () => {
+      if (checkbox.checked) {
+        rerunSelectedCourseIds.add(cid);
+        // 整课重跑已包含全部课次，清掉该课的单课次选择
+        (rerunLectureCache.get(cid) || []).forEach((lec) =>
+          rerunSelectedSubIds.delete(String(lec.sub_id)));
+      } else {
+        rerunSelectedCourseIds.delete(cid);
+      }
+      renderRerunView();
+    };
+    const title = document.createElement("span");
+    title.className = "rerun-course-title";
+    title.textContent = course.title || cid;
+    label.append(checkbox, title);
+    const meta = document.createElement("span");
+    meta.className = "rerun-course-meta";
+    meta.textContent = `笔记 ${course.summary_count}/${course.total_count}`;
+    const expand = document.createElement("button");
+    expand.type = "button";
+    expand.className = "rerun-expand";
+    expand.textContent = rerunOpenCourseIds.has(cid) ? "▾ 收起" : "▸ 选课次";
+    expand.onclick = () => toggleRerunCourseExpand(cid);
+    head.append(label, meta, expand);
+    card.append(head);
+
+    if (rerunOpenCourseIds.has(cid)) {
+      const box = document.createElement("div");
+      box.className = "rerun-lectures";
+      const lectures = rerunLectureCache.get(cid);
+      if (!lectures) {
+        box.textContent = "正在读取课次…";
+      } else if (!lectures.length) {
+        box.textContent = "暂无课次。";
+      } else {
+        lectures.forEach((lecture) => {
+          const sid = String(lecture.sub_id);
+          const rerunnable = Boolean(Number(lecture.transcript_available));
+          const row = document.createElement("label");
+          row.className = `rerun-lecture${rerunnable ? "" : " disabled"}`;
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.disabled = !rerunnable || courseChecked;
+          input.checked = courseChecked || rerunSelectedSubIds.has(sid);
+          input.title = rerunnable ? "" : "没有可用转录，不能只重跑摘要";
+          input.onchange = () => {
+            if (input.checked) rerunSelectedSubIds.add(sid);
+            else rerunSelectedSubIds.delete(sid);
+            updateRerunSubmit();
+          };
+          const name = document.createElement("span");
+          name.textContent = lectureDisplayName(lecture);
+          row.append(input, name);
+          box.append(row);
+        });
+      }
+      card.append(box);
+    }
+    list.append(card);
+  });
+  updateRerunSubmit();
 }
+
+async function loadRerunView() {
+  if (!courseRows.length) courseRows = await api("/api/local/courses");
+  try {
+    await populateRerunModelSelect("#rerun-page-model-select", true);
+  } catch (error) {
+    message(error.message, true);
+  }
+  renderRerunView();
+}
+
+$("#rerun-page-submit").onclick = async () => {
+  const result = await submitBatchRerun(
+    [...rerunSelectedSubIds], [...rerunSelectedCourseIds],
+    selectedRerunModel("#rerun-page-model-select"), $("#rerun-page-submit"),
+  );
+  if (result) {
+    rerunSelectedCourseIds.clear();
+    rerunSelectedSubIds.clear();
+    renderRerunView();
+  }
+};
 
 function renderSubscriptionCourse(course, action, label) {
   const row = document.createElement("div");
@@ -769,10 +1221,35 @@ function renderSubscriptionCourse(course, action, label) {
   meta.className = "meta";
   meta.textContent = [course.teacher, course.dept, course.term, course.course_id].filter(Boolean).join(" · ");
   content.append(title, meta);
-  const button = createButton(label, action, "subscription-action");
+  const button = createButton(label, action, `subscription-action ${label === "移除" ? "remove" : "add"}`);
   button.setAttribute("aria-label", `${label}${course.title || course.course_id}`);
   row.append(content, button);
   return row;
+}
+
+// 已订阅排序：time = 订阅时间（course_ids 列表顺序，新订阅追加在末尾）；
+// term = 课程学期。正/倒序与字段选择都持久化在本机 localStorage。
+const SUBSCRIPTION_SORT_KEY = "icourse-local-subscription-sort";
+const SUBSCRIPTION_SORT_DIR_KEY = "icourse-local-subscription-sort-dir";
+let subscriptionSort = localStorage.getItem(SUBSCRIPTION_SORT_KEY) || "time";
+let subscriptionSortDir = localStorage.getItem(SUBSCRIPTION_SORT_DIR_KEY) || "asc";
+
+function orderedSubscriptionCourses() {
+  const ordered = [...subscriptionCourses];
+  if (subscriptionSort === "term") {
+    ordered.sort((a, b) =>
+      String(a.term || "").localeCompare(String(b.term || ""), "zh")
+      || String(a.title || a.course_id).localeCompare(String(b.title || b.course_id), "zh")
+    );
+  } else {
+    const position = new Map(subscribedCourseIds.map((id, index) => [String(id), index]));
+    ordered.sort((a, b) =>
+      (position.get(String(a.course_id)) ?? Number.MAX_SAFE_INTEGER)
+      - (position.get(String(b.course_id)) ?? Number.MAX_SAFE_INTEGER)
+    );
+  }
+  if (subscriptionSortDir === "desc") ordered.reverse();
+  return ordered;
 }
 
 function renderSubscriptions() {
@@ -783,11 +1260,12 @@ function renderSubscriptions() {
   $("#subscription-count").textContent = String(subscribedCourseIds.length);
   current.classList.toggle("empty", !subscriptionCourses.length);
   if (!subscriptionCourses.length) current.textContent = "尚未订阅课程。";
-  subscriptionCourses.forEach((course) => {
+  orderedSubscriptionCourses().forEach((course) => {
     current.append(renderSubscriptionCourse(course, () => {
       subscribedCourseIds = subscribedCourseIds.filter((id) => String(id) !== String(course.course_id));
       subscriptionCourses = subscriptionCourses.filter((item) => String(item.course_id) !== String(course.course_id));
       renderSubscriptions();
+      queueSubscriptionSave();
     }, "移除"));
   });
   catalog.classList.toggle("empty", !catalogRows.length);
@@ -803,6 +1281,8 @@ function renderSubscriptions() {
         subscriptionCourses = [...subscriptionCourses, course];
       }
       renderSubscriptions();
+      // 点击“订阅/移除”立即保存，无需再按保存按钮。
+      queueSubscriptionSave();
     }, subscribed ? "移除" : "订阅");
     catalogItem.append(createButton("单次运行", () => {
       const field = $("#single-run-ids");
@@ -838,22 +1318,36 @@ async function loadSubscriptions() {
   await loadSubscriptionCatalog();
 }
 
+let subscriptionSaving = false;
+let subscriptionSaveQueued = false;
+
+// 点击“订阅/移除”后立即落盘：快速连续点击时合并为一次最终保存。
+function queueSubscriptionSave() {
+  subscriptionSaveQueued = true;
+  if (!subscriptionSaving) saveSubscriptions();
+}
+
 async function saveSubscriptions() {
-  const button = $("#subscription-save-button");
-  button.disabled = true;
+  if (subscriptionSaving) return;
+  subscriptionSaving = true;
   try {
-    const state = await api("/api/local/subscriptions", {
-      method: "PUT",
-      body: JSON.stringify({course_ids: subscribedCourseIds}),
-    });
-    subscribedCourseIds = (state.course_ids || []).map(String);
-    subscriptionCourses = state.courses || [];
-    renderSubscriptions();
-    message(`已保存 ${subscribedCourseIds.length} 门课程的订阅`);
+    while (subscriptionSaveQueued) {
+      subscriptionSaveQueued = false;
+      const state = await api("/api/local/subscriptions", {
+        method: "PUT",
+        body: JSON.stringify({course_ids: subscribedCourseIds}),
+      });
+      subscribedCourseIds = (state.course_ids || []).map(String);
+      subscriptionCourses = state.courses || [];
+      renderSubscriptions();
+      message(`已保存 ${subscribedCourseIds.length} 门课程的订阅`);
+    }
   } catch (error) {
     message(error.message, true);
+    // 保存失败时重新拉取远端状态，避免界面与 Secret 不一致。
+    try { await loadSubscriptions(); } catch (_) {}
   } finally {
-    button.disabled = false;
+    subscriptionSaving = false;
   }
 }
 
@@ -875,37 +1369,55 @@ async function loadRuns() {
     link.rel = "noreferrer";
     link.textContent = run.name;
     const meta = document.createElement("div");
-    meta.className = `meta status-${run.conclusion || run.status}`;
-    meta.textContent = `${run.conclusion || run.status} · ${new Date(run.created_at).toLocaleString()}`;
+    const statusKey = run.conclusion || run.status;
+    meta.className = `meta status-${statusKey}`;
+    const stamp = new Date(run.created_at);
+    const stampText = Number.isNaN(stamp.getTime())
+      ? ""
+      : stamp.toLocaleString("zh-CN", {month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit"});
+    meta.textContent = `${RUN_STATUS_LABELS[statusKey] || statusKey}${stampText ? " · " + stampText : ""}`;
     row.append(link, meta);
     root.append(row);
   });
 }
 
 function setModelView(open) {
-  if (open) showView("models"); else showView("settings");
+  if (open) showView("models"); else showView("settings", {keepScroll: true});
 }
 
 function setObsidianView(open) {
-  if (open) showView("obsidian"); else showView("settings");
+  if (open) showView("obsidian"); else showView("settings", {keepScroll: true});
 }
 
-function showView(view) {
+function showView(view, options = {}) {
+  const changed = view !== activeView;
   activeView = view;
   const paneIds = {
     courses: "view-courses", lectures: "view-lectures", detail: "view-detail",
-    search: "view-search", subscriptions: "view-subscriptions", automation: "view-automation", settings: "view-settings",
+    search: "view-search", subscriptions: "view-subscriptions", rerun: "view-rerun",
+    automation: "view-automation", settings: "view-settings",
     models: "model-management", obsidian: "obsidian-sync",
   };
   Object.entries(paneIds).forEach(([name, id]) => $("#" + id).classList.toggle("hidden", name !== view));
   const title = {
-    courses: "iCourse", lectures: currentCourse?.title || "课程", detail: currentLecture?.sub_title || "笔记",
-    search: "搜索", subscriptions: "订阅", automation: "自动化", settings: "设置", models: "模型与 API", obsidian: "同步到 Obsidian",
+    courses: "iCourse", lectures: currentCourse?.title || "课程", detail: currentLecture ? lectureDisplayName(currentLecture) : "笔记",
+    search: "搜索", subscriptions: "订阅", rerun: "重跑",
+    automation: "自动化", settings: "设置", models: "模型与 API", obsidian: "同步到 Obsidian",
   }[view] || "iCourse";
   $("#page-title").textContent = title;
-  $("#back-button").classList.toggle("hidden", !["lectures", "detail", "models", "obsidian"].includes(view));
-  $("#header-sync-button").classList.toggle("hidden", view !== "courses");
-  document.querySelectorAll(".nav-button").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+  $("#back-button").classList.toggle("hidden", !["lectures", "detail", "models", "obsidian", "rerun", "automation"].includes(view));
+  // Lectures/detail are depths of the courses path — keep 课程 highlighted;
+  // rerun/automation live under 设置 now.
+  const navView = ["lectures", "detail"].includes(view) ? "courses"
+    : ["rerun", "automation", "models", "obsidian"].includes(view) ? "settings" : view;
+  document.querySelectorAll(".nav-button").forEach((button) => {
+    const active = button.dataset.view === navView;
+    button.classList.toggle("active", active);
+    button.toggleAttribute("aria-current", active);
+  });
+  // Forward navigation starts at the top; explicit back actions keep the
+  // previous scroll position (callers pass {keepScroll: true}).
+  if (changed && !options.keepScroll) window.scrollTo(0, 0);
 }
 
 function normalizeProvider(item) {
@@ -939,7 +1451,9 @@ async function loadModelProviders() {
   list.append(loading);
   const result = await api("/api/local/model-providers");
   modelProviders = (result.providers || []).map(normalizeProvider);
-  $("#model-source").textContent = modelSourceLabel(result.source);
+  const source = $("#model-source");
+  source.textContent = modelSourceLabel(result.source);
+  source.classList.remove("hidden");
   renderModelProviders();
 }
 
@@ -1383,23 +1897,49 @@ async function syncObsidianPlan() {
   }
 }
 
+/* ── 日间/夜间模式 ──
+   data-theme 已在 <head> 内联脚本中早于首屏设置，这里只负责按钮状态与切换。 */
+const THEME_KEY = "icourse-local-theme";
+
+const THEME_ICONS = {
+  moon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
+  sun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+};
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const button = $("#theme-toggle");
+  const dark = theme === "dark";
+  button.innerHTML = dark ? THEME_ICONS.sun : THEME_ICONS.moon;
+  const label = dark ? "切换到日间模式" : "切换到夜间模式";
+  button.setAttribute("aria-label", label);
+  button.title = label;
+}
+
+applyTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
+$("#theme-toggle").onclick = () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  try { localStorage.setItem(THEME_KEY, next); } catch (_) {}
+  applyTheme(next);
+};
+
 $("#setup-form").onsubmit = async (event) => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.currentTarget));
-  const button = event.currentTarget.querySelector('button[type="submit"]');
-  button.disabled = true;
-  message("正在连接并打开资料库…");
+  const submit = event.currentTarget.querySelector("button[type=submit]");
+  submit.disabled = true;
+  submit.textContent = "正在连接…";
   try {
     await api("/api/local/configure", {method: "POST", body: JSON.stringify(data)});
-    for (const name of ["token", "stuid", "uispsw", "dashscope", "smtp"]) $("#setup-form").elements[name].value = "";
-    loadedLibraryIdentity = "";
-    currentCourse = null; currentLecture = null; courseLectures = []; rerunModelOptions = [];
-    message("会话已配置");
+    message("本地会话已配置");
     activeView = "courses";
     await refreshStatus();
   } catch (error) {
     message(error.message, true);
-  } finally { button.disabled = false; }
+  } finally {
+    submit.disabled = false;
+    submit.textContent = isPages ? "连接并打开资料库" : "连接并打开本地资料库";
+  }
 };
 
 $("#configure-button").onclick = () => {
@@ -1433,7 +1973,9 @@ $("#model-button").onclick = async () => {
   try {
     await loadModelProviders();
   } catch (error) {
-    $("#model-source").textContent = "配置读取失败";
+    const source = $("#model-source");
+    source.textContent = "配置读取失败";
+    source.classList.remove("hidden");
     const root = $("#model-provider-list");
     root.replaceChildren();
     const detail = document.createElement("p");
@@ -1475,27 +2017,22 @@ $("#obsidian-sync-confirm-button").onclick = syncObsidianPlan;
 });
 
 async function syncDatabase() {
+  const button = $("#header-sync-button");
   try {
-    ["#sync-button", "#automation-sync-button", "#header-sync-button"].forEach((selector) => {
-      const button = $(selector);
-      if (button) button.disabled = true;
-    });
+    button.disabled = true;
+    button.classList.add("syncing");
     message("正在检查并更新本地资料库…");
     const result = await api("/api/local/sync", {method: "POST", body: "{}"});
-    message(result.unchanged ? "本地资料已是最新" : "资料库已更新");
+    message(result.unchanged ? "本地资料已是最新" : `资料库已更新：${result.courses} 门课程`);
     await refreshStatus();
   } catch (error) {
     message(error.message, true);
   } finally {
-    ["#sync-button", "#automation-sync-button", "#header-sync-button"].forEach((selector) => {
-      const button = $(selector);
-      if (button) button.disabled = false;
-    });
+    button.disabled = false;
+    button.classList.remove("syncing");
   }
 }
 
-$("#sync-button").onclick = syncDatabase;
-$("#automation-sync-button").onclick = syncDatabase;
 $("#header-sync-button").onclick = syncDatabase;
 
 $("#run-button").onclick = async () => {
@@ -1512,44 +2049,71 @@ $("#run-button").onclick = async () => {
   }
 };
 
-$("#course-back-button").onclick = () => showView("courses");
-$("#detail-back").onclick = () => showView("lectures");
-$("#rerun-summary-button").onclick = openRerunSummary;
-$("#rerun-summary-close").onclick = closeRerunSummary;
-$("#rerun-summary-confirm").onclick = confirmRerunSummary;
-$("#course-bulk-toggle").onclick = openCourseBulkRerun;
-$("#course-bulk-close").onclick = () => closeCourseBulkRerun().catch((error) => message(error.message, true));
-$("#course-bulk-confirm").onclick = async () => {
-  const result = await submitBatchRerun(
-    [], [...selectedCourseIdsForRerun],
-    selectedRerunModel("#course-bulk-model-select"), $("#course-bulk-confirm"),
-  );
-  if (result) closeCourseBulkRerun().catch((error) => message(error.message, true));
+$("#backfill-titles-button").onclick = async () => {
+  if (!confirm("为所有缺少标题的笔记生成 AI 标题？\n\n每篇笔记一次小调用（基于 PPT 与转录），不会重新生成摘要。")) return;
+  try {
+    await api("/api/local/workflows/single_run.yml/dispatch", {
+      method: "POST",
+      body: JSON.stringify({ref: "main", inputs: {backfill_titles: "true"}}),
+    });
+    message("已触发标题补齐，完成后检查更新即可看到新标题");
+    setTimeout(loadRuns, 1500);
+  } catch (error) {
+    message(error.message, true);
+  }
 };
-$("#lecture-bulk-confirm").onclick = async () => {
-  const result = await submitBatchRerun(
-    [...selectedLectureIdsForRerun], [],
-    selectedRerunModel("#lecture-bulk-model-select"), $("#lecture-bulk-confirm"),
+
+$("#course-back-button").onclick = () => showView("courses", {keepScroll: true});
+$("#detail-back").onclick = () => showView("lectures", {keepScroll: true});
+// 笔记改名：双击详情页标题触发，不再单设按钮。
+async function renameCurrentLecture() {
+  if (!currentLecture) return;
+  const subId = String(currentLecture.sub_id);
+  const input = prompt(
+    "修改笔记名称（清空并确定则恢复自动命名）",
+    lectureNames[subId] || lectureDisplayName(currentLecture),
   );
-  if (result && currentCourse) openCourse(currentCourse).catch((error) => message(error.message, true));
-};
+  if (input === null) return;
+  const name = input.trim();
+  try {
+    const result = await api("/api/local/lecture-names", {
+      method: "PUT",
+      body: JSON.stringify({sub_id: subId, name}),
+    });
+    lectureNames = result.names || {};
+    const displayName = lectureDisplayName(currentLecture);
+    $("#detail-title").textContent = displayName;
+    const subtitle = currentLecture.sub_title || "";
+    $("#detail-subtitle").classList.toggle("hidden", !subtitle || displayName === subtitle);
+    renderLectureList();
+    message(name ? "已保存笔记名称" : "已恢复自动命名");
+  } catch (error) {
+    message(error.message, true);
+  }
+}
+$("#detail-title").ondblclick = renameCurrentLecture;
 $("#back-button").onclick = () => {
-  if (activeView === "detail") showView("lectures");
-  else if (activeView === "lectures") showView("courses");
-  else showView("settings");
+  if (activeView === "detail") showView("lectures", {keepScroll: true});
+  else if (activeView === "lectures") showView("courses", {keepScroll: true});
+  else showView("settings", {keepScroll: true});
 };
-$("#previous-lecture").onclick = () => {
+$("#previous-lecture").onclick = async () => {
   const index = courseLectures.findIndex((lecture) => String(lecture.sub_id) === String(currentLecture?.sub_id));
-  if (index > 0) openLecture(courseLectures[index - 1].sub_id);
+  if (index > 0) {
+    await openLecture(courseLectures[index - 1].sub_id);
+    window.scrollTo(0, 0);
+  }
 };
-$("#next-lecture").onclick = () => {
+$("#next-lecture").onclick = async () => {
   const index = courseLectures.findIndex((lecture) => String(lecture.sub_id) === String(currentLecture?.sub_id));
-  if (index >= 0 && index < courseLectures.length - 1) openLecture(courseLectures[index + 1].sub_id);
+  if (index >= 0 && index < courseLectures.length - 1) {
+    await openLecture(courseLectures[index + 1].sub_id);
+    window.scrollTo(0, 0);
+  }
 };
 document.querySelectorAll(".detail-tab").forEach((button) => {
   button.onclick = () => {
     detailTab = button.dataset.detailTab;
-    if (detailTab !== "summary") closeRerunSummary();
     renderDetail();
   };
 });
@@ -1557,7 +2121,9 @@ document.querySelectorAll(".course-zone-button").forEach((button) => {
   button.onclick = async () => {
     activeCourseZone = button.dataset.courseZone;
     document.querySelectorAll(".course-zone-button").forEach((item) => {
-      item.classList.toggle("active", item === button);
+      const active = item === button;
+      item.classList.toggle("active", active);
+      item.setAttribute("aria-selected", String(active));
     });
     try { await loadCourses(); }
     catch (error) { message(error.message, true); }
@@ -1570,84 +2136,171 @@ document.querySelectorAll(".nav-button").forEach((button) => {
     if (view === "subscriptions") {
       try { await loadSubscriptions(); }
       catch (error) { message(error.message, true); }
+    } else if (view === "rerun") {
+      try { await loadRerunView(); }
+      catch (error) { message(error.message, true); }
     }
   };
 });
-$("#subscription-save-button").onclick = saveSubscriptions;
+$("#subscription-sort").value = subscriptionSort;
+$("#subscription-sort").onchange = () => {
+  subscriptionSort = $("#subscription-sort").value;
+  localStorage.setItem(SUBSCRIPTION_SORT_KEY, subscriptionSort);
+  renderSubscriptions();
+};
+
+function renderSubscriptionSortDir() {
+  $("#subscription-sort-dir").textContent = subscriptionSortDir === "asc" ? "↑" : "↓";
+  $("#subscription-sort-dir").title = subscriptionSortDir === "asc" ? "当前正序，点击切换倒序" : "当前倒序，点击切换正序";
+}
+renderSubscriptionSortDir();
+$("#subscription-sort-dir").onclick = () => {
+  subscriptionSortDir = subscriptionSortDir === "asc" ? "desc" : "asc";
+  localStorage.setItem(SUBSCRIPTION_SORT_DIR_KEY, subscriptionSortDir);
+  renderSubscriptionSortDir();
+  renderSubscriptions();
+};
 $("#subscription-term").onchange = () => loadSubscriptionCatalog().catch((error) => message(error.message, true));
 $("#subscription-query").oninput = () => {
   clearTimeout(subscriptionTimer);
   subscriptionTimer = setTimeout(() => loadSubscriptionCatalog().catch((error) => message(error.message, true)), 240);
 };
 $("#settings-obsidian-button").onclick = () => $("#obsidian-button").click();
+$("#settings-rerun-button").onclick = async () => {
+  showView("rerun");
+  try { await loadRerunView(); }
+  catch (error) { message(error.message, true); }
+};
+$("#settings-automation-button").onclick = () => showView("automation");
 $("#refresh-runs-button").onclick = () => loadRuns().catch((error) => message(error.message, true));
 
-async function searchLibrary(resetPage = true) {
-  clearTimeout(searchTimer);
-  if (resetPage) searchPage = 1;
+/* ── 搜索：多关键词 AND、域/课程过滤、分页 ── */
+const SEARCH_DOMAIN_LABELS = { title: "标题", summary: "摘要", transcript: "转录", ocr: "OCR" };
+const searchActiveDomains = new Set(Object.keys(SEARCH_DOMAIN_LABELS));
+let searchPage = 1;
+let searchRequestId = 0;
+let searchHasMore = false;
+
+function searchTerms() {
+  return $("#search").value.trim().split(/\s+/).filter(Boolean);
+}
+
+function resetSearchResults(messageText) {
+  const root = $("#search-results");
+  root.replaceChildren();
+  root.className = "search-results empty";
+  root.textContent = messageText;
+  $("#search-meta").classList.add("hidden");
+  $("#search-more").classList.add("hidden");
+  searchPage = 1;
+  searchHasMore = false;
+}
+
+// 片段与关键词都先转义 HTML 再插 <mark>，正则特殊字符需二次转义。
+function highlightSearchSnippet(snippet, terms) {
+  let html = escapeHtml(snippet);
+  terms.forEach((term) => {
+    const safe = escapeHtml(term).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (safe) html = html.replace(new RegExp("(" + safe + ")", "gi"), "<mark>$1</mark>");
+  });
+  return html;
+}
+
+function renderSearchResultItem(item, terms) {
+  const button = document.createElement("button");
+  button.className = "search-card";
+  const row = document.createElement("div");
+  row.className = "search-row";
+  const left = document.createElement("div");
+  const course = document.createElement("p");
+  course.textContent = item.course_title || item.course_id;
+  const title = document.createElement("h2");
+  // 与课次列表一致：自定义改名 > AI/派生标题 > 原始节次
+  title.textContent = lectureNames[String(item.sub_id)]
+    || item.auto_title || item.sub_title || item.sub_id;
+  const snippet = document.createElement("p");
+  snippet.innerHTML = highlightSearchSnippet(item.snippet || "", terms);
+  left.append(course, title, snippet);
+  const hit = document.createElement("span");
+  hit.className = "count-badge";
+  hit.textContent = SEARCH_DOMAIN_LABELS[item.hit_field] || "摘要";
+  row.append(left, hit);
+  button.append(row);
+  // 命中哪里就打开哪个 tab，并定位到关键词在原文中的位置。
+  const tab = { transcript: "transcript", ocr: "ppt" }[item.hit_field] || "summary";
+  button.onclick = () => openLecture(item.sub_id, { tab, terms });
+  return button;
+}
+
+async function runSearch(page) {
   const requestId = ++searchRequestId;
   const query = $("#search").value.trim();
-  $("#search-previous").disabled = searchPage <= 1;
-  $("#search-next").disabled = true;
   if (!query) {
-    const root = $("#search-results");
-    root.textContent = "输入关键词后开始搜索。";
-    root.className = "search-results empty";
+    resetSearchResults("输入关键词后开始搜索。");
     return;
   }
-  searchTimer = setTimeout(async () => {
-    try {
-      const params = new URLSearchParams({q: query, page: String(searchPage), courses: $("#search-course").value});
-      for (const name of ["summary", "transcript", "ocr"]) params.set(name, String($("#search-" + name).checked));
-      const results = await api(`/api/local/search?${params}`);
-      if (requestId !== searchRequestId) return;
-      $("#search-next").disabled = results.length < 50;
-      const root = $("#search-results");
-      root.replaceChildren();
-      root.classList.remove("empty");
-      results.forEach((item) => {
-        const button = document.createElement("button");
-        button.className = "search-card";
-        const row = document.createElement("div");
-        row.className = "search-row";
-        const left = document.createElement("div");
-        const course = document.createElement("p");
-        course.textContent = item.course_title || item.course_id;
-        const title = document.createElement("h2");
-        title.textContent = item.sub_title || item.sub_id;
-        const snippet = document.createElement("p");
-        snippet.textContent = item.snippet || item.hit_field;
-        left.append(course, title, snippet);
-        const hit = document.createElement("span");
-        hit.className = "count-badge";
-        hit.textContent = item.hit_field === "ocr" ? "OCR" : item.hit_field === "transcript" ? "转录" : "摘要";
-        row.append(left, hit);
-        button.append(row);
-        button.onclick = async () => {
-          await openLecture(item.sub_id);
-          detailTab = item.hit_field === "ocr" ? "ppt" : item.hit_field;
-          renderDetail();
-        };
-        root.append(button);
-      });
-      if (!results.length) {
-        root.textContent = "没有搜索结果。";
-        root.classList.add("empty");
-      }
-    } catch (error) {
-      if (requestId === searchRequestId) message(error.message, true);
+  const terms = searchTerms();
+  const params = new URLSearchParams({ q: query, page: String(page), page_size: "50" });
+  const courseId = $("#search-course").value;
+  if (courseId) params.set("course_id", courseId);
+  params.set("domains", [...searchActiveDomains].join(","));
+  try {
+    const result = await api(`/api/local/search?${params}`);
+    if (requestId !== searchRequestId) return;
+    if (!result.total) {
+      resetSearchResults("没有找到匹配内容。");
+      return;
     }
-  }, 300);
+    const root = $("#search-results");
+    if (page <= 1) root.replaceChildren();
+    root.classList.remove("empty");
+    result.results.forEach((item) => root.append(renderSearchResultItem(item, terms)));
+    searchPage = result.page;
+    searchHasMore = result.has_more;
+    const meta = $("#search-meta");
+    meta.textContent = `共 ${result.total} 条结果`;
+    meta.classList.remove("hidden");
+    $("#search-more").classList.toggle("hidden", !searchHasMore);
+  } catch (error) {
+    message(error.message, true);
+  }
+}
+
+// 课程下拉的选项跟随课程列表重建，保留当前选择。
+function syncSearchCourseOptions() {
+  const select = $("#search-course");
+  const selected = select.value;
+  select.replaceChildren(new Option("全部课程", ""));
+  courseRows.forEach((course) => {
+    select.append(new Option(course.title || course.course_id, String(course.course_id)));
+  });
+  select.value = courseRows.some((c) => String(c.course_id) === selected) ? selected : "";
+}
+
+$("#search").oninput = () => {
+  clearTimeout(searchTimer);
+  searchRequestId += 1;
+  searchTimer = setTimeout(() => runSearch(1), 300);
+};
+$("#search-course").onchange = () => runSearch(1);
+document.querySelectorAll(".search-domain").forEach((button) => {
+  button.onclick = () => {
+    const domain = button.dataset.domain;
+    // 至少保留一个搜索域
+    if (searchActiveDomains.has(domain) && searchActiveDomains.size === 1) return;
+    if (searchActiveDomains.has(domain)) searchActiveDomains.delete(domain);
+    else searchActiveDomains.add(domain);
+    button.classList.toggle("active", searchActiveDomains.has(domain));
+    runSearch(1);
+  };
+});
+$("#search-more").onclick = () => {
+  if (searchHasMore) runSearch(searchPage + 1);
 };
 
-$("#search").oninput = () => searchLibrary();
-for (const selector of ["#search-course", "#search-summary", "#search-transcript", "#search-ocr"]) $(selector).onchange = () => searchLibrary();
-$("#search-previous").onclick = () => { searchPage = Math.max(1, searchPage - 1); searchLibrary(false); };
-$("#search-next").onclick = () => { searchPage += 1; searchLibrary(false); };
+refreshStatus().catch((error) => message(`无法连接本地服务：${error.message}`, true));
 
 window.addEventListener("icourse-render-ready", () => { if (currentLecture) renderDetail(); });
-refreshStatus().catch((error) => message(`无法打开控制台：${error.message}`, true));
-
 // Shared workflow actions, available through either transport.
 let dataActionCourse = null;
 async function openDataActions(course, subId = null) {

@@ -557,7 +557,7 @@ def _migrate_shard_schema(target: sqlite3.Connection) -> None:
                    model TEXT NOT NULL,
                    summary TEXT NOT NULL,
                    generated_at TEXT NOT NULL,
-                   PRIMARY KEY (sub_id, model)
+                   PRIMARY KEY (sub_id, model, generated_at)
                )"""
         )
 
@@ -665,18 +665,11 @@ def reassemble_database(
                 os.unlink(tmp_path)
         # A local console can reassemble an older published shard set before
         # any new workflow opens it through Database._init_tables.  Seed its
-        # existing active notes here too, so the first selected-model rerun
+        # existing active notes here too (guarded: lectures that already have
+        # version rows are left untouched), so the first selected-model rerun
         # immediately has both versions available for comparison.
-        target.execute(
-            """INSERT OR IGNORE INTO summary_versions
-                   (sub_id, model, summary, generated_at)
-               SELECT sub_id,
-                      COALESCE(NULLIF(summary_model, ''), 'unknown'),
-                      summary,
-                      COALESCE(NULLIF(processed_at, ''), datetime('now'))
-               FROM lectures
-               WHERE TRIM(COALESCE(summary, '')) != ''"""
-        )
+        from src.data.schema import backfill_summary_versions
+        backfill_summary_versions(target, "main")
         target.commit()
     finally:
         target.close()

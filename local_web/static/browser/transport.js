@@ -211,6 +211,24 @@
     await dispatch('single_run.yml', {inputs: {course_ids: '', resummarize_sub_ids: subIds.join(','), summary_provider: payload.provider, summary_model: payload.model, use_official_transcript: 'false'}});
     return {ok: true, sub_ids: subIds, count: subIds.length};
   }
+  function plainMarkdown(value) {
+    return String(value || '').replace(/\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\$[^$\n]+\$|\\\([\s\S]*?\\\)/g, ' ')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/<[^>]+>/g, ' ').replace(/^\s*\|?[\s:|-]*--[\s:|-]*$/gm, ' ')
+      .replace(/[*_`~#>|]/g, '').replace(/\s+/g, ' ').trim();
+  }
+  function autoTitle(row) {
+    if (row.ai_title) return row.ai_title;
+    const summary = String(row.summary || '');
+    const heading = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/m.exec(summary);
+    const candidates = [heading?.[1], summary.split('\n').find(line => line.trim())];
+    for (const candidate of candidates) {
+      const clean = plainMarkdown(candidate);
+      if (clean) return clean.length > 40 ? clean.slice(0, 39).trimEnd() + '…' : clean;
+    }
+    return row.sub_title || '';
+  }
+
   async function request(path, options = {}) {
     const url = new URL(path, location.origin);
     const route = url.pathname.replace(/^\/api\/local/, '');
@@ -261,6 +279,17 @@
     if (route === '/summary-reruns' && method === 'POST') return rerun(payload);
     const singleRerun = /^\/lectures\/([^/]+)\/rerun-summary$/.exec(route);
     if (singleRerun && method === 'POST') return rerun({...payload, sub_ids: [decodeURIComponent(singleRerun[1])]});
+    if (route === '/lecture-names') {
+      const names = readPreference('lecture-names', {});
+      if (method === 'PUT') {
+        const id = String(payload.sub_id || '').trim();
+        const name = String(payload.name || '').trim();
+        if (!id || id.length > 100 || name.length > 200) throw new Error('笔记名称或 ID 无效');
+        if (name) names[id] = name; else delete names[id];
+        savePreference('lecture-names', names);
+      }
+      return {names};
+    }
     if (route === '/course-zones') {
       let zones = readPreference('zones', {});
       if (method === 'PUT') {
@@ -276,22 +305,30 @@
     if (!ready) throw new Error('请先检查更新，打开资料库');
     if (route === '/courses') return db.getCourses();
     const course = /^\/courses\/([^/]+)\/lectures$/.exec(route);
-    if (course) return db.getLectures(decodeURIComponent(course[1]));
+    if (course) return db.getLectures(decodeURIComponent(course[1])).map(row => ({...row, auto_title: autoTitle(row)}));
     const lecture = /^\/lectures\/([^/]+)$/.exec(route);
     if (lecture) {
       const row = db.getLecture(decodeURIComponent(lecture[1]));
       if (!row) throw new Error('课次不存在');
-      return {...row, ppt_pages: db.getPptPages(row.sub_id), summary_versions: db.getSummaryVersions(row.sub_id)};
+      return {...row, auto_title: autoTitle(row), ppt_pages: db.getPptPages(row.sub_id), summary_versions: db.getSummaryVersions(row.sub_id)};
     }
     if (route === '/search') {
       const q = url.searchParams.get('q') || '';
-      const page = Number(url.searchParams.get('page') || 1);
-      const domains = Object.fromEntries(['summary', 'transcript', 'ocr'].map(name => [name, url.searchParams.get(name) !== 'false']));
-      return db.searchSummaries(q, ids((url.searchParams.get('courses') || '').split(',')), page, 50, domains).results.map(row => {
-        const value = String(row.hit_field === 'ocr' ? row.ppt_text || '' : row[row.hit_field] || '');
-        const start = Math.max(0, value.toLowerCase().indexOf(q.toLowerCase()) - 70);
-        return {...row, snippet: value.slice(start, start + 240)};
+      const terms = q.trim().split(/\s+/).filter(Boolean);
+      const selected = (url.searchParams.get('domains') || 'title,summary,transcript,ocr').split(',');
+      const domains = Object.fromEntries(['title', 'summary', 'transcript', 'ocr'].map(name => [name, selected.includes(name)]));
+      const result = db.searchSummaries(q, ids((url.searchParams.get('course_id') || '').split(',')),
+        Number(url.searchParams.get('page') || 1), Number(url.searchParams.get('page_size') || 50), domains);
+      const results = result.results.map(row => {
+        const value = String(row.hit_field === 'ocr' ? row.ppt_text || '' : row.hit_field === 'title' ? row.ai_title || row.sub_title || '' : row[row.hit_field] || '');
+        const plain = plainMarkdown(value);
+        const hits = terms.map(term => plain.toLowerCase().indexOf(term.toLowerCase())).filter(index => index >= 0);
+        const start = Math.max(0, (hits[0] || 0) - 80);
+        return {sub_id: row.sub_id, sub_title: row.sub_title, course_id: row.course_id,
+          course_title: row.course_title, auto_title: autoTitle(row),
+          hit_field: row.hit_field, snippet: plain.slice(start, start + 240)};
       });
+      return {results, total: result.total, page: result.page, has_more: result.hasMore};
     }
     if (route === '/subscriptions') {
       if (method === 'PUT') {

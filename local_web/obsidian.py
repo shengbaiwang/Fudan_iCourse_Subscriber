@@ -77,6 +77,14 @@ def _display_text(value: Any, fallback: str = "") -> str:
     return text or fallback
 
 
+def _note_title(note: dict[str, Any]) -> str:
+    """Display title for an exported note: AI title first, raw label as fallback."""
+    return (
+        _display_text(note.get("ai_title"))
+        or _display_text(note.get("sub_title"), str(note.get("sub_id") or ""))
+    )
+
+
 def _yaml_string(value: Any) -> str:
     """JSON strings are valid YAML scalars and avoid frontmatter injection."""
     return json.dumps(_display_text(value), ensure_ascii=False)
@@ -273,7 +281,7 @@ class ObsidianSyncService:
         sub_id = _display_text(note.get("sub_id"))
         if not sub_id:
             raise ObsidianSyncError("数据库中存在没有课次 ID 的笔记，无法安全同步")
-        title = _display_text(note.get("sub_title"), sub_id)
+        title = _note_title(note)
         previous = manifest["notes"].get(sub_id)
         relative_path = (
             previous["path"]
@@ -302,7 +310,9 @@ class ObsidianSyncService:
         course = _safe_component(note.get("course_title"), "未命名课程")
         course_folder = f"{course} [{course_id}]"
         date = _safe_component(note.get("date"), "未标日期", limit=20)
-        lecture = _safe_component(note.get("sub_title"), "未命名课次")
+        lecture = _safe_component(
+            note.get("ai_title") or note.get("sub_title"), "未命名课次"
+        )
         sub_id = _display_text(note.get("sub_id"), "lecture")
         suffix = hashlib.sha256(sub_id.encode("utf-8")).hexdigest()[:8]
         filename = f"{date} {lecture} [{suffix}].md"
@@ -396,7 +406,8 @@ class ObsidianSyncService:
         include_transcript: bool,
         include_ocr: bool,
     ) -> str:
-        title = _display_text(note.get("sub_title"), note.get("sub_id"))
+        title = _note_title(note)
+        original = _display_text(note.get("sub_title"))
         course_title = _display_text(note.get("course_title"))
         frontmatter = [
             "---",
@@ -413,7 +424,12 @@ class ObsidianSyncService:
             "---",
             "",
         ]
-        body = [f"# {title}", "", _normal_text(note.get("summary"))]
+        body = [f"# {title}", ""]
+        # The original date/period label stays as a small caption under the
+        # AI title, mirroring the console's note display.
+        if original and original != title:
+            body.extend([f"*{original}*", ""])
+        body.append(_normal_text(note.get("summary")))
         if include_transcript and _normal_text(note.get("transcript")):
             body.extend(["", "## 转录", "", _normal_text(note.get("transcript"))])
         if include_ocr:

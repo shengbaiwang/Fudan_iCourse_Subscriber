@@ -50,7 +50,7 @@ async function _initFromBytes(dbBytes) {
   _db.exec(
     "CREATE TABLE IF NOT EXISTS summary_versions (" +
     "sub_id TEXT NOT NULL, model TEXT NOT NULL, summary TEXT NOT NULL, " +
-    "generated_at TEXT NOT NULL, PRIMARY KEY (sub_id, model))"
+    "generated_at TEXT NOT NULL, PRIMARY KEY (sub_id, model, generated_at))"
   );
 }
 
@@ -206,6 +206,7 @@ function _lectureOrderKey(subTitle) {
 function _getLectures(courseId) {
   const rows = _queryAll(`
     SELECT sub_id, sub_title, date, summary, processed_at,
+           ${_queryAll("PRAGMA table_info(lectures)").some(row => row.name === "ai_title") ? "ai_title" : "NULL AS ai_title"},
            error_stage, error_msg, summary_model, transcript
     FROM lectures WHERE course_id = ?
   `, [courseId]);
@@ -255,72 +256,50 @@ function _getPptPages(subId) {
   `, [subId]);
 }
 
-function _searchSummaries(query, courseIds, page, pageSize, domains) {
-  if (!query?.trim()) return { results: [], page: 1, hasMore: false };
-  page = page || 1;
-  pageSize = pageSize || 50;
-  const offset = (page - 1) * pageSize;
-  const q = query;
-
-  // Domain flags — default all enabled
-  const d = domains || {};
-  const matchSummary = d.summary !== false;
-  const matchTranscript = d.transcript !== false;
-  const matchOcr = d.ocr !== false;
-
-  // Build WHERE parts per active domain
-  var textParts = [];
-  var textParams = [];
-  function addText(cond) { textParts.push(cond); textParams.push(q); }
-  if (matchSummary)    addText("l.summary    LIKE '%' || ? || '%'");
-  if (matchTranscript) addText("l.transcript LIKE '%' || ? || '%'");
-  if (matchOcr)        addText("EXISTS(SELECT 1 FROM ppt_pages pp3 WHERE pp3.sub_id = l.sub_id AND pp3.ocr_status = 'done' AND pp3.text LIKE '%' || ? || '%')");
-
-  if (!textParts.length) return { results: [], page: 1, hasMore: false };
-
-  // Build hit_field CASE for active domains
-  var caseParts = [];
-  var caseParams = [];
-  function addCase(when, then) { caseParts.push("WHEN " + when + " THEN '" + then + "'"); caseParams.push(q); }
-  if (matchSummary)    addCase("l.summary    LIKE '%' || ? || '%'", "summary");
-  if (matchTranscript) addCase("l.transcript LIKE '%' || ? || '%'", "transcript");
-  if (matchOcr)        addCase("EXISTS(SELECT 1 FROM ppt_pages pp2 WHERE pp2.sub_id = l.sub_id AND pp2.ocr_status = 'done' AND pp2.text LIKE '%' || ? || '%')", "ocr");
-
-  // ppt_text subquery (for OCR snippet, only when OCR domain active)
-  var pptSql = matchOcr
-    ? "(SELECT pp.text FROM ppt_pages pp WHERE pp.sub_id = l.sub_id AND pp.ocr_status = 'done' AND pp.text LIKE '%' || ? || '%' LIMIT 1)"
-    : "NULL";
-  var pptParams = matchOcr ? [q] : [];
-
-  // Full params: ppt_text + CASE + WHERE
-  var params = pptParams.concat(caseParams, textParams);
-
-  // WHERE clause with optional course filter
-  var whereClauses = ["(" + textParts.join("\n           OR ") + ")"];
-  if (courseIds && courseIds.length) {
-    var placeholders = courseIds.map(function () { return "?"; }).join(",");
-    whereClauses.push("l.course_id IN (" + placeholders + ")");
-    courseIds.forEach(function (id) { params.push(String(id)); });
+function _searchSummaries(query, courseIds, page = 1, pageSize = 50, domains = {}) {
+  const terms = String(query || '').trim().split(/\s+/).filter(Boolean);
+  const active = ['title', 'summary', 'transcript', 'ocr'].filter(name => domains[name] !== false);
+  page = Math.max(1, Number(page) || 1);
+  pageSize = Math.max(1, Math.min(100, Number(pageSize) || 50));
+  const empty = {results: [], total: 0, page, hasMore: false};
+  if (!terms.length || !active.length) return empty;
+  const hasTitle = _queryAll("PRAGMA table_info(lectures)").some(row => row.name === 'ai_title');
+  const condition = (domain, term) => {
+    const needle = `%${term}%`;
+    if (domain === 'title') return hasTitle
+      ? {sql: '(l.sub_title LIKE ? OR l.ai_title LIKE ?)', params: [needle, needle]}
+      : {sql: 'l.sub_title LIKE ?', params: [needle]};
+    if (domain === 'ocr') return {sql: "EXISTS (SELECT 1 FROM ppt_pages p WHERE p.sub_id = l.sub_id AND p.ocr_status = 'done' AND p.text LIKE ?)", params: [needle]};
+    return {sql: `l.${domain} LIKE ?`, params: [needle]};
+  };
+  const where = [], whereParams = [];
+  for (const term of terms) {
+    const parts = active.map(domain => condition(domain, term));
+    where.push('(' + parts.map(part => part.sql).join(' OR ') + ')');
+    whereParams.push(...parts.flatMap(part => part.params));
   }
-
-  var caseSql = caseParts.length
-    ? "CASE\n             " + caseParts.join("\n             ") + "\n             ELSE 'other'\n           END"
-    : "'other'";
-
-  // Fetch pageSize+1 rows to detect whether a next page exists
-  var rows = _queryAll(`
-    SELECT l.sub_id, l.sub_title, l.summary, l.transcript,
-           ${pptSql} AS ppt_text,
-           l.course_id, c.title AS course_title,
-           ${caseSql} AS hit_field
-    FROM lectures l JOIN courses c ON l.course_id = c.course_id
-    WHERE ` + whereClauses.join(" AND ") + `
-    ORDER BY l.processed_at DESC, l.sub_id DESC LIMIT ? OFFSET ?
-  `, params.concat([pageSize + 1, offset]));
-
-  var hasMore = rows.length > pageSize;
-  if (hasMore) rows.pop();
-  return { results: rows, page: page, hasMore: hasMore };
+  if (courseIds?.length) {
+    where.push(`l.course_id IN (${courseIds.map(() => '?').join(',')})`);
+    whereParams.push(...courseIds);
+  }
+  const cases = [], caseParams = [];
+  for (const domain of active) {
+    const parts = terms.map(term => condition(domain, term));
+    cases.push(`WHEN (${parts.map(part => part.sql).join(' OR ')}) THEN '${domain}'`);
+    caseParams.push(...parts.flatMap(part => part.params));
+  }
+  const pptSql = active.includes('ocr')
+    ? `(SELECT p.text FROM ppt_pages p WHERE p.sub_id = l.sub_id AND p.ocr_status = 'done' AND (${terms.map(() => 'p.text LIKE ?').join(' OR ')}) ORDER BY p.page_num LIMIT 1)` : 'NULL';
+  const pptParams = active.includes('ocr') ? terms.map(term => `%${term}%`) : [];
+  const base = `FROM lectures l JOIN courses c ON l.course_id = c.course_id WHERE ${where.join(' AND ')}`;
+  const total = _queryAll(`SELECT COUNT(*) AS total ${base}`, whereParams)[0].total;
+  const rows = _queryAll(`SELECT l.sub_id, l.sub_title, l.summary, l.transcript,
+    ${hasTitle ? 'l.ai_title' : 'NULL'} AS ai_title, ${pptSql} AS ppt_text,
+    l.course_id, c.title AS course_title, CASE ${cases.join(' ')} ELSE 'other' END AS hit_field
+    ${base} ORDER BY CASE hit_field WHEN 'title' THEN 0 WHEN 'summary' THEN 1 WHEN 'transcript' THEN 2 ELSE 3 END,
+    l.processed_at DESC, l.sub_id DESC LIMIT ? OFFSET ?`,
+    [...pptParams, ...caseParams, ...whereParams, pageSize, (page - 1) * pageSize]);
+  return {results: rows, total, page, hasMore: page * pageSize < total};
 }
 
 function _invalidTermExclusion() {
