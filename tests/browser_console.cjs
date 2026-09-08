@@ -126,7 +126,9 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       assert.match(await page.locator('.lecture-open').first().innerText(), /第6-8节/);
       assert.equal(await page.getByText('暂无录播',{exact:true}).count(),1);
       await page.locator('.lecture-open').filter({hasText:'第11-12节'}).click();
-      assert.equal(await page.locator('.summary-version-choice').count(),3);
+      await page.locator('.summary-version-choice').first().waitFor();
+      // Three stored reruns plus the distinct active summary must all remain selectable.
+      assert.equal(await page.locator('.summary-version-choice').count(),4);
       await page.locator('.summary-version-choice').last().locator('input').check();
       assert.equal(await page.locator('.summary-version-panel').count(),2);
       assert.equal(await page.evaluate(()=>window.pwned),undefined);
