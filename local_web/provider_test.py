@@ -31,7 +31,6 @@ def test_provider(
             "model": model,
             "messages": [{"role": "user", "content": "Reply with OK."}],
             "max_tokens": 2,
-            "temperature": 0,
         }
     ).encode("utf-8")
     request = urllib.request.Request(

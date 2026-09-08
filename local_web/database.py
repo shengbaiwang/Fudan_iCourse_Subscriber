@@ -261,7 +261,7 @@ class DatabaseManager:
                 "SELECT COUNT(*) FROM lectures WHERE summary IS NOT NULL"
             ).fetchone()[0]
             failed = db.execute(
-                "SELECT COUNT(*) FROM lectures WHERE error_stage IS NOT NULL"
+                "SELECT COUNT(*) FROM lectures WHERE error_stage IS NOT NULL AND error_stage != 'no_video'"
             ).fetchone()[0]
         return {
             "commit_sha": self.commit_sha,
@@ -444,7 +444,7 @@ class DatabaseManager:
         terms = [term for term in query.split() if term]
         if not terms:
             return empty
-        active = [d for d in (domains or self._SEARCH_DOMAINS) if d in self._SEARCH_DOMAINS]
+        active = [d for d in (self._SEARCH_DOMAINS if domains is None else domains) if d in self._SEARCH_DOMAINS]
         if not active:
             return empty
         page = max(1, int(page or 1))

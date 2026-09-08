@@ -23,7 +23,8 @@ let rerunModelOptions = [];
 let selectedSummaryVersionKeys = new Set();
 const courseZoneRequests = new Map();
 let loadedLibraryIdentity = "";
-const STARRED_KEY = "icourse-local-starred-courses";
+const isPages = window.ICOURSE_RUNTIME === "pages";
+const STARRED_KEY = isPages ? "ics_starred" : "icourse-local-starred-courses";
 const COURSE_ZONE_LABELS = {
   organize: "整理区",
   study: "学习区",
@@ -44,6 +45,7 @@ function loadStarred() {
 const starredCourses = loadStarred();
 
 async function api(path, options = {}) {
+  if (window.ICOURSE_API) return window.ICOURSE_API(path, options);
   const response = await fetch(path, {
     ...options,
     headers: {"Content-Type": "application/json", ...(options.headers || {})},
@@ -186,6 +188,9 @@ function activateMath(element) {
 
 function renderMarkdown(value) {
   const stashed = _stashFormulas(value);
+  if (window.ICS?.render && window.marked && window.DOMPurify) {
+    return _restoreFormulas(window.ICS.render.renderMarkdown(stashed.text || "暂无摘要"), stashed.formulas);
+  }
   const lines = stashed.text.replace(/\r\n?/g, "\n").split("\n");
   const html = [];
   let paragraph = [];
@@ -298,7 +303,7 @@ async function refreshStatus() {
     current: "本地资料已是最新",
     failed: statusState.database_ready ? "正在使用本地资料" : "更新失败",
   }[updateState] || (statusState.configured ? "本地会话已配置" : "等待配置");
-  $("#connection").textContent = connectionLabel;
+  $("#connection").textContent = isPages ? connectionLabel.replaceAll("本地", "浏览器") : connectionLabel;
   $("#settings-repository").textContent = `${repo.owner}/${repo.repo} · ${repo.branch}`;
   const rememberField = $("#remember-field");
   const rememberInput = rememberField.querySelector("input");
@@ -485,7 +490,7 @@ async function loadCourses() {
     });
     select.onchange = () => moveCourseToZone(course.course_id, select.value, select);
     zoneControl.append(select);
-    aside.append(count, zoneControl);
+    aside.append(count, zoneControl, createButton("导出 / 删除", () => openDataActions(course).catch(error => message(error.message, true))));
     row.append(titleRow, aside);
     card.append(row);
     list.append(card);
@@ -498,6 +503,7 @@ async function openCourse(course) {
   courseLectures = await api(`/api/local/courses/${encodeURIComponent(course.course_id)}/lectures`);
   $("#course-title").textContent = course.title || course.course_id;
   $("#course-teacher").textContent = text(course.teacher);
+  courseLectures.sort(compareLectures);
   renderLectureList();
   showView("lectures");
 }
@@ -552,6 +558,7 @@ async function openLecture(subId, options = {}) {
     };
     courseLectures = await api(`/api/local/courses/${encodeURIComponent(currentLecture.course_id)}/lectures`);
   }
+  courseLectures.sort(compareLectures);
   $("#detail-title").textContent = lectureDisplayName(currentLecture);
   const detailSubtitle = currentLecture.sub_title || "";
   $("#detail-subtitle").textContent = detailSubtitle;
@@ -574,14 +581,31 @@ async function openLecture(subId, options = {}) {
   }
 }
 
+function compareLectures(a, b) {
+  const key = row => {
+    const value = String(row.sub_title || "");
+    const date = value.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    const period = value.match(/第\s*(\d+)/);
+    return [date ? Number(date[1]) * 10000 + Number(date[2]) * 100 + Number(date[3]) : Infinity, Number(period?.[1] || 0), value];
+  };
+  const left = key(a), right = key(b);
+  return (left[0] === right[0] ? 0 : left[0] < right[0] ? -1 : 1) || left[1] - right[1] || left[2].localeCompare(right[2]);
+}
+
 function lectureState(lecture) {
+  if (lecture.error_stage === "no_video") return "novideo";
   if (lecture.error_stage) return "failed";
-  return lecture.has_summary ? "ready" : "waiting";
+  if (lecture.has_summary || lecture.summary) return "ready";
+  if (lecture.processed_at) return "skipped";
+  if (lecture.transcript_available || lecture.transcript) return "processing";
+  return "waiting";
 }
 
 function lectureStateLabel(lecture) {
-  if (lecture.error_stage) return `失败 · ${lecture.error_stage}`;
-  return lecture.has_summary ? "已生成" : "等待处理";
+  const state = lectureState(lecture);
+  return state === "failed" ? `失败 · ${lecture.error_stage}` : {
+    ready: "笔记已生成", novideo: "暂无录播", skipped: "已跳过", processing: "处理中", waiting: "等待处理",
+  }[state];
 }
 
 function formatTimestamp(seconds) {
@@ -1248,7 +1272,7 @@ function renderSubscriptions() {
   if (!catalogRows.length) catalog.textContent = "没有匹配的课程。";
   catalogRows.forEach((course) => {
     const subscribed = subscribedCourseIds.includes(String(course.course_id));
-    catalog.append(renderSubscriptionCourse(course, () => {
+    const catalogItem = renderSubscriptionCourse(course, () => {
       if (subscribed) {
         subscribedCourseIds = subscribedCourseIds.filter((id) => String(id) !== String(course.course_id));
         subscriptionCourses = subscriptionCourses.filter((item) => String(item.course_id) !== String(course.course_id));
@@ -1259,7 +1283,15 @@ function renderSubscriptions() {
       renderSubscriptions();
       // 点击“订阅/移除”立即保存，无需再按保存按钮。
       queueSubscriptionSave();
-    }, subscribed ? "移除" : "订阅"));
+    }, subscribed ? "移除" : "订阅");
+    catalogItem.append(createButton("单次运行", () => {
+      const field = $("#single-run-ids");
+      const ids = new Set(field.value.split(/[,，\s]+/).filter(Boolean));
+      ids.add(String(course.course_id)); field.value = [...ids].join(",");
+      field.closest("details").open = true;
+      message(`已加入单次运行：${course.title || course.course_id}`);
+    }));
+    catalog.append(catalogItem);
   });
 }
 
@@ -1595,7 +1627,7 @@ function renderModelProviders() {
       provider.api_key = apiKeyInput.value;
       secretStatus(provider, status);
     });
-    fields.append(createField("API Key", apiKeyInput, "仅发送给本地服务；保存时加密写入 GitHub Secret"));
+    fields.append(createField("API Key", apiKeyInput, isPages ? "在浏览器加密后写入 GitHub Secret" : "仅发送给本地服务；保存时加密写入 GitHub Secret"));
 
     const models = document.createElement("textarea");
     models.value = provider.models.join("\n");
@@ -1613,6 +1645,10 @@ function renderModelProviders() {
     testResult.className = "meta";
     testResult.textContent = "测试使用第一行模型；需要重新输入 Key。";
     const testButton = createButton("测试首个模型", () => testModelProvider(index, testButton, testResult));
+    if (window.ICOURSE_CAPABILITIES?.providerTest === false) {
+      testButton.disabled = true;
+      testResult.textContent = "连接测试请在本地控制台进行。这里可以保存模型和 API Key。";
+    }
     testRow.append(testButton, testResult);
 
     card.append(head, fields, testRow);
@@ -1902,7 +1938,7 @@ $("#setup-form").onsubmit = async (event) => {
     message(error.message, true);
   } finally {
     submit.disabled = false;
-    submit.textContent = "连接并打开本地资料库";
+    submit.textContent = isPages ? "连接并打开资料库" : "连接并打开本地资料库";
   }
 };
 
@@ -1915,10 +1951,14 @@ $("#configure-button").onclick = () => {
 };
 
 $("#forget-credentials-button").onclick = async () => {
-  if (!confirm("忘记这台 Mac 上保存的登录信息？本地加密资料库会保留，但再次打开需要重新登录。")) return;
+  if (!confirm(isPages ? "退出当前浏览器会话？下次需要重新输入凭据。" : "忘记这台 Mac 上保存的登录信息？本地加密资料库会保留，但再次打开需要重新登录。")) return;
   try {
     await api("/api/local/credentials/forget", {method: "POST", body: "{}"});
-    message("已忘记本机登录信息");
+    message(isPages ? "已退出当前会话" : "已忘记本机登录信息");
+    if (isPages) {
+      loadedLibraryIdentity = ""; currentCourse = null; currentLecture = null; courseLectures = []; courseRows = []; rerunModelOptions = []; modelProviders = [];
+      for (const selector of ["#course-list", "#lecture-list", "#detail-content", "#summary-version-controls", "#search-results", "#model-provider-list"]) $(selector).replaceChildren();
+    }
     activeView = "courses";
     await refreshStatus();
   } catch (error) {
@@ -2138,6 +2178,7 @@ $("#refresh-runs-button").onclick = () => loadRuns().catch((error) => message(er
 const SEARCH_DOMAIN_LABELS = { title: "标题", summary: "摘要", transcript: "转录", ocr: "OCR" };
 const searchActiveDomains = new Set(Object.keys(SEARCH_DOMAIN_LABELS));
 let searchPage = 1;
+let searchRequestId = 0;
 let searchHasMore = false;
 
 function searchTerms() {
@@ -2192,6 +2233,7 @@ function renderSearchResultItem(item, terms) {
 }
 
 async function runSearch(page) {
+  const requestId = ++searchRequestId;
   const query = $("#search").value.trim();
   if (!query) {
     resetSearchResults("输入关键词后开始搜索。");
@@ -2204,6 +2246,7 @@ async function runSearch(page) {
   params.set("domains", [...searchActiveDomains].join(","));
   try {
     const result = await api(`/api/local/search?${params}`);
+    if (requestId !== searchRequestId) return;
     if (!result.total) {
       resetSearchResults("没有找到匹配内容。");
       return;
@@ -2236,6 +2279,7 @@ function syncSearchCourseOptions() {
 
 $("#search").oninput = () => {
   clearTimeout(searchTimer);
+  searchRequestId += 1;
   searchTimer = setTimeout(() => runSearch(1), 300);
 };
 $("#search-course").onchange = () => runSearch(1);
@@ -2255,3 +2299,63 @@ $("#search-more").onclick = () => {
 };
 
 refreshStatus().catch((error) => message(`无法连接本地服务：${error.message}`, true));
+
+window.addEventListener("icourse-render-ready", () => { if (currentLecture) renderDetail(); });
+// Shared workflow actions, available through either transport.
+let dataActionCourse = null;
+async function openDataActions(course, subId = null) {
+  const lectures = await api(`/api/local/courses/${encodeURIComponent(course.course_id)}/lectures`);
+  dataActionCourse = course;
+  $("#data-actions-title").textContent = course.title || course.course_id;
+  const root = $("#data-actions-lectures");
+  root.replaceChildren();
+  lectures.sort(compareLectures).forEach(lecture => {
+    const label = document.createElement("label");
+    label.className = "check-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox"; checkbox.value = String(lecture.sub_id);
+    checkbox.checked = subId !== null && String(lecture.sub_id) === String(subId);
+    label.append(checkbox, document.createTextNode(lecture.sub_title || lecture.sub_id));
+    root.append(label);
+  });
+  $("#data-actions-all").checked = subId === null;
+  $("#data-actions-all").onchange();
+  $("#data-actions-dialog").showModal();
+}
+$("#data-actions-all").onchange = () => {
+  const all = $("#data-actions-all").checked;
+  $("#data-actions-lectures").querySelectorAll("input").forEach(input => { input.disabled = all; });
+};
+async function submitDataAction(deleting) {
+  if (!dataActionCourse) return;
+  const all = $("#data-actions-all").checked;
+  const subIds = [...$("#data-actions-lectures").querySelectorAll("input:checked")].map(input => input.value);
+  if (!all && !subIds.length) { message("请至少选择一个课次。", true); return; }
+  const scope = all ? "整门课程" : `${subIds.length} 个课次`;
+  if (!confirm(`${deleting ? "删除" : "导出"}「${dataActionCourse.title || dataActionCourse.course_id}」的${scope}？${deleting ? "远端资料将被清除，无法通过本页面撤销。" : "将触发后台导出并发送邮件。"}`)) return;
+  const buttons = [$("#data-delete-button"), $("#data-export-button")];
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    const inputs = deleting ? {course_ids: String(dataActionCourse.course_id)} : {course_id: String(dataActionCourse.course_id), export_type: $("#data-export-type").value};
+    inputs.sub_ids = all ? "" : subIds.join(",");
+    await api(`/api/local/workflows/${deleting ? "delete_course.yml" : "export.yml"}/dispatch`, {method: "POST", body: JSON.stringify({ref: "main", inputs})});
+    $("#data-actions-dialog").close();
+    message(`已提交${deleting ? "删除" : "导出"}；可在自动化页查看运行状态。`);
+  } catch (error) { message(error.message, true); }
+  finally { buttons.forEach(button => { button.disabled = false; }); }
+}
+$("#data-export-button").onclick = () => submitDataAction(false);
+$("#data-delete-button").onclick = () => submitDataAction(true);
+$("#course-data-actions").onclick = () => openDataActions(currentCourse).catch(error => message(error.message, true));
+$("#detail-data-actions").onclick = () => openDataActions(currentCourse, currentLecture.sub_id).catch(error => message(error.message, true));
+$("#single-run-button").onclick = async () => {
+  const ids = [...new Set($("#single-run-ids").value.split(/[,，\s]+/).filter(Boolean))];
+  if (!ids.length || ids.some(id => id.length > 100)) { message("请输入有效的课程 ID。", true); return; }
+  if (!confirm(`单次运行 ${ids.length} 门课程（${ids.join(", ")}）？将触发课程处理并产生相应模型费用。`)) return;
+  const button = $("#single-run-button"); button.disabled = true;
+  try {
+    await api("/api/local/workflows/single_run.yml/dispatch", {method: "POST", body: JSON.stringify({ref: "main", inputs: {course_ids: ids.join(","), use_official_transcript: String($("#single-run-official").checked)}})});
+    message("已提交单次运行；可在自动化页查看进度。");
+  } catch (error) { message(error.message, true); }
+  finally { button.disabled = false; }
+};

@@ -4,7 +4,7 @@ This module is imported by every Python component that creates or migrates
 the database (Database, sharder, merge_db) so the column list lives in
 exactly one place.
 
-frontend/js/schema.js is a **manual mirror** of these constants.  When you
+local_web/static/browser/schema.js is a **manual mirror** of these constants.  When you
 change SCHEMA_SQL, LECTURES_MIGRATION_COLUMNS, or PPT_PAGES_MIGRATION_COLUMNS
 here, update that file too — there is no automated sync.  Both run in
 different processes (Python on the CI runner, JS in the browser) and have

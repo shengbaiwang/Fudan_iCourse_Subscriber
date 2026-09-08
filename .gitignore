@@ -57,3 +57,6 @@ db-viewer/
 # .github/
 # Shard inspection temp files
 _shard_inspect/
+
+# Generated shared console for Pages
+dist/

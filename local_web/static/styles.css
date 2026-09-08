@@ -206,3 +206,27 @@ mark.user-highlight:hover { background:var(--hl-hover); }
   box-shadow:0 6px 18px rgba(0,0,0,.25);
 }
 .highlight-toolbar:hover { background:var(--toolbar-hover); }
+
+[hidden] { display: none !important; }
+.data-actions-dialog { width: min(620px, calc(100vw - 32px)); max-height: 85dvh; overflow: auto; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 24px; }
+.data-actions-dialog::backdrop { background: #0009; }
+.dialog-close { float: right; }
+.data-actions-lectures { display: grid; gap: 10px; max-height: 40dvh; overflow: auto; margin: 20px 0; }
+.state-badge.novideo, .state-badge.skipped { color: var(--muted); }
+.state-badge.processing { color: var(--blue); }
+.summary table { border-collapse: collapse; display: block; max-width: 100%; overflow: auto; margin: 16px 0; }
+.summary th, .summary td { border: 1px solid var(--line); padding: 8px 12px; }
+.summary img { max-width: 100%; }
+.katex-display { overflow-x: auto; overflow-y: hidden; }
+
+.course-card-footer, .detail-actions { gap: 8px; flex-wrap: wrap; }
+.subscription-row > div { min-width: 0; flex: 1; }
+.subscription-row > button { flex-shrink: 0; }
+.data-actions-lectures .check-option { white-space: normal; }
+@media(max-width:700px) { .view-heading.compact { flex-wrap: wrap; } .summary-version-grid.compare { grid-template-columns: minmax(0, 1fr); } .subscription-row { flex-wrap: wrap; } }
+
+.search-filters { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin: 0 0 16px; }
+.search-filters select { width:auto; max-width:100%; margin:0; }
+
+.course-open .course-title, .course-open .meta { display: block; }
+@media(max-width:700px) { .message { bottom: calc(72px + env(safe-area-inset-bottom)); } }
