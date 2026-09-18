@@ -20,6 +20,7 @@ from .database import DatabaseManager
 from .github_client import GitHubAPIError, GitHubClient
 from .obsidian import ObsidianSyncError, ObsidianSyncService
 from .provider_test import ProviderTestError, test_provider
+from .provider_models import ModelDirectoryError, fetch_provider_models
 from .state import (
     ObsidianSettings,
     RepositorySettings,
@@ -65,6 +66,11 @@ class ModelProviderRequest(BaseModel):
 
 class ModelProvidersRequest(BaseModel):
     providers: list[ModelProviderRequest]
+
+
+class ProviderModelsRequest(BaseModel):
+    base_url: str
+    api_key: SecretStr = Field(min_length=1)
 
 
 class ProviderTestRequest(BaseModel):
@@ -357,6 +363,15 @@ def create_app(
             raise
         except GitHubAPIError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/local/model-providers/models")
+    async def get_provider_models(payload: ProviderModelsRequest):
+        try:
+            return await run_in_threadpool(
+                fetch_provider_models, payload.base_url, payload.api_key.get_secret_value()
+            )
+        except (ValueError, ModelDirectoryError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/local/model-providers/test")
     async def test_model_provider(payload: ProviderTestRequest):

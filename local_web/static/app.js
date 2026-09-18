@@ -1,6 +1,18 @@
 const $ = (selector) => document.querySelector(selector);
 let statusState = null;
 let modelProviders = [];
+let selectedProvider = null;
+let modelsDirty = false;
+let modelsSaving = false;
+
+function markModelsDirty() {
+  modelsDirty = true;
+  $("#model-save-status").textContent = "有未保存的修改 · 切换服务商会保留草稿";
+  $("#model-save-button").disabled = modelsSaving;
+}
+window.addEventListener("beforeunload", (event) => {
+  if (modelsDirty) { event.preventDefault(); event.returnValue = ""; }
+});
 let obsidianPlan = null;
 let messageTimer = null;
 let activeView = "courses";
@@ -1425,7 +1437,7 @@ function normalizeProvider(item) {
   return {
     enabled: item.enabled !== false,
     name: String(item.name || ""),
-    base_url: String(item.base_url || ""),
+    base_url: String(item.base_url || item.default_base_url || ""),
     api_key_env: apiKeyEnv,
     models: Array.isArray(item.models) ? item.models.map(String) : [],
     api_key: "",
@@ -1450,11 +1462,17 @@ async function loadModelProviders() {
   loading.textContent = "正在读取 GitHub 中的模型配置…";
   list.append(loading);
   const result = await api("/api/local/model-providers");
+  const selectedName = selectedProvider?.name;
   modelProviders = (result.providers || []).map(normalizeProvider);
+  selectedProvider = modelProviders.find(item => item.name === selectedName) || modelProviders[0];
+  modelsDirty = false;
+  $("#model-save-status").textContent = "配置已载入";
+  $("#model-save-button").disabled = true;
   const source = $("#model-source");
   source.textContent = modelSourceLabel(result.source);
   source.classList.remove("hidden");
   renderModelProviders();
+  if (result.source !== "github-variable") markModelsDirty();
 }
 
 function moveProvider(index, offset) {
@@ -1462,6 +1480,7 @@ function moveProvider(index, offset) {
   if (destination < 0 || destination >= modelProviders.length) return;
   const [provider] = modelProviders.splice(index, 1);
   modelProviders.splice(destination, 0, provider);
+  markModelsDirty();
   renderModelProviders();
 }
 
@@ -1491,7 +1510,7 @@ async function testModelProvider(index, button, resultNode) {
     return;
   }
   if (!model) {
-    message("请至少填写一个模型，测试会使用第一行。", true);
+    message("请至少填写一个模型，测试会使用首选模型。", true);
     return;
   }
   if (!confirm(`测试 ${provider.name || "该供应商"} 的首个模型 ${model}？这会消耗极少量 token。`)) return;
@@ -1520,7 +1539,201 @@ async function testModelProvider(index, button, resultNode) {
   }
 }
 
+function renderProviderNavigation() {
+  const root = $("#provider-navigation");
+  root.replaceChildren();
+  $("#provider-count").textContent = `${modelProviders.length} 个`;
+  const query = $("#provider-search").value.trim().toLowerCase();
+  modelProviders.forEach((provider, index) => {
+    if (!provider.name.toLowerCase().includes(query)) return;
+    const button = createButton("", () => {
+      selectedProvider = provider;
+      renderModelProviders();
+      $(".provider-nav-item.active")?.focus();
+    }, `provider-nav-item${provider === selectedProvider ? " active" : ""}`);
+    button.setAttribute("aria-pressed", String(provider === selectedProvider));
+    const name = document.createElement("strong");
+    name.textContent = provider.name || "未命名服务商";
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = `${provider.enabled ? "● 已启用" : "○ 已停用"} · ${provider.models.length} 个模型 · 优先级 ${index + 1}`;
+    button.append(name, meta);
+    root.append(button);
+  });
+  if (!root.children.length) {
+    const empty = document.createElement("p");
+    empty.className = "meta";
+    empty.textContent = "没有匹配的服务商";
+    root.append(empty);
+  }
+}
+
+async function openModelDirectory(provider, refreshModels) {
+  if (!provider.api_key.trim()) {
+    message("请先重新输入 API Key。GitHub 不允许读回已保存的密钥。", true);
+    $("[aria-label='API Key']")?.focus();
+    return;
+  }
+  if (!provider.base_url.trim()) { message("请先填写 API 地址。", true); return; }
+  const dialog = document.createElement("dialog");
+  dialog.className = "model-directory-dialog";
+  dialog.setAttribute("aria-labelledby", "model-directory-title");
+  const head = document.createElement("div");
+  head.className = "section-title";
+  const title = document.createElement("h2");
+  title.id = "model-directory-title";
+  title.textContent = `${provider.name || "服务商"} · 模型目录`;
+  const close = createButton("完成", () => dialog.close());
+  head.append(title, close);
+  const status = document.createElement("p");
+  status.className = "meta";
+  status.setAttribute("role", "status");
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = "搜索模型 ID";
+  search.setAttribute("aria-label", "搜索模型目录");
+  const list = document.createElement("div");
+  list.className = "model-directory-list";
+  let models = [];
+  const render = () => {
+    list.replaceChildren();
+    const filtered = models.filter(id => id.toLowerCase().includes(search.value.trim().toLowerCase()));
+    for (const id of filtered) {
+      const row = document.createElement("div");
+      row.className = "provider-model-row";
+      const label = document.createElement("span");
+      label.className = "model-id";
+      label.textContent = id;
+      const added = provider.models.includes(id);
+      const add = createButton(added ? "已添加" : "＋ 添加", () => {
+        if (provider.models.length >= 30) { message("每个服务商最多添加 30 个模型。", true); return; }
+        if (!provider.models.includes(id)) provider.models.push(id);
+        markModelsDirty(); refreshModels(); renderProviderNavigation(); render();
+      });
+      add.disabled = added;
+      add.setAttribute("aria-label", `${added ? "已添加" : "添加"}目录模型 ${id}`);
+      row.append(label, add); list.append(row);
+    }
+    if (!filtered.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = models.length ? "没有匹配的模型" : "目录为空，可以关闭此窗口后手动添加模型 ID。";
+      list.append(empty);
+    }
+  };
+  const retry = createButton("重新获取", () => fetchModels());
+  const fetchModels = async () => {
+    retry.disabled = true; search.disabled = true; list.replaceChildren();
+    status.textContent = "正在获取模型目录…";
+    try {
+      const result = await api("/api/local/model-providers/models", {
+        method: "POST", body: JSON.stringify({base_url: provider.base_url, api_key: provider.api_key.trim()}),
+      });
+      if (!dialog.open) return;
+      models = result.models || [];
+      status.textContent = `获取到 ${models.length} 个模型。点击添加后加入草稿，关闭窗口后保存到 GitHub。目录包含的模型不一定都适合摘要任务。`;
+      search.disabled = false;
+      render(); search.focus();
+    } catch (error) {
+      if (dialog.open) status.textContent = `${error.message} 也可以关闭窗口后手动添加模型。`;
+    } finally { retry.disabled = false; }
+  };
+  search.oninput = render;
+  dialog.append(head, status, search, list, retry);
+  dialog.addEventListener("close", () => dialog.remove(), {once:true});
+  document.body.append(dialog); dialog.showModal();
+  await fetchModels();
+}
+
+function renderProviderModels(provider, container) {
+  const heading = document.createElement("h2");
+  heading.textContent = "模型";
+  const hint = document.createElement("p");
+  hint.className = "meta";
+  hint.textContent = "首项优先调用；失败后按顺序回退。模型 ID 须与服务商提供的一致。";
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = "搜索已添加的模型";
+  search.setAttribute("aria-label", "搜索已添加的模型");
+  const list = document.createElement("div");
+  list.className = "provider-model-list";
+  const render = () => {
+    list.replaceChildren();
+    provider.models.forEach((model, index) => {
+      if (!model.toLowerCase().includes(search.value.trim().toLowerCase())) return;
+      const row = document.createElement("div");
+      row.className = "provider-model-row";
+      const label = document.createElement("span");
+      label.textContent = model;
+      label.className = "model-id";
+      const priority = document.createElement("span");
+      priority.className = "priority";
+      priority.textContent = index === 0 ? "首选" : `#${index + 1}`;
+      const actions = document.createElement("div");
+      actions.className = "provider-controls";
+      [-1, 1].forEach(offset => {
+        const button = createButton(offset === -1 ? "↑" : "↓", () => {
+          const destination = index + offset;
+          [provider.models[index], provider.models[destination]] = [provider.models[destination], provider.models[index]];
+          markModelsDirty(); render();
+        });
+        button.setAttribute("aria-label", `${offset === -1 ? "上移" : "下移"}模型 ${model}`);
+        button.disabled = index + offset < 0 || index + offset >= provider.models.length;
+        actions.append(button);
+      });
+      const remove = createButton("移除", () => {
+        provider.models.splice(index, 1);
+        markModelsDirty(); render(); renderProviderNavigation();
+      });
+      remove.setAttribute("aria-label", `移除模型 ${model}`);
+      actions.append(remove);
+      row.append(priority, label, actions);
+      list.append(row);
+    });
+    if (!list.children.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = provider.models.length ? "没有匹配的模型" : "还没有模型，请在下方添加模型 ID。";
+      list.append(empty);
+    }
+  };
+  search.oninput = render;
+  const form = document.createElement("form");
+  form.className = "model-add-form";
+  const input = document.createElement("input");
+  input.placeholder = "输入模型 ID，例如 deepseek-chat";
+  input.setAttribute("aria-label", "添加模型 ID");
+  input.required = true;
+  input.maxLength = 200;
+  input.autocomplete = "off";
+  const add = document.createElement("button");
+  add.type = "submit";
+  add.textContent = "＋ 添加模型";
+  form.onsubmit = event => {
+    event.preventDefault();
+    const id = input.value.trim();
+    if (!id) return;
+    if (provider.models.includes(id)) { message("该模型已添加。", true); return; }
+    if (provider.models.length >= 30) { message("每个服务商最多添加 30 个模型。", true); return; }
+    provider.models.push(id);
+    input.value = ""; search.value = "";
+    markModelsDirty(); render(); renderProviderNavigation(); input.focus();
+  };
+  form.append(input, add);
+  const toolbar = document.createElement("div");
+  toolbar.className = "section-title";
+  const discover = createButton("获取模型", () => openModelDirectory(provider, render));
+  if (window.ICOURSE_CAPABILITIES?.providerTest === false) {
+    discover.disabled = true;
+    discover.title = "请在本地控制台获取模型目录";
+  }
+  toolbar.append(heading, discover);
+  container.append(toolbar, hint, search, list, form);
+  render();
+}
+
 function renderModelProviders() {
+  renderProviderNavigation();
   const root = $("#model-provider-list");
   root.replaceChildren();
   if (!modelProviders.length) {
@@ -1532,6 +1745,7 @@ function renderModelProviders() {
   }
 
   modelProviders.forEach((provider, index) => {
+    if (provider !== selectedProvider) return;
     const card = document.createElement("section");
     card.className = `provider-card${provider.enabled ? "" : " is-disabled"}`;
 
@@ -1548,9 +1762,11 @@ function renderModelProviders() {
     toggle.className = "toggle";
     const enabled = document.createElement("input");
     enabled.type = "checkbox";
+    enabled.setAttribute("role", "switch");
     enabled.checked = provider.enabled;
     enabled.addEventListener("change", () => {
       provider.enabled = enabled.checked;
+      markModelsDirty(); renderProviderNavigation();
       card.classList.toggle("is-disabled", !provider.enabled);
     });
     toggle.append(enabled, document.createTextNode("启用"));
@@ -1569,6 +1785,8 @@ function renderModelProviders() {
       }
       if (!confirm(`删除供应商 ${provider.name || `#${index + 1}`}？已保存的 GitHub Secret 不会被删除。`)) return;
       modelProviders.splice(index, 1);
+      selectedProvider = modelProviders[Math.min(index, modelProviders.length - 1)];
+      markModelsDirty();
       renderModelProviders();
     }, "danger");
     controls.append(up, down, remove);
@@ -1578,6 +1796,7 @@ function renderModelProviders() {
     fields.className = "provider-fields";
 
     const nameInput = document.createElement("input");
+    nameInput.setAttribute("aria-label", "供应商名称");
     nameInput.value = provider.name;
     nameInput.required = true;
     nameInput.maxLength = 50;
@@ -1586,18 +1805,20 @@ function renderModelProviders() {
     nameInput.placeholder = "例如 deepseek";
     nameInput.addEventListener("input", () => {
       provider.name = nameInput.value;
+      markModelsDirty(); renderProviderNavigation();
       title.textContent = provider.name || "未命名供应商";
     });
     fields.append(createField("供应商名称", nameInput, "仅使用字母、数字、下划线或连字符"));
 
     const baseUrlInput = document.createElement("input");
+    baseUrlInput.setAttribute("aria-label", "Base URL");
     baseUrlInput.type = "url";
     baseUrlInput.value = provider.base_url;
     baseUrlInput.required = true;
     baseUrlInput.autocomplete = "off";
     baseUrlInput.spellcheck = false;
     baseUrlInput.placeholder = "https://api.example.com/v1";
-    baseUrlInput.addEventListener("input", () => { provider.base_url = baseUrlInput.value; });
+    baseUrlInput.addEventListener("input", () => { provider.base_url = baseUrlInput.value; markModelsDirty(); });
     fields.append(createField("Base URL", baseUrlInput, "必须是兼容 OpenAI Chat Completions 的 HTTPS 地址"));
 
     const secretInput = document.createElement("input");
@@ -1610,14 +1831,20 @@ function renderModelProviders() {
     const status = document.createElement("span");
     secretInput.addEventListener("input", () => {
       provider.api_key_env = secretInput.value;
+      markModelsDirty();
       secretStatus(provider, status);
     });
     const secretField = createField("API Key Secret 名称", secretInput, "自定义名称需符合 LLM_*_API_KEY");
     secretStatus(provider, status);
-    secretField.append(status);
-    fields.append(secretField);
+
+    const advanced = document.createElement("details");
+    advanced.className = "provider-advanced";
+    const summary = document.createElement("summary");
+    summary.textContent = "高级设置";
+    advanced.append(summary, secretField);
 
     const apiKeyInput = document.createElement("input");
+    apiKeyInput.setAttribute("aria-label", "API Key");
     apiKeyInput.type = "password";
     apiKeyInput.value = provider.api_key;
     apiKeyInput.autocomplete = "new-password";
@@ -1625,25 +1852,22 @@ function renderModelProviders() {
     apiKeyInput.placeholder = provider.api_key_configured ? "已配置；留空不修改" : "输入 API Key";
     apiKeyInput.addEventListener("input", () => {
       provider.api_key = apiKeyInput.value;
+      markModelsDirty();
       secretStatus(provider, status);
     });
-    fields.append(createField("API Key", apiKeyInput, isPages ? "在浏览器加密后写入 GitHub Secret" : "仅发送给本地服务；保存时加密写入 GitHub Secret"));
+    const keyField = createField("API Key", apiKeyInput, isPages ? "在浏览器加密后写入 GitHub Secret" : "仅发送给本地服务；保存时加密写入 GitHub Secret");
+    keyField.append(status);
+    fields.append(keyField);
 
-    const models = document.createElement("textarea");
-    models.value = provider.models.join("\n");
-    models.rows = Math.max(4, Math.min(8, provider.models.length + 1));
-    models.placeholder = "每行一个模型名称\n例如 deepseek-chat";
-    models.spellcheck = false;
-    models.addEventListener("input", () => {
-      provider.models = models.value.split(/\r?\n/);
-    });
-    fields.append(createField("模型及其优先级", models, "每行一个；第一行优先，失败后自动尝试下一行", "wide models-field"));
+    const modelSection = document.createElement("section");
+    modelSection.className = "provider-models";
+    renderProviderModels(provider, modelSection);
 
     const testRow = document.createElement("div");
     testRow.className = "provider-test-row";
     const testResult = document.createElement("p");
     testResult.className = "meta";
-    testResult.textContent = "测试使用第一行模型；需要重新输入 Key。";
+    testResult.textContent = "测试使用首选模型；需要重新输入 Key。";
     const testButton = createButton("测试首个模型", () => testModelProvider(index, testButton, testResult));
     if (window.ICOURSE_CAPABILITIES?.providerTest === false) {
       testButton.disabled = true;
@@ -1651,12 +1875,13 @@ function renderModelProviders() {
     }
     testRow.append(testButton, testResult);
 
-    card.append(head, fields, testRow);
+    card.append(head, fields, testRow, advanced, modelSection);
     root.append(card);
   });
 }
 
 function addModelProvider() {
+  if (modelProviders.length >= 20) { message("最多添加 20 个服务商。", true); return; }
   const usedNames = new Set(modelProviders.map((item) => item.name));
   let suffix = 1;
   while (usedNames.has(`custom-${suffix}`)) suffix += 1;
@@ -1670,6 +1895,9 @@ function addModelProvider() {
     api_key_configured: false,
     configured_api_key_env: "",
   });
+  selectedProvider = modelProviders[modelProviders.length - 1];
+  $("#provider-search").value = "";
+  markModelsDirty();
   renderModelProviders();
   const cards = $("#model-provider-list").querySelectorAll(".provider-card");
   cards[cards.length - 1]?.scrollIntoView({behavior: "smooth", block: "center"});
@@ -1680,8 +1908,16 @@ async function saveModelProviders() {
     message("至少需要一个模型供应商。", true);
     return;
   }
+  const invalid = modelProviders.find(item => !/^[A-Za-z0-9][A-Za-z0-9_-]{0,49}$/.test(item.name.trim()) || !item.models.length || !item.base_url.trim());
+  if (invalid) {
+    selectedProvider = invalid; renderModelProviders();
+    message("请补全服务商名称、API 地址，并至少添加一个模型。", true); return;
+  }
+  if (!modelProviders.some(item => item.enabled)) { message("至少需要启用一个服务商。", true); return; }
   if (!confirm("保存会更新 GitHub Actions 的模型配置，并写入本次填写的 API Key。继续吗？")) return;
   const button = $("#model-save-button");
+  modelsSaving = true;
+  $(".model-workspace").inert = true;
   button.disabled = true;
   try {
     const providers = modelProviders.map((provider) => {
@@ -1699,12 +1935,29 @@ async function saveModelProviders() {
       method: "PUT",
       body: JSON.stringify({providers}),
     });
+    modelsDirty = false;
+    modelProviders.forEach(provider => {
+      if (provider.api_key.trim()) {
+        provider.api_key_configured = true;
+        provider.configured_api_key_env = provider.api_key_env.trim().toUpperCase();
+      }
+      provider.api_key = "";
+    });
+    renderModelProviders();
+    $("#model-save-status").textContent = "已保存到 GitHub";
     message("模型配置已保存到 GitHub；正在重新加载…");
-    await loadModelProviders();
+    try { await loadModelProviders(); }
+    catch (error) {
+      renderModelProviders();
+      $("#model-save-status").textContent = "已保存；重新读取失败，请稍后重新打开";
+      message(error.message, true);
+    }
   } catch (error) {
     message(error.message, true);
   } finally {
-    button.disabled = false;
+    modelsSaving = false;
+    $(".model-workspace").inert = false;
+    button.disabled = !modelsDirty;
   }
 }
 
@@ -1956,7 +2209,8 @@ $("#forget-credentials-button").onclick = async () => {
     await api("/api/local/credentials/forget", {method: "POST", body: "{}"});
     message(isPages ? "已退出当前会话" : "已忘记本机登录信息");
     if (isPages) {
-      loadedLibraryIdentity = ""; currentCourse = null; currentLecture = null; courseLectures = []; courseRows = []; rerunModelOptions = []; modelProviders = [];
+      loadedLibraryIdentity = ""; currentCourse = null; currentLecture = null; courseLectures = []; courseRows = []; rerunModelOptions = []; modelProviders = []; selectedProvider = null; modelsDirty = false;
+      $("#provider-navigation").replaceChildren();
       for (const selector of ["#course-list", "#lecture-list", "#detail-content", "#summary-version-controls", "#search-results", "#model-provider-list"]) $(selector).replaceChildren();
     }
     activeView = "courses";
@@ -1969,12 +2223,16 @@ $("#forget-credentials-button").onclick = async () => {
 $("#model-button").onclick = async () => {
   const button = $("#model-button");
   button.disabled = true;
+  $(".model-workspace").inert = true;
   setModelView(true);
   try {
-    await loadModelProviders();
+    if (modelsDirty) renderModelProviders();
+    else await loadModelProviders();
   } catch (error) {
     const source = $("#model-source");
     source.textContent = "配置读取失败";
+    $("#model-save-status").textContent = "读取失败，请返回设置后重试";
+    $("#model-save-button").disabled = true;
     source.classList.remove("hidden");
     const root = $("#model-provider-list");
     root.replaceChildren();
@@ -1985,10 +2243,12 @@ $("#model-button").onclick = async () => {
     message(error.message, true);
   } finally {
     button.disabled = false;
+    $(".model-workspace").inert = false;
   }
 };
 
 $("#model-close-button").onclick = () => setModelView(false);
+$("#provider-search").oninput = renderProviderNavigation;
 $("#model-add-button").onclick = addModelProvider;
 $("#model-save-button").onclick = saveModelProviders;
 

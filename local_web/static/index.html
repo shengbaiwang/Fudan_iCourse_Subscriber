@@ -193,8 +193,17 @@
 
       <section id="model-management" class="view-pane content-wide hidden" aria-labelledby="model-management-title">
         <div class="view-heading compact"><div><h1 id="model-management-title">模型与 API</h1><p id="model-source" class="hidden"></p></div><button id="model-close-button" type="button">返回设置</button></div>
-        <div id="model-provider-list" class="provider-list" aria-live="polite"></div>
-        <div class="model-footer"><button id="model-add-button" type="button">＋ 新增供应商</button><button id="model-save-button" class="primary" type="button">保存到 GitHub</button></div>
+        <p class="muted">先配置服务商，再添加模型。按列表顺序调用，失败时自动尝试下一项。</p>
+        <div class="model-workspace">
+          <aside class="provider-sidebar" aria-label="模型服务商">
+            <div class="section-title"><h2>服务商</h2><span id="provider-count" class="meta"></span></div>
+            <input id="provider-search" type="search" placeholder="搜索服务商" aria-label="搜索服务商">
+            <div id="provider-navigation" class="provider-navigation"></div>
+            <button id="model-add-button" type="button">＋ 添加服务商</button>
+          </aside>
+          <div id="model-provider-list" class="provider-list"></div>
+        </div>
+        <div class="model-footer"><span id="model-save-status" class="meta" role="status">正在读取配置…</span><button id="model-save-button" class="primary" type="button" disabled>保存到 GitHub</button></div>
       </section>
 
       <section id="obsidian-sync" class="view-pane content-wide hidden" aria-labelledby="obsidian-sync-title">
