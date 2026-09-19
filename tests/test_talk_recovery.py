@@ -103,6 +103,25 @@ class TalkRecoveryTest(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertIn("failure", result["error"])
 
+    def test_workflow_approval_is_visible_and_resumes_without_reupload(self):
+        self.store.begin_cloud_request(self.id)
+        self.store.mark_transcribing(self.id)
+        self.client.runs = {"status": "completed", "conclusion": "action_required"}
+        result = self.cloud.sync(self.id)
+        self.assertEqual(result["status"], "transcribing")
+        self.assertEqual(result["error_stage"], "approval")
+        self.client.runs = {"status": "in_progress", "conclusion": None}
+        self.assertEqual(self.cloud.sync(self.id)["error_stage"], "")
+
+    def test_generic_security_gate_does_not_match_old_requests(self):
+        client = GitHubClient("owner", "repo", "token")
+        run = {"display_title": "Transcribe Talk Recording", "conclusion": "action_required",
+               "created_at": "2026-09-20T00:00:10Z"}
+        with patch.object(client, "_json", return_value={"workflow_runs": [run]}):
+            result = client.talk_workflow_run("talk", "request", "2026-09-20T00:00:00+00:00")
+            self.assertTrue(result["workflow_approval_required"])
+            self.assertIsNone(client.talk_workflow_run("talk", "new", "2026-09-20T00:01:00+00:00"))
+
     def test_summary_failure_preserves_transcript(self):
         request = self.store.begin_cloud_request(self.id)
         data = {"talk_id": self.id, "request_id": request, "status": "failed", "error": "model offline",

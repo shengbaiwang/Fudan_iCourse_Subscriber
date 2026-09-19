@@ -52,7 +52,14 @@ class TalkCloudSync:
                         return item
             request_id = item.get("cloud_request_id")
             if request_id:
-                run = gh.talk_workflow_run(talk_id, request_id)
+                run = gh.talk_workflow_run(talk_id, request_id, item.get("cloud_requested_at", ""))
+                if run and (run.get("workflow_approval_required") or run.get("conclusion") == "action_required"):
+                    self.store.set_status(talk_id, "transcribing",
+                        "GitHub 要求仓库所有者批准转写工作流；批准后会自动继续，无需重新上传。", "approval")
+                    return self.store.get_talk(talk_id)
+                if item.get("error_stage") == "approval":
+                    self.store.set_status(talk_id, "transcribing")
+                    item = self.store.get_talk(talk_id)
                 if run and run.get("status") == "completed":
                     updated = run.get("updated_at")
                     if updated and (datetime.now(timezone.utc) - datetime.fromisoformat(updated.replace("Z", "+00:00"))).total_seconds() < 60:

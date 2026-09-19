@@ -172,8 +172,11 @@ class GitHubClient:
     def default_branch(self) -> str:
         return str(self._json(self._repo_path)["default_branch"])
 
-    def talk_workflow_run(self, talk_id: str, request_id: str) -> dict | None:
+    def talk_workflow_run(self, talk_id: str, request_id: str, requested_at: str = "") -> dict | None:
         title = f"talk-{talk_id}-{request_id}"
+        # GitHub may suppress run-name while a new workflow awaits approval.
+        # This is a workflow-wide gate, never evidence of an individual failure.
+        approval = None
         # Exact run-name correlation avoids attributing another talk's failure.
         for page in range(1, 6):
             data = self._json(
@@ -184,9 +187,17 @@ class GitHubClient:
             for run in rows:
                 if run.get("display_title") == title:
                     return run
+                created = str(run.get("created_at") or "")
+                if (requested_at and created and run.get("conclusion") == "action_required"
+                        and run.get("display_title") == "Transcribe Talk Recording"):
+                    from datetime import datetime
+                    elapsed = (datetime.fromisoformat(created.replace("Z", "+00:00"))
+                               - datetime.fromisoformat(requested_at)).total_seconds()
+                    if 0 <= elapsed <= 120:
+                        approval = {**run, "workflow_approval_required": True}
             if len(rows) < 100:
                 break
-        return None
+        return approval
 
     def workflow_file_on_ref(self, workflow: str, ref: str = "main") -> bool:
         """True when ``workflow`` exists on ``ref`` (i.e. dispatch can work).
