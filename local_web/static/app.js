@@ -1,6 +1,19 @@
 const $ = (selector) => document.querySelector(selector);
 let statusState = null;
 let modelProviders = [];
+let selectedProvider = null;
+let modelsDirty = false;
+let modelsSaving = false;
+
+function markModelsDirty() {
+  modelsDirty = true;
+  $("#model-save-status").textContent = "有未保存的修改 · 切换服务商会保留草稿";
+  $("#model-save-button").disabled = modelsSaving;
+}
+window.addEventListener("beforeunload", (event) => {
+  if (modelsDirty) { event.preventDefault(); event.returnValue = ""; }
+});
+
 let obsidianPlan = null;
 let messageTimer = null;
 let activeView = "courses";
@@ -17,7 +30,6 @@ let subscriptionTimer = null;
 let catalogRows = [];
 let courseZones = {};
 let lectureNames = {};
-let activeCourseZone = "all";
 let updatePollTimer = null;
 let rerunModelOptions = [];
 let selectedSummaryVersionKeys = new Set();
@@ -25,12 +37,37 @@ const courseZoneRequests = new Map();
 let loadedLibraryIdentity = "";
 const isPages = window.ICOURSE_RUNTIME === "pages";
 const STARRED_KEY = isPages ? "ics_starred" : "icourse-local-starred-courses";
-const COURSE_ZONE_LABELS = {
-  organize: "整理区",
-  study: "学习区",
-  reference: "查阅区",
-  archive: "归档区",
-};
+const COURSE_FILTER_KEY = "icourse-local-course-filter";
+const SIDEBAR_COLLAPSED_KEY = "icourse-local-sidebar-collapsed";
+
+/* 课程页侧栏的过滤选择：{kind:'all'|'star'|'zone'|'term'|'dept', value}。
+   借鉴 Notability——侧栏是导航而非整理：选中即过滤，主列表始终只呈现
+   一个集合；分区/学期/院系只是同一份课程列表的不同视角。 */
+function loadCourseFilter() {
+  try {
+    const f = JSON.parse(localStorage.getItem(COURSE_FILTER_KEY));
+    if (f && ["all", "star", "zone", "term", "dept"].includes(f.kind)) {
+      return {kind: f.kind, value: String(f.value || "")};
+    }
+  } catch (_) {}
+  return {kind: "all", value: ""};
+}
+function loadSidebarCollapsed() {
+  try { return JSON.parse(localStorage.getItem(SIDEBAR_COLLAPSED_KEY)) || {}; }
+  catch (_) { return {}; }
+}
+let courseFilter = loadCourseFilter();
+let sidebarCollapsed = loadSidebarCollapsed();
+let courseSections = [];
+let defaultCourseZone = "unassigned";
+let courseSectionsRevision = 0;
+let sectionDraft = [];
+let sectionEditorRevision = 0;
+let sectionsSaving = false;
+
+function courseZoneLabels() {
+  return Object.fromEntries([["unassigned", "未分区"], ...courseSections.map(s => [s.id, s.name])]);
+}
 const RUN_STATUS_LABELS = {
   success: "成功", failure: "失败", cancelled: "已取消", timed_out: "超时",
   in_progress: "进行中", queued: "排队中", requested: "已请求", waiting: "等待中",
@@ -359,12 +396,254 @@ function renderStats(db) {
 }
 
 function courseZone(courseId) {
-  return COURSE_ZONE_LABELS[courseZones[String(courseId)]] ? courseZones[String(courseId)] : "organize";
+  const zone = courseZones[String(courseId)] || defaultCourseZone;
+  return zone === "archive" || Object.hasOwn(courseZoneLabels(), zone) ? zone : "unassigned";
 }
 
 async function loadCourseZones() {
   const result = await api("/api/local/course-zones");
+  applyCourseOrganization(result);
+}
+
+function applyCourseOrganization(result) {
   courseZones = result.zones || {};
+  courseSections = result.sections || [];
+  defaultCourseZone = result.default_zone || "unassigned";
+  courseSectionsRevision = result.revision || 0;
+  if (courseFilter.kind === "zone" && courseFilter.value !== "archive"
+      && !Object.hasOwn(courseZoneLabels(), courseFilter.value)) {
+    courseFilter = {kind: "all", value: ""};
+    localStorage.setItem(COURSE_FILTER_KEY, JSON.stringify(courseFilter));
+  }
+}
+
+/* ── 课程页侧栏 ── */
+
+function visibleCourseRows() {
+  const f = courseFilter;
+  if (f.kind === "zone" && f.value === "archive") return courseRows.filter(c => courseZone(c.course_id) === "archive");
+  const rows = courseRows.filter(c => courseZone(c.course_id) !== "archive");
+  if (f.kind === "star") return rows.filter((c) => starredCourses.has(String(c.course_id)));
+  if (f.kind === "zone") return rows.filter((c) => courseZone(c.course_id) === f.value);
+  if (f.kind === "term") return rows.filter((c) => (c.term || "") === f.value);
+  if (f.kind === "dept") return rows.filter((c) => (c.dept || "") === f.value);
+  return rows;
+}
+
+function courseFilterCaption() {
+  const f = courseFilter;
+  if (f.kind === "star") return "星标";
+  if (f.kind === "zone") return f.value === "archive" ? "归档" : courseZoneLabels()[f.value] || "分区";
+  if (f.kind === "term") return f.value || "未知学期";
+  if (f.kind === "dept") return f.value || "未知院系";
+  return "全部课程";
+}
+
+function selectCourseFilter(kind, value) {
+  courseFilter = {kind, value: value || ""};
+  localStorage.setItem(COURSE_FILTER_KEY, JSON.stringify(courseFilter));
+  closeCourseDrawer();
+  renderCourseSidebar();
+  loadCourses().catch((error) => message(error.message, true));
+}
+
+function renderCourseSidebar() {
+  const activeRows = courseRows.filter(c => courseZone(c.course_id) !== "archive");
+  const zoneItems = Object.entries(courseZoneLabels()).map(([value, label]) => ({
+    value, label,
+    count: courseRows.filter((c) => courseZone(c.course_id) === value).length,
+  }));
+  // Dynamic sections aggregate the already-loaded course rows; items with
+  // empty values trail the section as 未知*.
+  const dynItems = (field, unknownLabel) => {
+    const counts = {};
+    activeRows.forEach((c) => {
+      const v = c[field] || "";
+      counts[v] = (counts[v] || 0) + 1;
+    });
+    return Object.keys(counts)
+      .sort((a, b) => {
+        if (a === "") return 1;  // unknown always last
+        if (b === "") return -1;
+        return field === "term" ? b.localeCompare(a) : a.localeCompare(b, "zh");
+      })
+      .map((v) => ({value: v, label: v || unknownLabel, count: counts[v]}));
+  };
+  const sections = [
+    {key: "zone", label: "分区", items: zoneItems},
+    {key: "term", label: "学期", items: dynItems("term", "未知学期")},
+    {key: "dept", label: "院系", items: dynItems("dept", "未知院系")},
+  ];
+  const starredCount = activeRows.filter((c) => starredCourses.has(String(c.course_id))).length;
+  // The same nav renders into the desktop aside and the mobile drawer.
+  [$("#course-sidebar"), $("#course-drawer-sidebar")].filter(Boolean).forEach((root) => {
+    const nav = document.createElement("nav");
+    nav.className = "sidebar-nav";
+    const addItem = (parent, kind, value, label, count, sub) => {
+      const active = courseFilter.kind === kind
+        && (kind === "all" || kind === "star" || courseFilter.value === value);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `sidebar-item${sub ? " sidebar-subitem" : ""}${active ? " active" : ""}`;
+      const name = document.createElement("span");
+      name.className = "sidebar-label";
+      name.textContent = label;
+      const num = document.createElement("span");
+      num.className = "sidebar-count";
+      num.textContent = count;
+      btn.append(name, num);
+      btn.dataset.filterKind = kind;
+      btn.dataset.filterValue = value;
+      if (active) btn.setAttribute("aria-current", "page");
+      btn.onclick = () => selectCourseFilter(kind, value);
+      parent.append(btn);
+    };
+    addItem(nav, "all", "", "全部课程", activeRows.length, false);
+    addItem(nav, "star", "", "星标", starredCount, false);
+    addItem(nav, "zone", "archive", "归档", courseRows.length - activeRows.length, false);
+    sections.forEach((sec) => {
+      const secEl = document.createElement("div");
+      secEl.className = "sidebar-section";
+      const collapsed = !!sidebarCollapsed[sec.key];
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.setAttribute("aria-expanded", String(!collapsed));
+      toggle.className = `sidebar-section-toggle${collapsed ? " collapsed" : ""}`;
+      const chevron = document.createElement("span");
+      chevron.className = "chevron";
+      chevron.textContent = "▾";
+      const name = document.createElement("span");
+      name.textContent = sec.label;
+      toggle.append(chevron, name);
+      toggle.onclick = () => {
+        sidebarCollapsed = {...sidebarCollapsed, [sec.key]: !collapsed};
+        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, JSON.stringify(sidebarCollapsed));
+        renderCourseSidebar();
+      };
+      const heading = document.createElement("div");
+      heading.className = "sidebar-section-heading";
+      heading.append(toggle);
+      if (sec.key === "zone") {
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.className = "sidebar-edit";
+        edit.textContent = "编辑";
+        edit.setAttribute("aria-label", "编辑分区");
+        edit.onclick = () => openSectionEditor().catch(error => message(error.message, true));
+        heading.append(edit);
+      }
+      secEl.append(heading);
+      if (!collapsed) {
+        const items = document.createElement("div");
+        items.className = "sidebar-section-items";
+        sec.items.forEach((it) => addItem(items, sec.key, it.value, it.label, it.count, true));
+        if (sec.key === "zone") {
+          const add = document.createElement("button");
+          add.type = "button";
+          add.className = "sidebar-item sidebar-subitem sidebar-add";
+          add.textContent = "+ 新建分区";
+          add.onclick = () => openSectionEditor(true).catch(error => message(error.message, true));
+          items.append(add);
+        }
+        secEl.append(items);
+      }
+      nav.append(secEl);
+    });
+    root.replaceChildren(nav);
+  });
+}
+
+async function openSectionEditor(add = false) {
+  await loadCourseZones();
+  sectionDraft = courseSections.map(section => ({...section}));
+  sectionEditorRevision = courseSectionsRevision;
+  $("#section-editor-error").textContent = "";
+  renderSectionEditor();
+  closeCourseDrawer();
+  $("#section-editor").showModal();
+  if (add) addSectionDraft();
+}
+
+function addSectionDraft() {
+  if (sectionDraft.length >= 100) return;
+  sectionDraft.push({id: `section-${crypto.randomUUID().replaceAll("-", "")}`, name: ""});
+  renderSectionEditor();
+  $("#section-editor-list").lastElementChild.querySelector("input").focus();
+}
+
+function renderSectionEditor(focusId, focusAction) {
+  const list = $("#section-editor-list");
+  list.replaceChildren();
+  $("#section-editor-empty").hidden = sectionDraft.length > 0;
+  $("#section-editor-add").disabled = sectionDraft.length >= 100;
+  sectionDraft.forEach((section, index) => {
+    const row = document.createElement("div");
+    row.className = "section-editor-row";
+    row.dataset.sectionId = section.id;
+    const input = document.createElement("input");
+    input.value = section.name;
+    input.placeholder = "分区名称";
+    input.maxLength = 40;
+    input.required = true;
+    input.setAttribute("aria-label", `分区 ${index + 1} 名称`);
+    input.oninput = () => { section.name = input.value; };
+    row.append(input);
+    [["up", "↑", "上移", -1], ["down", "↓", "下移", 1], ["delete", "删除", "删除", 0]].forEach(([action, label, title, offset]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.dataset.action = action;
+      button.setAttribute("aria-label", `${title}分区 ${section.name || index + 1}`);
+      button.disabled = action === "up" && index === 0 || action === "down" && index === sectionDraft.length - 1;
+      button.onclick = () => {
+        if (action === "delete") sectionDraft.splice(index, 1);
+        else [sectionDraft[index], sectionDraft[index + offset]] = [sectionDraft[index + offset], sectionDraft[index]];
+        renderSectionEditor(section.id, action);
+      };
+      row.append(button);
+    });
+    list.append(row);
+  });
+  if (focusId) {
+    const row = [...list.children].find(row => row.dataset.sectionId === focusId);
+    const button = row?.querySelector(`[data-action="${focusAction}"]`);
+    (button && !button.disabled ? button : row?.querySelector("input") || $("#section-editor-add")).focus();
+  }
+}
+
+$("#section-editor-add").onclick = addSectionDraft;
+$("#section-editor-cancel").onclick = () => $("#section-editor").close();
+$("#section-editor").addEventListener("cancel", event => { if (sectionsSaving) event.preventDefault(); });
+$("#section-editor-form").onsubmit = async event => {
+  event.preventDefault();
+  if (sectionsSaving) return;
+  sectionsSaving = true;
+  $("#section-editor-fields").disabled = true;
+  $("#section-editor-error").textContent = "";
+  try {
+    const result = await api("/api/local/course-sections", {method: "PUT", body: JSON.stringify({
+      sections: sectionDraft.map(s => ({id: s.id, name: s.name.trim()})), revision: sectionEditorRevision,
+    })});
+    applyCourseOrganization(result);
+    $("#section-editor").close();
+    await loadCourses();
+    message("分区已保存");
+  } catch (error) {
+    $("#section-editor-error").textContent = error.message;
+    if (!$("#section-editor").open) message(error.message, true);
+  } finally {
+    sectionsSaving = false;
+    $("#section-editor-fields").disabled = false;
+  }
+};
+
+function openCourseDrawer() {
+  renderCourseSidebar();
+  $("#course-drawer").classList.remove("hidden");
+}
+
+function closeCourseDrawer() {
+  $("#course-drawer").classList.add("hidden");
 }
 
 async function loadLectureNames() {
@@ -398,10 +677,14 @@ async function moveCourseToZone(courseId, zone, select) {
       method: "PUT",
       body: JSON.stringify({course_id: id, zone}),
     });
-    // In "全部" the existing card remains correct. In a filtered zone the
-    // card just moved away, so redraw only after the picker has closed.
-    if (activeCourseZone !== "all" && activeCourseZone !== zone) {
+    // In an unfiltered view the existing card remains correct; when the
+    // list is filtered by zone the card just moved away, so redraw only
+    // after the picker has closed.  Zone counts in the sidebar change in
+    // every view.
+    if (zone === "archive" || previous === "archive" || (courseFilter.kind === "zone" && courseFilter.value !== zone)) {
       await loadCourses();
+    } else {
+      renderCourseSidebar();
     }
   } catch (error) {
     if (courseZoneRequests.get(id) === requestId) {
@@ -412,7 +695,7 @@ async function moveCourseToZone(courseId, zone, select) {
       } else {
         courseZones = {...courseZones, [id]: previous};
       }
-      if (select?.isConnected) select.value = previous || "organize";
+      if (select?.isConnected && select.tagName === "SELECT") select.value = previous || defaultCourseZone;
     }
     message(error.message, true);
   } finally {
@@ -428,12 +711,13 @@ async function loadCourses() {
   const list = $("#course-list");
   list.replaceChildren();
   list.classList.remove("empty");
-  const visibleCourses = activeCourseZone === "all"
-    ? courseRows
-    : courseRows.filter((course) => courseZone(course.course_id) === activeCourseZone);
+  const visibleCourses = visibleCourseRows();
+  $("#course-filter-caption").textContent = `${courseFilterCaption()} · ${visibleCourses.length} 门`;
+  renderCourseSidebar();
   if (!visibleCourses.length) {
-    list.textContent = activeCourseZone === "all" ? "数据库中还没有课程。" : "这个分区暂时没有课程。";
+    list.textContent = courseFilter.kind === "all" ? "数据库中还没有课程。" : "这个分类暂时没有课程。";
     list.classList.add("empty");
+    syncSearchCourseOptions();
     return;
   }
   visibleCourses.forEach((course) => {
@@ -466,6 +750,8 @@ async function loadCourses() {
     textBlock.append(title);
     const metaParts = [];
     if (course.teacher) metaParts.push(String(course.teacher));
+    if (course.dept) metaParts.push(String(course.dept));
+    if (course.term) metaParts.push(String(course.term));
     const updated = relativeTime(course.last_updated);
     if (updated) metaParts.push(`${updated}更新`);
     if (metaParts.length) {
@@ -485,12 +771,20 @@ async function loadCourses() {
     zoneControl.className = "course-zone-select";
     const select = document.createElement("select");
     select.setAttribute("aria-label", `${course.title || course.course_id} 的分区`);
-    Object.entries(COURSE_ZONE_LABELS).forEach(([value, label]) => {
+    Object.entries(courseZoneLabels()).forEach(([value, label]) => {
       select.append(new Option(label, value, false, value === courseZone(course.course_id)));
     });
     select.onchange = () => moveCourseToZone(course.course_id, select.value, select);
-    zoneControl.append(select);
-    aside.append(count, zoneControl, createButton("导出 / 删除", () => openDataActions(course).catch(error => message(error.message, true))));
+    const archived = courseZone(course.course_id) === "archive";
+    const archiveButton = document.createElement("button");
+    archiveButton.type = "button";
+    archiveButton.className = "course-archive-button";
+    archiveButton.textContent = archived ? "移出归档" : "归档";
+    archiveButton.setAttribute("aria-label", `${archived ? "移出归档" : "归档"}：${course.title || course.course_id}`);
+    archiveButton.title = archived ? "移出归档后放入未分区" : "移到独立的归档列表";
+    archiveButton.onclick = () => moveCourseToZone(course.course_id, archived ? "unassigned" : "archive", archiveButton);
+    if (!archived) zoneControl.append(select);
+    aside.append(count, zoneControl, archiveButton, createButton("导出 / 删除", () => openDataActions(course).catch(error => message(error.message, true))));
     row.append(titleRow, aside);
     card.append(row);
     list.append(card);
@@ -1392,8 +1686,10 @@ function setObsidianView(open) {
 function showView(view, options = {}) {
   const changed = view !== activeView;
   activeView = view;
+  closeCourseDrawer();
   const paneIds = {
     courses: "view-courses", lectures: "view-lectures", detail: "view-detail",
+    talks: "view-talks", talkDetail: "view-talk-detail",
     search: "view-search", subscriptions: "view-subscriptions", rerun: "view-rerun",
     automation: "view-automation", settings: "view-settings",
     models: "model-management", obsidian: "obsidian-sync",
@@ -1401,14 +1697,16 @@ function showView(view, options = {}) {
   Object.entries(paneIds).forEach(([name, id]) => $("#" + id).classList.toggle("hidden", name !== view));
   const title = {
     courses: "iCourse", lectures: currentCourse?.title || "课程", detail: currentLecture ? lectureDisplayName(currentLecture) : "笔记",
+    talks: "讲座", talkDetail: currentTalk ? talkDisplayName(currentTalk) : "讲座",
     search: "搜索", subscriptions: "订阅", rerun: "重跑",
     automation: "自动化", settings: "设置", models: "模型与 API", obsidian: "同步到 Obsidian",
   }[view] || "iCourse";
   $("#page-title").textContent = title;
-  $("#back-button").classList.toggle("hidden", !["lectures", "detail", "models", "obsidian", "rerun", "automation"].includes(view));
+  $("#back-button").classList.toggle("hidden", !["lectures", "detail", "talkDetail", "models", "obsidian", "rerun", "automation"].includes(view));
   // Lectures/detail are depths of the courses path — keep 课程 highlighted;
-  // rerun/automation live under 设置 now.
+  // rerun/automation live under 设置 now. Talks is its own top-level entry.
   const navView = ["lectures", "detail"].includes(view) ? "courses"
+    : ["talkDetail"].includes(view) ? "talks"
     : ["rerun", "automation", "models", "obsidian"].includes(view) ? "settings" : view;
   document.querySelectorAll(".nav-button").forEach((button) => {
     const active = button.dataset.view === navView;
@@ -1425,7 +1723,7 @@ function normalizeProvider(item) {
   return {
     enabled: item.enabled !== false,
     name: String(item.name || ""),
-    base_url: String(item.base_url || ""),
+    base_url: String(item.base_url || item.default_base_url || ""),
     api_key_env: apiKeyEnv,
     models: Array.isArray(item.models) ? item.models.map(String) : [],
     api_key: "",
@@ -1450,11 +1748,17 @@ async function loadModelProviders() {
   loading.textContent = "正在读取 GitHub 中的模型配置…";
   list.append(loading);
   const result = await api("/api/local/model-providers");
+  const selectedName = selectedProvider?.name;
   modelProviders = (result.providers || []).map(normalizeProvider);
+  selectedProvider = modelProviders.find(item => item.name === selectedName) || modelProviders[0];
+  modelsDirty = false;
+  $("#model-save-status").textContent = "配置已载入";
+  $("#model-save-button").disabled = true;
   const source = $("#model-source");
   source.textContent = modelSourceLabel(result.source);
   source.classList.remove("hidden");
   renderModelProviders();
+  if (result.source !== "github-variable") markModelsDirty();
 }
 
 function moveProvider(index, offset) {
@@ -1462,6 +1766,7 @@ function moveProvider(index, offset) {
   if (destination < 0 || destination >= modelProviders.length) return;
   const [provider] = modelProviders.splice(index, 1);
   modelProviders.splice(destination, 0, provider);
+  markModelsDirty();
   renderModelProviders();
 }
 
@@ -1491,7 +1796,7 @@ async function testModelProvider(index, button, resultNode) {
     return;
   }
   if (!model) {
-    message("请至少填写一个模型，测试会使用第一行。", true);
+    message("请至少填写一个模型，测试会使用首选模型。", true);
     return;
   }
   if (!confirm(`测试 ${provider.name || "该供应商"} 的首个模型 ${model}？这会消耗极少量 token。`)) return;
@@ -1520,7 +1825,201 @@ async function testModelProvider(index, button, resultNode) {
   }
 }
 
+function renderProviderNavigation() {
+  const root = $("#provider-navigation");
+  root.replaceChildren();
+  $("#provider-count").textContent = `${modelProviders.length} 个`;
+  const query = $("#provider-search").value.trim().toLowerCase();
+  modelProviders.forEach((provider, index) => {
+    if (!provider.name.toLowerCase().includes(query)) return;
+    const button = createButton("", () => {
+      selectedProvider = provider;
+      renderModelProviders();
+      $(".provider-nav-item.active")?.focus();
+    }, `provider-nav-item${provider === selectedProvider ? " active" : ""}`);
+    button.setAttribute("aria-pressed", String(provider === selectedProvider));
+    const name = document.createElement("strong");
+    name.textContent = provider.name || "未命名服务商";
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = `${provider.enabled ? "● 已启用" : "○ 已停用"} · ${provider.models.length} 个模型 · 优先级 ${index + 1}`;
+    button.append(name, meta);
+    root.append(button);
+  });
+  if (!root.children.length) {
+    const empty = document.createElement("p");
+    empty.className = "meta";
+    empty.textContent = "没有匹配的服务商";
+    root.append(empty);
+  }
+}
+
+async function openModelDirectory(provider, refreshModels) {
+  if (!provider.api_key.trim()) {
+    message("请先重新输入 API Key。GitHub 不允许读回已保存的密钥。", true);
+    $("#model-provider-list [aria-label='API Key']")?.focus();
+    return;
+  }
+  if (!provider.base_url.trim()) { message("请先填写 API 地址。", true); return; }
+  const dialog = document.createElement("dialog");
+  dialog.className = "model-directory-dialog";
+  dialog.setAttribute("aria-labelledby", "model-directory-title");
+  const head = document.createElement("div");
+  head.className = "section-title";
+  const title = document.createElement("h2");
+  title.id = "model-directory-title";
+  title.textContent = `${provider.name || "服务商"} · 模型目录`;
+  const close = createButton("完成", () => dialog.close());
+  head.append(title, close);
+  const status = document.createElement("p");
+  status.className = "meta";
+  status.setAttribute("role", "status");
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = "搜索模型 ID";
+  search.setAttribute("aria-label", "搜索模型目录");
+  const list = document.createElement("div");
+  list.className = "model-directory-list";
+  let models = [];
+  const render = () => {
+    list.replaceChildren();
+    const filtered = models.filter(id => id.toLowerCase().includes(search.value.trim().toLowerCase()));
+    for (const id of filtered) {
+      const row = document.createElement("div");
+      row.className = "provider-model-row";
+      const label = document.createElement("span");
+      label.className = "model-id";
+      label.textContent = id;
+      const added = provider.models.includes(id);
+      const add = createButton(added ? "已添加" : "＋ 添加", () => {
+        if (provider.models.length >= 30) { message("每个服务商最多添加 30 个模型。", true); return; }
+        if (!provider.models.includes(id)) provider.models.push(id);
+        markModelsDirty(); refreshModels(); renderProviderNavigation(); render();
+      });
+      add.disabled = added;
+      add.setAttribute("aria-label", `${added ? "已添加" : "添加"}目录模型 ${id}`);
+      row.append(label, add); list.append(row);
+    }
+    if (!filtered.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = models.length ? "没有匹配的模型" : "目录为空，可以关闭此窗口后手动添加模型 ID。";
+      list.append(empty);
+    }
+  };
+  const retry = createButton("重新获取", () => fetchModels());
+  const fetchModels = async () => {
+    retry.disabled = true; search.disabled = true; list.replaceChildren();
+    status.textContent = "正在获取模型目录…";
+    try {
+      const result = await api("/api/local/model-providers/models", {
+        method: "POST", body: JSON.stringify({base_url: provider.base_url, api_key: provider.api_key.trim()}),
+      });
+      if (!dialog.open) return;
+      models = result.models || [];
+      status.textContent = `获取到 ${models.length} 个模型。点击添加后加入草稿，关闭窗口后保存到 GitHub。目录包含的模型不一定都适合摘要任务。`;
+      search.disabled = false;
+      render(); search.focus();
+    } catch (error) {
+      if (dialog.open) status.textContent = `${error.message} 也可以关闭窗口后手动添加模型。`;
+    } finally { retry.disabled = false; }
+  };
+  search.oninput = render;
+  dialog.append(head, status, search, list, retry);
+  dialog.addEventListener("close", () => dialog.remove(), {once:true});
+  document.body.append(dialog); dialog.showModal();
+  await fetchModels();
+}
+
+function renderProviderModels(provider, container) {
+  const heading = document.createElement("h2");
+  heading.textContent = "模型";
+  const hint = document.createElement("p");
+  hint.className = "meta";
+  hint.textContent = "首项优先调用；失败后按顺序回退。模型 ID 须与服务商提供的一致。";
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = "搜索已添加的模型";
+  search.setAttribute("aria-label", "搜索已添加的模型");
+  const list = document.createElement("div");
+  list.className = "provider-model-list";
+  const render = () => {
+    list.replaceChildren();
+    provider.models.forEach((model, index) => {
+      if (!model.toLowerCase().includes(search.value.trim().toLowerCase())) return;
+      const row = document.createElement("div");
+      row.className = "provider-model-row";
+      const label = document.createElement("span");
+      label.textContent = model;
+      label.className = "model-id";
+      const priority = document.createElement("span");
+      priority.className = "priority";
+      priority.textContent = index === 0 ? "首选" : `#${index + 1}`;
+      const actions = document.createElement("div");
+      actions.className = "provider-controls";
+      [-1, 1].forEach(offset => {
+        const button = createButton(offset === -1 ? "↑" : "↓", () => {
+          const destination = index + offset;
+          [provider.models[index], provider.models[destination]] = [provider.models[destination], provider.models[index]];
+          markModelsDirty(); render();
+        });
+        button.setAttribute("aria-label", `${offset === -1 ? "上移" : "下移"}模型 ${model}`);
+        button.disabled = index + offset < 0 || index + offset >= provider.models.length;
+        actions.append(button);
+      });
+      const remove = createButton("移除", () => {
+        provider.models.splice(index, 1);
+        markModelsDirty(); render(); renderProviderNavigation();
+      });
+      remove.setAttribute("aria-label", `移除模型 ${model}`);
+      actions.append(remove);
+      row.append(priority, label, actions);
+      list.append(row);
+    });
+    if (!list.children.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = provider.models.length ? "没有匹配的模型" : "还没有模型，请在下方添加模型 ID。";
+      list.append(empty);
+    }
+  };
+  search.oninput = render;
+  const form = document.createElement("form");
+  form.className = "model-add-form";
+  const input = document.createElement("input");
+  input.placeholder = "输入模型 ID，例如 deepseek-chat";
+  input.setAttribute("aria-label", "添加模型 ID");
+  input.required = true;
+  input.maxLength = 200;
+  input.autocomplete = "off";
+  const add = document.createElement("button");
+  add.type = "submit";
+  add.textContent = "＋ 添加模型";
+  form.onsubmit = event => {
+    event.preventDefault();
+    const id = input.value.trim();
+    if (!id) return;
+    if (provider.models.includes(id)) { message("该模型已添加。", true); return; }
+    if (provider.models.length >= 30) { message("每个服务商最多添加 30 个模型。", true); return; }
+    provider.models.push(id);
+    input.value = ""; search.value = "";
+    markModelsDirty(); render(); renderProviderNavigation(); input.focus();
+  };
+  form.append(input, add);
+  const toolbar = document.createElement("div");
+  toolbar.className = "section-title";
+  const discover = createButton("获取模型", () => openModelDirectory(provider, render));
+  if (window.ICOURSE_CAPABILITIES?.providerTest === false) {
+    discover.disabled = true;
+    discover.title = "请在本地控制台获取模型目录";
+  }
+  toolbar.append(heading, discover);
+  container.append(toolbar, hint, search, list, form);
+  render();
+}
+
 function renderModelProviders() {
+  renderProviderNavigation();
   const root = $("#model-provider-list");
   root.replaceChildren();
   if (!modelProviders.length) {
@@ -1532,6 +2031,7 @@ function renderModelProviders() {
   }
 
   modelProviders.forEach((provider, index) => {
+    if (provider !== selectedProvider) return;
     const card = document.createElement("section");
     card.className = `provider-card${provider.enabled ? "" : " is-disabled"}`;
 
@@ -1548,9 +2048,11 @@ function renderModelProviders() {
     toggle.className = "toggle";
     const enabled = document.createElement("input");
     enabled.type = "checkbox";
+    enabled.setAttribute("role", "switch");
     enabled.checked = provider.enabled;
     enabled.addEventListener("change", () => {
       provider.enabled = enabled.checked;
+      markModelsDirty(); renderProviderNavigation();
       card.classList.toggle("is-disabled", !provider.enabled);
     });
     toggle.append(enabled, document.createTextNode("启用"));
@@ -1569,6 +2071,8 @@ function renderModelProviders() {
       }
       if (!confirm(`删除供应商 ${provider.name || `#${index + 1}`}？已保存的 GitHub Secret 不会被删除。`)) return;
       modelProviders.splice(index, 1);
+      selectedProvider = modelProviders[Math.min(index, modelProviders.length - 1)];
+      markModelsDirty();
       renderModelProviders();
     }, "danger");
     controls.append(up, down, remove);
@@ -1578,6 +2082,7 @@ function renderModelProviders() {
     fields.className = "provider-fields";
 
     const nameInput = document.createElement("input");
+    nameInput.setAttribute("aria-label", "供应商名称");
     nameInput.value = provider.name;
     nameInput.required = true;
     nameInput.maxLength = 50;
@@ -1586,18 +2091,20 @@ function renderModelProviders() {
     nameInput.placeholder = "例如 deepseek";
     nameInput.addEventListener("input", () => {
       provider.name = nameInput.value;
+      markModelsDirty(); renderProviderNavigation();
       title.textContent = provider.name || "未命名供应商";
     });
     fields.append(createField("供应商名称", nameInput, "仅使用字母、数字、下划线或连字符"));
 
     const baseUrlInput = document.createElement("input");
+    baseUrlInput.setAttribute("aria-label", "Base URL");
     baseUrlInput.type = "url";
     baseUrlInput.value = provider.base_url;
     baseUrlInput.required = true;
     baseUrlInput.autocomplete = "off";
     baseUrlInput.spellcheck = false;
     baseUrlInput.placeholder = "https://api.example.com/v1";
-    baseUrlInput.addEventListener("input", () => { provider.base_url = baseUrlInput.value; });
+    baseUrlInput.addEventListener("input", () => { provider.base_url = baseUrlInput.value; markModelsDirty(); });
     fields.append(createField("Base URL", baseUrlInput, "必须是兼容 OpenAI Chat Completions 的 HTTPS 地址"));
 
     const secretInput = document.createElement("input");
@@ -1610,14 +2117,20 @@ function renderModelProviders() {
     const status = document.createElement("span");
     secretInput.addEventListener("input", () => {
       provider.api_key_env = secretInput.value;
+      markModelsDirty();
       secretStatus(provider, status);
     });
     const secretField = createField("API Key Secret 名称", secretInput, "自定义名称需符合 LLM_*_API_KEY");
     secretStatus(provider, status);
-    secretField.append(status);
-    fields.append(secretField);
+
+    const advanced = document.createElement("details");
+    advanced.className = "provider-advanced";
+    const summary = document.createElement("summary");
+    summary.textContent = "高级设置";
+    advanced.append(summary, secretField);
 
     const apiKeyInput = document.createElement("input");
+    apiKeyInput.setAttribute("aria-label", "API Key");
     apiKeyInput.type = "password";
     apiKeyInput.value = provider.api_key;
     apiKeyInput.autocomplete = "new-password";
@@ -1625,25 +2138,22 @@ function renderModelProviders() {
     apiKeyInput.placeholder = provider.api_key_configured ? "已配置；留空不修改" : "输入 API Key";
     apiKeyInput.addEventListener("input", () => {
       provider.api_key = apiKeyInput.value;
+      markModelsDirty();
       secretStatus(provider, status);
     });
-    fields.append(createField("API Key", apiKeyInput, isPages ? "在浏览器加密后写入 GitHub Secret" : "仅发送给本地服务；保存时加密写入 GitHub Secret"));
+    const keyField = createField("API Key", apiKeyInput, isPages ? "在浏览器加密后写入 GitHub Secret" : "仅发送给本地服务；保存时加密写入 GitHub Secret");
+    keyField.append(status);
+    fields.append(keyField);
 
-    const models = document.createElement("textarea");
-    models.value = provider.models.join("\n");
-    models.rows = Math.max(4, Math.min(8, provider.models.length + 1));
-    models.placeholder = "每行一个模型名称\n例如 deepseek-chat";
-    models.spellcheck = false;
-    models.addEventListener("input", () => {
-      provider.models = models.value.split(/\r?\n/);
-    });
-    fields.append(createField("模型及其优先级", models, "每行一个；第一行优先，失败后自动尝试下一行", "wide models-field"));
+    const modelSection = document.createElement("section");
+    modelSection.className = "provider-models";
+    renderProviderModels(provider, modelSection);
 
     const testRow = document.createElement("div");
     testRow.className = "provider-test-row";
     const testResult = document.createElement("p");
     testResult.className = "meta";
-    testResult.textContent = "测试使用第一行模型；需要重新输入 Key。";
+    testResult.textContent = "测试使用首选模型；需要重新输入 Key。";
     const testButton = createButton("测试首个模型", () => testModelProvider(index, testButton, testResult));
     if (window.ICOURSE_CAPABILITIES?.providerTest === false) {
       testButton.disabled = true;
@@ -1651,12 +2161,13 @@ function renderModelProviders() {
     }
     testRow.append(testButton, testResult);
 
-    card.append(head, fields, testRow);
+    card.append(head, fields, testRow, advanced, modelSection);
     root.append(card);
   });
 }
 
 function addModelProvider() {
+  if (modelProviders.length >= 20) { message("最多添加 20 个服务商。", true); return; }
   const usedNames = new Set(modelProviders.map((item) => item.name));
   let suffix = 1;
   while (usedNames.has(`custom-${suffix}`)) suffix += 1;
@@ -1670,6 +2181,9 @@ function addModelProvider() {
     api_key_configured: false,
     configured_api_key_env: "",
   });
+  selectedProvider = modelProviders[modelProviders.length - 1];
+  $("#provider-search").value = "";
+  markModelsDirty();
   renderModelProviders();
   const cards = $("#model-provider-list").querySelectorAll(".provider-card");
   cards[cards.length - 1]?.scrollIntoView({behavior: "smooth", block: "center"});
@@ -1680,8 +2194,16 @@ async function saveModelProviders() {
     message("至少需要一个模型供应商。", true);
     return;
   }
+  const invalid = modelProviders.find(item => !/^[A-Za-z0-9][A-Za-z0-9_-]{0,49}$/.test(item.name.trim()) || !item.models.length || !item.base_url.trim());
+  if (invalid) {
+    selectedProvider = invalid; renderModelProviders();
+    message("请补全服务商名称、API 地址，并至少添加一个模型。", true); return;
+  }
+  if (!modelProviders.some(item => item.enabled)) { message("至少需要启用一个服务商。", true); return; }
   if (!confirm("保存会更新 GitHub Actions 的模型配置，并写入本次填写的 API Key。继续吗？")) return;
   const button = $("#model-save-button");
+  modelsSaving = true;
+  $(".model-workspace").inert = true;
   button.disabled = true;
   try {
     const providers = modelProviders.map((provider) => {
@@ -1699,12 +2221,29 @@ async function saveModelProviders() {
       method: "PUT",
       body: JSON.stringify({providers}),
     });
+    modelsDirty = false;
+    modelProviders.forEach(provider => {
+      if (provider.api_key.trim()) {
+        provider.api_key_configured = true;
+        provider.configured_api_key_env = provider.api_key_env.trim().toUpperCase();
+      }
+      provider.api_key = "";
+    });
+    renderModelProviders();
+    $("#model-save-status").textContent = "已保存到 GitHub";
     message("模型配置已保存到 GitHub；正在重新加载…");
-    await loadModelProviders();
+    try { await loadModelProviders(); }
+    catch (error) {
+      renderModelProviders();
+      $("#model-save-status").textContent = "已保存；重新读取失败，请稍后重新打开";
+      message(error.message, true);
+    }
   } catch (error) {
     message(error.message, true);
   } finally {
-    button.disabled = false;
+    modelsSaving = false;
+    $(".model-workspace").inert = false;
+    button.disabled = !modelsDirty;
   }
 }
 
@@ -1969,12 +2508,16 @@ $("#forget-credentials-button").onclick = async () => {
 $("#model-button").onclick = async () => {
   const button = $("#model-button");
   button.disabled = true;
+  $(".model-workspace").inert = true;
   setModelView(true);
   try {
-    await loadModelProviders();
+    if (modelsDirty) renderModelProviders();
+    else await loadModelProviders();
   } catch (error) {
     const source = $("#model-source");
     source.textContent = "配置读取失败";
+    $("#model-save-status").textContent = "读取失败，请返回设置后重试";
+    $("#model-save-button").disabled = true;
     source.classList.remove("hidden");
     const root = $("#model-provider-list");
     root.replaceChildren();
@@ -1985,10 +2528,12 @@ $("#model-button").onclick = async () => {
     message(error.message, true);
   } finally {
     button.disabled = false;
+    $(".model-workspace").inert = false;
   }
 };
 
 $("#model-close-button").onclick = () => setModelView(false);
+$("#provider-search").oninput = renderProviderNavigation;
 $("#model-add-button").onclick = addModelProvider;
 $("#model-save-button").onclick = saveModelProviders;
 
@@ -2065,6 +2610,7 @@ $("#backfill-titles-button").onclick = async () => {
 
 $("#course-back-button").onclick = () => showView("courses", {keepScroll: true});
 $("#detail-back").onclick = () => showView("lectures", {keepScroll: true});
+$("#talk-back").onclick = () => showView("talks", {keepScroll: true});
 // 笔记改名：双击详情页标题触发，不再单设按钮。
 async function renameCurrentLecture() {
   if (!currentLecture) return;
@@ -2095,6 +2641,7 @@ $("#detail-title").ondblclick = renameCurrentLecture;
 $("#back-button").onclick = () => {
   if (activeView === "detail") showView("lectures", {keepScroll: true});
   else if (activeView === "lectures") showView("courses", {keepScroll: true});
+  else if (activeView === "talkDetail") showView("talks", {keepScroll: true});
   else showView("settings", {keepScroll: true});
 };
 $("#previous-lecture").onclick = async () => {
@@ -2117,17 +2664,10 @@ document.querySelectorAll(".detail-tab").forEach((button) => {
     renderDetail();
   };
 });
-document.querySelectorAll(".course-zone-button").forEach((button) => {
-  button.onclick = async () => {
-    activeCourseZone = button.dataset.courseZone;
-    document.querySelectorAll(".course-zone-button").forEach((item) => {
-      const active = item === button;
-      item.classList.toggle("active", active);
-      item.setAttribute("aria-selected", String(active));
-    });
-    try { await loadCourses(); }
-    catch (error) { message(error.message, true); }
-  };
+$("#course-sidebar-open").onclick = openCourseDrawer;
+$("#course-drawer-backdrop").onclick = closeCourseDrawer;
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeCourseDrawer();
 });
 document.querySelectorAll(".nav-button").forEach((button) => {
   button.onclick = async () => {
@@ -2138,6 +2678,9 @@ document.querySelectorAll(".nav-button").forEach((button) => {
       catch (error) { message(error.message, true); }
     } else if (view === "rerun") {
       try { await loadRerunView(); }
+      catch (error) { message(error.message, true); }
+    } else if (view === "talks") {
+      try { await loadTalks(); }
       catch (error) { message(error.message, true); }
     }
   };
@@ -2298,8 +2841,575 @@ $("#search-more").onclick = () => {
   if (searchHasMore) runSearch(searchPage + 1);
 };
 
+/* ── 讲座：本机粘贴转写 → 云端模型生成笔记 ──
+   独立于课程库（课程库是 data 分支的只读镜像）；转写文本只在本机
+   SQLite 与本次摘要请求中出现，不上 GitHub。 */
+let talkRows = [];
+let currentTalk = null;
+let talkTab = "summary";
+let talkDetailTimer = null;
+let talkSelectedVersionKeys = new Set();
+
+function talkDisplayName(talk) {
+  return talk?.display_title || talk?.custom_title || talk?.ai_title || talk?.id || "讲座";
+}
+
+function talkStateLabel(talk) {
+  if (talk?.status === "ready") return "已生成";
+  if (talk?.status === "summarizing") return "生成中";
+  if (talk?.status === "uploading") return "上传中";
+  if (talk?.status === "dispatching") return "等待云端启动";
+  if (talk?.status === "transcribing") return "转写中";
+  if (talk?.status === "transcribed") return "待生成";
+  if (talk?.status === "failed") {
+    return talk?.error_stage === "transcribe" ? "转写失败"
+      : talk?.error_stage === "upload" ? "上传失败"
+      : talk?.error_stage === "dispatch" ? "启动失败" : "笔记生成失败";
+  }
+  return "待生成";
+}
+
+function talkStateClass(talk) {
+  if (talk?.status === "ready") return "ready";
+  if (talk?.status === "failed") return "failed";
+  return "waiting";
+}
+
+async function loadTalks() {
+  talkRows = await api("/api/local/talks");
+  const list = $("#talk-list");
+  list.replaceChildren();
+  list.classList.remove("empty");
+  if (!talkRows.length) {
+    list.textContent = "还没有讲座。点击「上传录音」开始，也可以粘贴已有转写。";
+    list.classList.add("empty");
+    return;
+  }
+  talkRows.forEach((talk) => {
+    const card = document.createElement("article");
+    card.className = "lecture-card";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "lecture-open";
+    const row = document.createElement("div");
+    row.className = "lecture-row";
+    const left = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = talkDisplayName(talk);
+    left.append(title);
+    const meta = document.createElement("p");
+    const parts = [];
+    if (talk.source === "upload" && talk.audio_bytes) {
+      parts.push(`录音 ${(talk.audio_bytes / 1024 / 1024).toFixed(1)} MB`);
+    }
+    if (talk.source === "upload" && talk.status === "uploading") {
+      parts.push("后台分片上传中，打开详情查看进度");
+    }
+    if (talk.source === "upload" && talk.status === "failed" && talk.error_stage === "upload") {
+      parts.push("上传中断，可一键断点续传");
+    }
+    if (talk.transcript_chars) parts.push(`转写 ${talk.transcript_chars} 字`);
+    if (talk.summary_model) parts.push(talk.summary_model);
+    if (talk.error && talk.status === "failed") parts.push(talk.error);
+    if (!parts.length && talk.status === "transcribing") parts.push("云端转写中，稍后自动同步");
+    if (parts.length) {
+      meta.textContent = parts.join(" · ");
+      left.append(meta);
+    }
+    const state = document.createElement("span");
+    state.className = `state-badge ${talkStateClass(talk)}`;
+    state.textContent = talkStateLabel(talk);
+    row.append(left, state);
+    open.append(row);
+    open.onclick = () => openTalk(talk.id);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "course-archive-button";
+    remove.textContent = "删除";
+    remove.setAttribute("aria-label", `删除讲座 ${talkDisplayName(talk)}`);
+    remove.onclick = async (event) => {
+      event.stopPropagation();
+      if (!confirm(`删除讲座「${talkDisplayName(talk)}」？本机数据将移除，不可恢复。`)) return;
+      try {
+        await api(`/api/local/talks/${encodeURIComponent(talk.id)}`, {method: "DELETE"});
+        message("已删除讲座");
+        await loadTalks();
+      } catch (error) {
+        message(error.message, true);
+      }
+    };
+    card.append(open, remove);
+    list.append(card);
+  });
+}
+
+async function openTalk(talkId, options = {}) {
+  currentTalk = await api(`/api/local/talks/${encodeURIComponent(talkId)}`);
+  talkTab = options.tab === "transcript" ? "transcript" : "summary";
+  talkSelectedVersionKeys = new Set();
+  renderTalkDetail();
+  showView("talkDetail");
+  scheduleTalkRefresh(talkId);
+}
+
+function scheduleTalkRefresh(talkId) {
+  clearTimeout(talkDetailTimer);
+  const busy = currentTalk
+    && (["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status));
+  if (!busy) return;
+  talkDetailTimer = setTimeout(async () => {
+    if (activeView !== "talkDetail" || !currentTalk || String(currentTalk.id) !== String(talkId)) return;
+    try {
+      // 转写+摘要都在云端跑（和 iCourse 课次一样）：先尝试把已生成的
+      // 结果同步回本机，再刷新状态。
+      if (["transcribing", "summarizing"].includes(currentTalk.status) && currentTalk.source === "upload") {
+        const synced = await api(`/api/local/talks/${encodeURIComponent(talkId)}/sync-transcript`, {method: "POST", body: "{}"});
+        if (synced && synced.ok) {
+          message(synced.detail || "转写完成，已同步结果");
+          talkTab = "summary";
+        }
+      }
+    } catch (_) {
+      // 同步失败（转写中/网络抖动）不打扰用户，继续轮询即可。
+    }
+    try {
+      await openTalk(talkId, {tab: talkTab});
+    } catch (_) {}
+  }, currentTalk.status === "transcribing" ? 15000 : 4000);
+}
+
+function talkVersions() {
+  const versions = [];
+  (currentTalk?.versions || []).forEach((version) => {
+    if (!String(version?.summary || "").trim()) return;
+    const key = `${version.model || "unknown"}@${version.generated_at || ""}`;
+    versions.push({
+      key,
+      model: String(version.model || "unknown"),
+      summary: version.summary,
+      generated_at: version.generated_at || "",
+    });
+  });
+  if (String(currentTalk?.summary || "").trim()) {
+    const activeModel = String(currentTalk.summary_model || "unknown");
+    const listed = versions.some(
+      (version) => version.model === activeModel && version.summary === currentTalk.summary
+    );
+    if (!listed) {
+      versions.push({
+        key: "__active__",
+        model: activeModel,
+        summary: currentTalk.summary,
+        generated_at: currentTalk.updated_at || "",
+      });
+    }
+  }
+  versions.sort((a, b) => String(b.generated_at || "").localeCompare(String(a.generated_at || "")));
+  return versions;
+}
+
+async function ensureTalkModelOptions() {
+  const select = $("#talk-model-select");
+  if (select.options.length) return;
+  try {
+    await populateRerunModelSelect("#talk-model-select", true);
+  } catch (error) {
+    $("#talk-generate-hint").textContent = error.message;
+  }
+}
+
+function renderTalkDetail() {
+  if (!currentTalk) return;
+  $("#talk-title").textContent = talkDisplayName(currentTalk);
+  const subtitle = currentTalk.custom_title && currentTalk.ai_title && currentTalk.custom_title !== currentTalk.ai_title
+    ? `AI 标题：${currentTalk.ai_title}`
+    : (currentTalk.created_at ? `创建于 ${new Date(currentTalk.created_at).toLocaleString()}` : "");
+  $("#talk-subtitle").textContent = subtitle;
+  $("#talk-subtitle").classList.toggle("hidden", !subtitle);
+  document.querySelectorAll(".talk-detail-tab").forEach((button) => {
+    const active = button.dataset.talkTab === talkTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  const root = $("#talk-content");
+  root.replaceChildren();
+  const controls = $("#talk-summary-controls");
+  controls.replaceChildren();
+  if (talkTab === "transcript") {
+    controls.classList.add("hidden");
+    const transcript = document.createElement("div");
+    transcript.className = "transcript";
+    transcript.textContent = currentTalk.transcript || "暂无转写文本";
+    root.append(transcript);
+  } else {
+    const versions = talkVersions();
+    if (currentTalk.status === "uploading") {
+      // 分片上传在后台跑：先给占位，进度由异步回调填入（render 是同步的）。
+      controls.classList.add("hidden");
+      root.innerHTML = `<div class="summary"><p>录音正在后台分片上传（约 4MB/片）…此页每 4 秒刷新一次，上传完成后会自动触发云端转写。</p><div class="talk-upload-progress"><div class="talk-upload-progress-bar"><div id="talk-detail-upload-fill" style="width:0%"></div></div><p class="meta" id="talk-detail-upload-text">正在读取进度…</p></div></div>`;
+      fetchTalkUploadProgress(currentTalk.id).then((progress) => {
+        if (!currentTalk || currentTalk.status !== "uploading") return;
+        const fill = $("#talk-detail-upload-fill");
+        const text = $("#talk-detail-upload-text");
+        if (fill) fill.style.width = `${uploadPercent(progress)}%`;
+        if (text) text.textContent = uploadProgressText(progress);
+      }).catch(() => {});
+    } else if (currentTalk.status === "failed" && currentTalk.source === "upload") {
+      controls.classList.add("hidden");
+      root.innerHTML = `<div class="summary"><p>${escapeHtml(currentTalk.error || "处理失败，请重试")}</p><p>录音与已完成的转写会被复用，无需重新选择文件。</p><p><button id="talk-detail-retry-upload" class="primary" type="button">继续处理</button></p></div>`;
+      $("#talk-detail-retry-upload").onclick = retryCurrentTalkUpload;
+    } else if (currentTalk.status === "dispatching") {
+      controls.classList.add("hidden");
+      root.innerHTML = '<div class="summary"><p>录音已上传，正在启动云端转写…</p></div>';
+    } else if (!versions.length && !String(currentTalk.transcript || "").trim()) {
+      // 上传后云端处理尚未完成：和 iCourse 课次一样，转写+摘要都在
+      // Actions 里跑，完成后自动同步，无需手动生成。
+      controls.classList.add("hidden");
+      root.innerHTML = `<div class="summary"><p>云端处理中…转写（与 iCourse 同款 ASR）完成后会自动生成笔记，约 15 秒刷新一次，无需手动操作。</p></div>`;
+    } else if (!versions.length) {
+      controls.classList.add("hidden");
+      root.innerHTML = `<div class="summary">${renderMarkdown(currentTalk.summary)}</div>`;
+    } else {
+      if (!talkSelectedVersionKeys.size) talkSelectedVersionKeys.add(versions[0].key);
+      controls.classList.remove("hidden");
+      const title = document.createElement("strong");
+      title.textContent = versions.length > 1 ? "版本对比（可多选）" : "当前笔记版本";
+      controls.append(title);
+      const choices = document.createElement("div");
+      choices.className = "summary-version-choices";
+      versions.forEach((version) => {
+        const label = document.createElement("label");
+        label.className = "summary-version-choice";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = talkSelectedVersionKeys.has(version.key);
+        input.onchange = () => {
+          if (input.checked) talkSelectedVersionKeys.add(version.key);
+          else talkSelectedVersionKeys.delete(version.key);
+          renderTalkDetail();
+        };
+        const name = document.createElement("span");
+        name.textContent = version.model;
+        const timestamp = document.createElement("small");
+        timestamp.textContent = formatVersionDate(version.generated_at);
+        label.append(input, name, timestamp);
+        choices.append(label);
+      });
+      controls.append(choices);
+      const selected = versions.filter((version) => talkSelectedVersionKeys.has(version.key));
+      if (!selected.length) {
+        root.textContent = "请选择至少一个版本。";
+      } else {
+        const grid = document.createElement("div");
+        grid.className = `summary-version-grid${selected.length > 1 ? " compare" : ""}`;
+        selected.forEach((version) => {
+          const panel = document.createElement("section");
+          panel.className = "summary-version-panel";
+          const model = document.createElement("div");
+          model.className = "detail-model available";
+          model.textContent = `生成模型 · ${version.model}`;
+          const summary = document.createElement("div");
+          summary.className = "summary";
+          summary.innerHTML = renderMarkdown(version.summary);
+          panel.append(model, summary);
+          grid.append(panel);
+        });
+        root.append(grid);
+      }
+    }
+  }
+  activateMath(root);
+  applyStoredHighlights(root);
+  const generate = $("#talk-generate");
+  const showGenerate = Boolean(String(currentTalk.transcript || "").trim())
+    && !["uploading", "dispatching", "transcribing", "summarizing"].includes(currentTalk.status)
+    && (!String(currentTalk.summary || "").trim() || currentTalk.status === "failed");
+  generate.classList.toggle("hidden", !showGenerate);
+  if (showGenerate) {
+    ensureTalkModelOptions().catch(() => {});
+    const hint = $("#talk-generate-hint");
+    const button = $("#talk-generate-button");
+    if (currentTalk.status === "uploading") {
+      hint.textContent = "录音上传完成后才能转写、生成笔记。请稍候，进度在上方自动刷新。";
+      button.disabled = true;
+    } else if (currentTalk.status === "transcribing") {
+      // 云端转写+摘要进行中：和 iCourse 课次一样自动完成，无需手动生成。
+      hint.textContent = "云端转写与笔记生成中（约 15 秒刷新一次），完成后自动同步，无需手动操作。";
+      button.disabled = true;
+    } else {
+      button.disabled = false;
+      if (currentTalk.status === "summarizing") {
+        hint.textContent = "正在生成中…每 4 秒自动刷新一次，也可手动返回列表查看。";
+      } else if (currentTalk.status === "failed" && currentTalk.error) {
+        const stage = currentTalk.error_stage === "transcribe" ? "转写"
+          : currentTalk.error_stage === "upload" ? "上传" : "生成";
+        const retryHint = currentTalk.error_stage === "upload" && currentTalk.source === "upload"
+          ? "点下方“重新上传”可断点续传（已传分片不会重传）。"
+          : "可以点击“继续处理”恢复云端任务，或使用下方模型生成笔记。";
+        hint.textContent = `${stage}失败：${currentTalk.error}。${retryHint}`;
+      }
+    }
+  }
+}
+
+async function retryCurrentTalkUpload() {
+  if (!currentTalk) return;
+  try {
+    currentTalk = await api(`/api/local/talks/${encodeURIComponent(currentTalk.id)}/retry-upload`, {method: "POST", body: "{}"});
+    renderTalkDetail();
+    scheduleTalkRefresh(currentTalk.id);
+    message("已恢复处理，完成的步骤会自动复用");
+  } catch (error) {
+    message(error.message, true);
+  }
+}
+
+async function renameCurrentTalk() {
+  if (!currentTalk) return;
+  const input = prompt("修改讲座名称（清空并确定则恢复自动命名）", currentTalk.custom_title || talkDisplayName(currentTalk));
+  if (input === null) return;
+  try {
+    currentTalk = await api(`/api/local/talks/${encodeURIComponent(currentTalk.id)}/title`, {
+      method: "PUT",
+      body: JSON.stringify({name: input.trim()}),
+    });
+    renderTalkDetail();
+    await loadTalks();
+    message(input.trim() ? "已保存讲座名称" : "已恢复自动命名");
+  } catch (error) {
+    message(error.message, true);
+  }
+}
+
+function uploadPercent(progress) {
+  const total = Number(progress?.total || 0);
+  const done = Number(progress?.done || 0);
+  if (!total) return 0;
+  return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+}
+
+function uploadProgressText(progress) {
+  const total = Number(progress?.total || 0);
+  const done = Number(progress?.done || 0);
+  return total ? `已上传 ${done}/${total} 片（${uploadPercent(progress)}%）` : "准备上传…";
+}
+
+async function fetchTalkUploadProgress(talkId) {
+  return api(`/api/local/talks/${encodeURIComponent(talkId)}/upload-progress`);
+}
+
+function renderTalkUploadProgress(progress) {
+  const wrap = $("#talk-upload-progress");
+  const fill = $("#talk-upload-progress-fill");
+  const text = $("#talk-upload-progress-text");
+  const retry = $("#talk-upload-retry");
+  if (!progress || !Number(progress.total || 0)) {
+    wrap.classList.add("hidden");
+    retry.classList.add("hidden");
+    return;
+  }
+  wrap.classList.remove("hidden");
+  fill.style.width = `${uploadPercent(progress)}%`;
+  if (progress.status === "failed") {
+    text.textContent = `${progress.error || "处理失败"}。已传 ${progress.done}/${progress.total} 片，点击继续处理可恢复。`;
+    retry.textContent = "继续处理";
+    retry.classList.remove("hidden");
+  } else {
+    text.textContent = `${uploadProgressText(progress)}，完成后自动触发云端转写。`;
+    retry.classList.add("hidden");
+  }
+}
+
+let talkUploadPollTimer = null;
+let talkUploadPollId = null;
+
+function stopTalkUploadPoll() {
+  clearInterval(talkUploadPollTimer);
+  talkUploadPollTimer = null;
+  talkUploadPollId = null;
+}
+
+function startTalkUploadPoll(talkId) {
+  stopTalkUploadPoll();
+  talkUploadPollId = talkId;
+  const tick = async () => {
+    if (!$("#talk-upload").open || talkUploadPollId !== talkId) return;
+    try {
+      const progress = await fetchTalkUploadProgress(talkId);
+      renderTalkUploadProgress(progress);
+      if (["transcribing", "summarizing", "transcribed", "ready"].includes(progress.status)) {
+        stopTalkUploadPoll();
+        $("#talk-upload").close();
+        await loadTalks();
+        await openTalk(talkId, {tab: "transcript"});
+        message("录音已上传，云端转写中（约 15 秒刷新一次）");
+      }
+    } catch (_) {
+      // 轮询失败不打扰用户，下一次继续。
+    }
+  };
+  talkUploadPollTimer = setInterval(tick, 2000);
+  tick().catch(() => {});
+}
+
+$("#talk-title").ondblclick = renameCurrentTalk;
+document.querySelectorAll(".talk-detail-tab").forEach((button) => {
+  button.onclick = () => {
+    talkTab = button.dataset.talkTab;
+    renderTalkDetail();
+  };
+});
+$("#talk-new-button").onclick = () => {
+  $("#talk-editor-title-input").value = "";
+  $("#talk-editor-transcript").value = "";
+  $("#talk-editor-error").textContent = "";
+  $("#talk-editor").showModal();
+  $("#talk-editor-title-input").focus();
+};
+$("#talk-editor-cancel").onclick = () => $("#talk-editor").close();
+$("#talk-editor-form").onsubmit = async (event) => {
+  event.preventDefault();
+  $("#talk-editor-error").textContent = "";
+  const title = $("#talk-editor-title-input").value.trim();
+  const transcript = $("#talk-editor-transcript").value.trim();
+  if (!transcript) {
+    $("#talk-editor-error").textContent = "转写文本不能为空";
+    return;
+  }
+  const save = $("#talk-editor-save");
+  save.disabled = true;
+  try {
+    const created = await api("/api/local/talks", {
+      method: "POST",
+      body: JSON.stringify({title, transcript}),
+    });
+    $("#talk-editor").close();
+    await loadTalks();
+    await openTalk(created.id);
+    message("讲座已保存，请选择模型生成笔记");
+  } catch (error) {
+    $("#talk-editor-error").textContent = error.message;
+    if (!$("#talk-editor").open) message(error.message, true);
+  } finally {
+    save.disabled = false;
+  }
+};
+$("#talk-upload-cancel").onclick = () => { stopTalkUploadPoll(); $("#talk-upload").close(); };
+$("#talk-upload-retry").onclick = async () => {
+  if (!talkUploadPollId) return;
+  const retry = $("#talk-upload-retry");
+  retry.disabled = true;
+  try {
+    await api(`/api/local/talks/${encodeURIComponent(talkUploadPollId)}/retry-upload`, {method: "POST", body: "{}"});
+    $("#talk-upload-error").textContent = "";
+    startTalkUploadPoll(talkUploadPollId);
+  } catch (error) {
+    $("#talk-upload-error").textContent = error.message;
+  } finally {
+    retry.disabled = false;
+  }
+};
+$("#talk-upload-button").onclick = () => {
+  $("#talk-upload-title-input").value = "";
+  $("#talk-upload-file").value = "";
+  $("#talk-upload-error").textContent = "";
+  $("#talk-upload-progress").classList.add("hidden");
+  $("#talk-upload-progress-fill").style.width = "0%";
+  $("#talk-upload-progress-text").textContent = "";
+  $("#talk-upload-retry").classList.add("hidden");
+  stopTalkUploadPoll();
+  $("#talk-upload").showModal();
+  $("#talk-upload-title-input").focus();
+};
+$("#talk-upload-form").onsubmit = async (event) => {
+  event.preventDefault();
+  $("#talk-upload-error").textContent = "";
+  const file = $("#talk-upload-file").files[0];
+  if (!file) {
+    $("#talk-upload-error").textContent = "请选择录音文件";
+    return;
+  }
+  if (file.size > 500 * 1024 * 1024) {
+    $("#talk-upload-error").textContent = "文件超过 500MB 上限";
+    return;
+  }
+  const save = $("#talk-upload-save");
+  save.disabled = true;
+  save.textContent = "加密暂存中…";
+  try {
+    const form = new FormData();
+    form.append("title", $("#talk-upload-title-input").value.trim());
+    form.append("file", file, file.name);
+    // 服务端只做校验+加密+暂存（秒回），真正的分片上传在后台跑，
+    // 这里不再长按请求等待全部完成。
+    const response = await fetch("/api/local/talks/upload", {method: "POST", body: form});
+    if (!response.ok) {
+      let detail = `${response.status} ${response.statusText}`;
+      try {
+        const payload = await response.json();
+        detail = typeof payload.detail === "string" ? payload.detail : JSON.stringify(payload.detail || payload);
+      } catch (_) {}
+      throw new Error(detail);
+    }
+    const created = await response.json();
+    $("#talk-upload-error").textContent = "";
+    renderTalkUploadProgress(created.upload_progress || null);
+    // 切到后台轮询：用户可关闭对话框去做别的事，上传继续。
+    startTalkUploadPoll(created.id);
+    message("录音已暂存，后台分片上传中（约 4MB/片），进度见对话框");
+  } catch (error) {
+    $("#talk-upload-error").textContent = error.message;
+    if (!$("#talk-upload").open) message(error.message, true);
+  } finally {
+    save.disabled = false;
+    save.textContent = "上传并转写";
+  }
+};
+$("#talk-generate-button").onclick = async () => {
+  if (!currentTalk) return;
+  if (!String(currentTalk.transcript || "").trim()) {
+    message("转写文本还没回来，请等待转写完成后再生成。", true);
+    return;
+  }
+  const option = selectedRerunModel("#talk-model-select");
+  if (!option) {
+    message("请先选择模型。", true);
+    return;
+  }
+  const apiKey = $("#talk-api-key").value.trim();
+  if (!apiKey) {
+    message("请重新输入所选供应商的 API Key（GitHub 不允许读回已保存的密钥）。", true);
+    $("#talk-api-key").focus();
+    return;
+  }
+  if (!confirm(`使用 ${option.provider} / ${option.model} 生成笔记？会产生模型费用。`)) return;
+  const button = $("#talk-generate-button");
+  button.disabled = true;
+  try {
+    await api(`/api/local/talks/${encodeURIComponent(currentTalk.id)}/summarize`, {
+      method: "POST",
+      body: JSON.stringify({...option, api_key: apiKey}),
+    });
+    $("#talk-api-key").value = "";
+    message("已开始生成，每 4 秒自动刷新");
+    talkTab = "summary";
+    await openTalk(currentTalk.id);
+  } catch (error) {
+    message(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+};
+
 refreshStatus().catch((error) => message(`无法连接本地服务：${error.message}`, true));
 
+let talkListRefreshBusy = false;
+setInterval(async () => {
+  if (activeView !== "talks" || talkListRefreshBusy || document.hidden) return;
+  talkListRefreshBusy = true;
+  try { await loadTalks(); } catch (_) {}
+  finally { talkListRefreshBusy = false; }
+}, 5000);
 window.addEventListener("icourse-render-ready", () => { if (currentLecture) renderDetail(); });
 // Shared workflow actions, available through either transport.
 let dataActionCourse = null;

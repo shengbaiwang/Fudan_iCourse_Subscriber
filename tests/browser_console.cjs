@@ -42,6 +42,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   const courses = rows("SELECT c.*,COUNT(l.sub_id) total_count,SUM(l.summary IS NOT NULL) summary_count FROM courses c LEFT JOIN lectures l USING(course_id) GROUP BY c.course_id");
   const lectures = rows("SELECT *,summary IS NOT NULL has_summary,transcript IS NOT NULL transcript_available FROM lectures WHERE course_id='1'");
   const lecture = {...rows("SELECT l.*,c.title course_title,c.teacher FROM lectures l JOIN courses c USING(course_id) WHERE sub_id='10'")[0],summary_versions:rows("SELECT * FROM summary_versions"),ppt_pages:rows("SELECT * FROM ppt_pages")};
+  let sections = [{id:'study', name:'学习区'}];
   let zones = {}, names = {}, version = 'commit-1', missingShard = false, legacy = false;
   let dispatches = [];
   const server = http.createServer((req,res) => {
@@ -88,7 +89,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         if (p==='/status') return json({configured:true,keychain_available:false,database_ready:true,repository:{owner:'alice',repo:'fork',branch:'data'},database:{courses:2,lectures:3,ready:2,failed:0,commit_sha:'fixture'},update:{state:'current'}});
         if (p==='/courses') return json(courses);
         if (p==='/lecture-names') {if(request.method()==='PUT') {const body=request.postDataJSON();names[body.sub_id]=body.name;} return json({names});}
-        if (p==='/course-zones') {if(request.method()==='PUT') {const body=request.postDataJSON();zones[body.course_id]=body.zone;} return json({zones});}
+        if (p==='/course-zones') {if(request.method()==='PUT') {const body=request.postDataJSON();zones[body.course_id]=body.zone;} return json({zones,sections,revision:0,default_zone:"unassigned"});}
         if (p==='/workflows') return json([]);
         if (p==='/courses/1/lectures') return json(lectures);
         if (p==='/lectures/10') return json(lecture);
@@ -117,8 +118,9 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.locator('.course-card').first().waitFor();
       assert.equal(await page.locator('.course-card').count(),2);
       assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
+      if (mode === 'fork') await page.evaluate(async () => { await api('/api/local/course-sections', {method:'PUT', body:JSON.stringify({sections:[{id:'study',name:'学习区'}],revision:0})}); await loadCourseZones(); await loadCourses(); });
       await page.locator('.course-card').filter({hasText:'现代思想史'}).locator('select').selectOption('study');
-      await page.locator('[data-course-zone="study"]').click();
+      await page.locator('#course-sidebar [data-filter-kind="zone"][data-filter-value="study"]').click();
       await page.waitForFunction(()=>document.querySelectorAll('.course-card').length===1);
       assert.equal(await page.locator('.course-card').count(),1);
       await page.locator('.course-open').click();

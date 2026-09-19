@@ -272,8 +272,32 @@ class DatabaseManager:
         }
 
     def courses(self) -> list[dict[str, Any]]:
+        # term/dept come from the all_courses catalog (most recent term wins)
+        # so the sidebar can filter by semester/department.  Older libraries
+        # may not have the catalog table at all — fall back gracefully.
         sql = """
             SELECT c.course_id, c.title, c.teacher,
+                   COALESCE((
+                       SELECT ac.term FROM all_courses ac
+                       WHERE ac.course_id = c.course_id
+                       ORDER BY ac.term DESC LIMIT 1
+                   ), '') AS term,
+                   COALESCE((
+                       SELECT ac.dept FROM all_courses ac
+                       WHERE ac.course_id = c.course_id
+                       ORDER BY ac.term DESC LIMIT 1
+                   ), '') AS dept,
+                   COUNT(l.sub_id) AS total_count,
+                   SUM(CASE WHEN l.summary IS NOT NULL THEN 1 ELSE 0 END) AS summary_count,
+                   MAX(l.processed_at) AS last_updated
+            FROM courses c
+            LEFT JOIN lectures l ON l.course_id = c.course_id
+            GROUP BY c.course_id, c.title, c.teacher
+            ORDER BY last_updated DESC
+        """
+        fallback_sql = """
+            SELECT c.course_id, c.title, c.teacher,
+                   '' AS term, '' AS dept,
                    COUNT(l.sub_id) AS total_count,
                    SUM(CASE WHEN l.summary IS NOT NULL THEN 1 ELSE 0 END) AS summary_count,
                    MAX(l.processed_at) AS last_updated
@@ -283,7 +307,10 @@ class DatabaseManager:
             ORDER BY last_updated DESC
         """
         with closing(self._connect()) as db:
-            return [dict(row) for row in db.execute(sql)]
+            try:
+                return [dict(row) for row in db.execute(sql)]
+            except sqlite3.OperationalError:
+                return [dict(row) for row in db.execute(fallback_sql)]
 
     def lectures(self, course_id: str) -> list[dict[str, Any]]:
         with closing(self._connect()) as db:

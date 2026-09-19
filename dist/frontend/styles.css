@@ -207,6 +207,128 @@ mark.user-highlight:hover { background:var(--hl-hover); }
 }
 .highlight-toolbar:hover { background:var(--toolbar-hover); }
 
+/* ── 课程页侧栏（过滤式导航：选中即过滤主列表，而非把课程钉死在标签页） ── */
+.courses-layout { display:grid; grid-template-columns:204px minmax(0,1fr); gap:24px; align-items:start; }
+.courses-main { min-width:0; }
+.course-sidebar { position:sticky; top:80px; max-height:calc(100vh - 104px); overflow:auto; }
+.sidebar-nav { display:grid; gap:2px; }
+.sidebar-item { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; padding:7px 10px; border:0; border-radius:8px; background:transparent; color:var(--text-sub); font-size:13px; font-weight:600; text-align:left; }
+.sidebar-item:hover { background:var(--subtle-bg); }
+.sidebar-item.active { background:var(--blue-soft); color:var(--blue); }
+.sidebar-item.active .sidebar-count { color:var(--blue); }
+.sidebar-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sidebar-count { flex-shrink:0; color:var(--text-faint); font-size:11px; font-weight:600; }
+.sidebar-section { margin-top:12px; }
+.sidebar-section-toggle { display:flex; align-items:center; gap:4px; width:100%; padding:4px 10px; border:0; background:transparent; color:var(--text-faint); font-size:11px; font-weight:750; letter-spacing:.05em; text-align:left; }
+.sidebar-section-toggle:hover { background:transparent; color:var(--muted); }
+.sidebar-section-toggle .chevron { display:inline-block; transition:transform .15s; }
+.sidebar-section-toggle.collapsed .chevron { transform:rotate(-90deg); }
+.sidebar-section-items { display:grid; gap:2px; }
+.sidebar-subitem { padding-left:26px; }
+.course-filter-caption { margin:-6px 0 12px; color:var(--muted); font-size:12px; }
+.courses-heading { display:flex; align-items:center; gap:6px; }
+#course-sidebar-open { display:none; }
+.course-drawer { position:fixed; inset:0; z-index:40; }
+.course-drawer-backdrop { position:absolute; inset:0; background:rgba(0,0,0,.4); }
+.course-drawer-panel { position:absolute; top:0; bottom:0; left:0; width:min(280px,84vw); overflow:auto; padding:14px 12px calc(14px + env(safe-area-inset-bottom)); background:var(--card); border-right:1px solid var(--line); animation:drawerIn .18s ease-out; }
+@keyframes drawerIn { from { transform:translateX(-102%); } to { transform:none; } }
+@media(max-width:700px){
+  .courses-layout { grid-template-columns:1fr; }
+  .course-sidebar { display:none; }
+  #course-sidebar-open { display:grid; }
+}
+
+/* Custom sections share the sidebar across desktop and mobile. */
+.sidebar-section-heading { display:flex; align-items:center; gap:4px; }
+.sidebar-section-heading .sidebar-section-toggle { flex:1; width:auto; }
+.sidebar-edit { flex:none; padding:4px 8px; border:0; background:transparent; color:var(--muted); font-size:11px; }
+.sidebar-add { color:var(--blue); font-weight:500; }
+.course-archive-button { padding:4px 7px; border:0; background:transparent; color:var(--muted); font-size:12px; }
+#section-editor { width:min(560px, calc(100% - 24px)); max-height:85dvh; overflow:auto; padding:24px; border:1px solid var(--line); border-radius:16px; background:var(--card); color:var(--ink); box-shadow:0 24px 80px #0004; }
+#section-editor::backdrop { background:#0007; }
+#section-editor h2 { margin:0 0 8px; font-size:19px; }
+#section-editor-fields { margin:20px 0 0; padding:0; border:0; min-width:0; }
+#section-editor-list { display:grid; gap:8px; margin-bottom:12px; }
+.section-editor-row { display:flex; align-items:center; gap:6px; }
+.section-editor-row input { flex:1; min-width:0; margin:0; }
+.section-editor-row button { flex:none; padding:8px; }
+.section-editor-row [data-action="delete"], #section-editor-error { color:var(--danger); }
+.section-editor-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; }
+@media (max-width:420px) { #section-editor { padding:16px; } .section-editor-row { gap:4px; } }
+
+/* Model settings: provider navigation and one focused editor. */
+.model-workspace { display:grid; grid-template-columns:230px minmax(0,1fr); gap:18px; margin-top:20px; align-items:start; }
+.provider-sidebar { position:sticky; top:80px; padding:14px; background:var(--card); border:1px solid var(--line); border-radius:12px; }
+.provider-sidebar h2,.provider-models h2 { font-size:15px; margin:0; }
+.provider-sidebar>button { width:100%; margin-top:14px; }
+.provider-navigation { display:grid; gap:5px; margin-top:12px; max-height:55vh; overflow:auto; }
+.provider-nav-item { text-align:left; padding:11px 10px; border-color:transparent; min-width:0; }
+.provider-nav-item strong,.provider-nav-item span { display:block; overflow-wrap:anywhere; }
+.provider-nav-item.active { background:var(--blue-soft); border-color:var(--accent-border); color:var(--blue); }
+.provider-nav-item .meta { font-size:11px; font-weight:400; }
+.model-workspace .provider-list { min-width:0; }
+.model-workspace .provider-card { padding:22px; }
+.model-workspace .provider-card.is-disabled { opacity:1; }
+.model-workspace .provider-title { flex-wrap:wrap; min-width:0; }
+.model-workspace .provider-title strong { overflow-wrap:anywhere; }
+.model-workspace .provider-head { flex-wrap:wrap; border-bottom:1px solid var(--line); padding-bottom:16px; }
+.model-workspace .provider-fields { grid-template-columns:1fr; }
+.provider-advanced { padding:14px 0; margin-top:16px; border-top:1px solid var(--line); color:var(--muted); }
+.provider-advanced summary { cursor:pointer; font-size:13px; }
+.provider-advanced label { display:block; margin-top:12px; color:var(--ink); }
+.provider-models { border-top:1px solid var(--line); padding-top:20px; }
+.provider-models>input { margin-top:14px; }
+.provider-model-list { margin:10px 0; }
+.provider-model-row { display:flex; align-items:center; gap:10px; padding:12px 0; border-bottom:1px solid var(--line); }
+.model-id { flex:1; min-width:0; overflow-wrap:anywhere; font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.provider-model-row .provider-controls { flex-shrink:0; }
+.provider-model-row button { white-space:nowrap; }
+.model-add-form { display:flex; align-items:center; gap:8px; }
+.model-add-form input { flex:1; min-width:0; margin:0; }
+.model-add-form button { flex-shrink:0; }
+#model-management .model-footer { position:sticky; bottom:12px; align-items:center; padding:12px 16px; border:1px solid var(--line); border-radius:12px; background:var(--card); z-index:2; }
+@media(max-width:700px) {
+  .model-workspace { grid-template-columns:1fr; gap:12px; }
+  .provider-sidebar { position:static; }
+  .provider-navigation { max-height:180px; }
+  .model-workspace .provider-card { padding:16px; }
+  .provider-model-row { flex-wrap:wrap; }
+  .provider-model-row .provider-controls { width:auto; margin-left:auto; }
+  .model-add-form { flex-wrap:wrap; }
+  .model-add-form input { flex-basis:100%; }
+  .model-add-form button { width:100%; }
+  .provider-test-row { align-items:flex-start; flex-direction:column; }
+  #model-management .model-footer { bottom:65px; }
+}
+
+.model-directory-dialog { width:min(640px,calc(100vw - 28px)); max-height:85dvh; padding:20px; border:1px solid var(--line); border-radius:14px; color:var(--ink); background:var(--card); overflow:auto; }
+.model-directory-dialog::backdrop { background:#0008; }
+.model-directory-dialog h2 { margin:0; font-size:17px; overflow-wrap:anywhere; }
+.model-directory-dialog .section-title { gap:12px; }
+.model-directory-dialog button { flex-shrink:0; white-space:nowrap; }
+.model-directory-list { max-height:45dvh; overflow:auto; margin:12px 0; }
+
+/* ── 讲座：本机粘贴转写 → 云端模型生成笔记 ── */
+.talk-generate { margin-bottom:14px; padding:14px; border:1px solid var(--accent-border); border-radius:10px; background:var(--blue-soft); }
+.talk-generate-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; gap:8px; align-items:end; margin-top:8px; }
+.talk-generate-row select,.talk-generate-row input { margin:0; }
+#talk-editor { width:min(640px, calc(100% - 24px)); max-height:88dvh; overflow:auto; padding:24px; border:1px solid var(--line); border-radius:16px; background:var(--card); color:var(--ink); box-shadow:0 24px 80px #0004; }
+#talk-editor::backdrop { background:#0007; }
+#talk-editor h2 { margin:0 0 8px; font-size:19px; }
+#talk-editor label { display:block; margin-top:12px; color:var(--text-sub); font-size:12px; font-weight:650; }
+#talk-editor textarea { min-height:220px; font-size:13px; line-height:1.6; }
+#talk-editor-error { color:var(--danger); min-height:1.4em; }
+#talk-upload { width:min(640px, calc(100% - 24px)); max-height:88dvh; overflow:auto; padding:24px; border:1px solid var(--line); border-radius:16px; background:var(--card); color:var(--ink); box-shadow:0 24px 80px #0004; }
+#talk-upload::backdrop { background:#0007; }
+#talk-upload h2 { margin:0 0 8px; font-size:19px; }
+#talk-upload label { display:block; margin-top:12px; color:var(--text-sub); font-size:12px; font-weight:650; }
+#talk-upload input[type="file"] { padding:8px; }
+#talk-upload-error { color:var(--danger); min-height:1.4em; }
+.talk-upload-progress { margin-top:12px; }
+.talk-upload-progress-bar { height:8px; border-radius:99px; background:var(--line); overflow:hidden; }
+#talk-upload-progress-fill { height:100%; width:0%; border-radius:99px; background:var(--accent); transition:width .4s ease; }
+#talk-upload-progress-text { margin:6px 0 0; }
+@media(max-width:700px){ .talk-generate-row { grid-template-columns:1fr; } }
 [hidden] { display: none !important; }
 .data-actions-dialog { width: min(620px, calc(100vw - 32px)); max-height: 85dvh; overflow: auto; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 24px; }
 .data-actions-dialog::backdrop { background: #0009; }

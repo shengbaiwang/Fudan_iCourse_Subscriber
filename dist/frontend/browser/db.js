@@ -173,8 +173,18 @@ function _queryAll(sql, params) {
 }
 
 function _getCourses() {
+  // term/dept are looked up from the all_courses catalog (most recent term
+  // wins, matching _getCoursesByIds) so the home list can be grouped by
+  // semester or department.  Courses absent from the catalog get NULL and
+  // fall into the UI's "未知" group.
   return _queryAll(`
     SELECT c.course_id AS course_id, c.title AS title, c.teacher AS teacher,
+           (SELECT ac.term FROM all_courses ac
+             WHERE ac.course_id = c.course_id
+             ORDER BY ac.term DESC LIMIT 1) AS term,
+           (SELECT ac.dept FROM all_courses ac
+             WHERE ac.course_id = c.course_id
+             ORDER BY ac.term DESC LIMIT 1) AS dept,
            COUNT(CASE WHEN l.summary IS NOT NULL THEN 1 END) AS summary_count,
            COUNT(l.sub_id) AS total_count,
            MAX(l.processed_at) AS last_updated

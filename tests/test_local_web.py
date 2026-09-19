@@ -97,6 +97,7 @@ class SettingsStoreTest(unittest.TestCase):
                 course_zone_store=CourseZoneStore(path),
                 credential_store=EmptyKeychain(),
             )
+            state.save_course_sections([{"id": "reference", "name": "查阅区"}], 0)
             state.save_course_zone("1001", "查阅区")
             restored = CourseZoneStore(path).load()
             self.assertEqual(restored, {"1001": "reference"})

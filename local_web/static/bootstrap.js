@@ -2,7 +2,7 @@
 (async () => {
   const pages = window.ICOURSE_RUNTIME === 'pages' || new URLSearchParams(location.search).get('runtime') === 'pages';
   window.ICOURSE_RUNTIME = pages ? 'pages' : 'local';
-  window.ICOURSE_CAPABILITIES = {obsidian: !pages, providerTest: !pages};
+  window.ICOURSE_CAPABILITIES = {talks: !pages, obsidian: !pages, providerTest: !pages};
   const script = (src) => new Promise((resolve, reject) => {
     const node = document.createElement('script');
     node.src = src;

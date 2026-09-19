@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import ipaddress
 import threading
@@ -9,7 +10,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,6 +21,24 @@ from .database import DatabaseManager
 from .github_client import GitHubAPIError, GitHubClient
 from .obsidian import ObsidianSyncError, ObsidianSyncService
 from .provider_test import ProviderTestError, test_provider
+from .provider_models import ModelDirectoryError, fetch_provider_models
+from .talk_cloud import TalkCloudSync
+from .talks import (
+    MAX_AUDIO_BYTES,
+    TALK_AUDIO_BRANCH,
+    TALK_TRANSCRIBE_WORKFLOW,
+    TalkBusyError,
+    TalkJobs,
+    TalkStore,
+    TalkTranscribeError,
+    TalkUploadQueue,
+    decrypt_talk_blob,
+    encrypt_talk_blob,
+    talk_audio_remote_path,
+    talk_transcript_remote_path,
+    validate_audio_upload,
+    validate_talk_input,
+)
 from .state import (
     ObsidianSettings,
     RepositorySettings,
@@ -36,6 +55,7 @@ ALLOWED_WORKFLOWS = {
     "export.yml",
     "delete_course.yml",
     "deploy-frontend.yml",
+    "talk_transcribe.yml",
 }
 
 
@@ -67,6 +87,11 @@ class ModelProvidersRequest(BaseModel):
     providers: list[ModelProviderRequest]
 
 
+class ProviderModelsRequest(BaseModel):
+    base_url: str
+    api_key: SecretStr = Field(min_length=1)
+
+
 class ProviderTestRequest(BaseModel):
     name: str
     base_url: str
@@ -91,7 +116,17 @@ class SubscriptionRequest(BaseModel):
 
 class CourseZoneRequest(BaseModel):
     course_id: str = Field(min_length=1, max_length=100)
-    zone: str = Field(min_length=1, max_length=32)
+    zone: str = Field(min_length=1, max_length=64)
+
+
+class CourseSectionRequest(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=40)
+
+
+class CourseSectionsRequest(BaseModel):
+    sections: list[CourseSectionRequest] = Field(max_length=100)
+    revision: int = Field(ge=0)
 
 
 class LectureNameRequest(BaseModel):
@@ -109,21 +144,61 @@ class SummaryBatchRerunRequest(SummaryRerunRequest):
     course_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
+class TalkCreateRequest(BaseModel):
+    title: str = Field(default="", max_length=100)
+    transcript: str = Field(min_length=1, max_length=200_000)
+
+
+class TalkRenameRequest(BaseModel):
+    name: str = Field(default="", max_length=100)
+
+
+class TalkSummarizeRequest(BaseModel):
+    provider: str = Field(min_length=1, max_length=50)
+    model: str = Field(min_length=1, max_length=200)
+    api_key: SecretStr = Field(min_length=1)
+
+
 def create_app(
     state: RuntimeState | None = None,
     database: DatabaseManager | None = None,
+    talk_store: TalkStore | None = None,
+    talk_jobs: TalkJobs | None = None,
+    talk_uploads: TalkUploadQueue | None = None,
 ) -> FastAPI:
     runtime = state or RuntimeState()
     db = database or DatabaseManager()
+    talks = talk_store or TalkStore()
+    jobs = talk_jobs or TalkJobs(talks)
+
+    def _upload_client() -> GitHubClient:
+        return client()
+
+    uploads = talk_uploads or TalkUploadQueue(talks, _upload_client)
+    cloud = TalkCloudSync(talks, uploads, _upload_client, lambda: runtime.credentials)
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        cloud.start()
+        try:
+            yield
+        finally:
+            cloud.close()
+
     static_dir = Path(__file__).with_name("static")
     app = FastAPI(
         title="iCourse Subscriber Local Console",
         version=__version__,
         docs_url=None,
         redoc_url=None,
+        lifespan=lifespan,
     )
     app.state.runtime = runtime
     app.state.database = db
+    app.state.talks = talks
+    app.state.talk_jobs = jobs
+    app.state.talk_uploads = uploads
+    app.state.talk_cloud = cloud
     app.state.obsidian = ObsidianSyncService()
     atexit.register(db.close)
     if runtime.credentials:
@@ -358,6 +433,15 @@ def create_app(
         except GitHubAPIError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    @app.post("/api/local/model-providers/models")
+    async def get_provider_models(payload: ProviderModelsRequest):
+        try:
+            return await run_in_threadpool(
+                fetch_provider_models, payload.base_url, payload.api_key.get_secret_value()
+            )
+        except (ValueError, ModelDirectoryError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/local/model-providers/test")
     async def test_model_provider(payload: ProviderTestRequest):
         # Reuse the same strict validation as saved configurations.  The API
@@ -479,11 +563,11 @@ def create_app(
         return await run_in_threadpool(require_db().courses)
 
     @app.get("/api/local/course-zones")
-    async def course_zones() -> dict[str, dict[str, str]]:
-        return {"zones": dict(runtime.course_zones)}
+    async def course_zones() -> dict:
+        return runtime.course_organization()
 
     @app.put("/api/local/course-zones")
-    async def save_course_zone(payload: CourseZoneRequest) -> dict[str, dict[str, str]]:
+    async def save_course_zone(payload: CourseZoneRequest) -> dict:
         if normalize_course_zone(payload.zone) is None:
             raise HTTPException(status_code=400, detail="未知课程分区")
         try:
@@ -492,7 +576,16 @@ def create_app(
             )
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"zones": dict(runtime.course_zones)}
+        return runtime.course_organization()
+
+    @app.put("/api/local/course-sections")
+    async def save_course_sections(payload: CourseSectionsRequest) -> dict:
+        try:
+            await run_in_threadpool(runtime.save_course_sections,
+                                    [item.model_dump() for item in payload.sections], payload.revision)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return runtime.course_organization()
 
     @app.get("/api/local/lecture-names")
     async def lecture_names() -> dict[str, dict[str, str]]:
@@ -682,6 +775,274 @@ def create_app(
         return await dispatch_summary_rerun(
             payload.sub_ids, payload.course_ids, payload.provider, payload.model
         )
+
+    # ── Talks: local-only uploaded/pasted lectures ──────────────────────
+    # Independent from the course library (which mirrors the data branch);
+    # talk audio/transcripts never leave this machine except as encrypted
+    # blobs on the talk-audio branch, or as transcript text inside the
+    # summary request itself.
+
+    def _talk_or_404(talk_id: str) -> dict[str, Any]:
+        item = talks.get_talk(talk_id.strip())
+        if item is None:
+            raise HTTPException(status_code=404, detail="讲座不存在")
+        return item
+
+    def _require_talk_credentials() -> Any:
+        credentials = runtime.credentials
+        if not credentials:
+            raise HTTPException(status_code=409, detail="请先配置本地控制台")
+        if not credentials.stuid or not credentials.uispsw:
+            raise HTTPException(status_code=409, detail="学号和 UIS 密码不能为空")
+        return credentials
+
+    @app.get("/api/local/talks")
+    async def list_talks():
+        return await run_in_threadpool(talks.list_talks)
+
+    @app.post("/api/local/talks")
+    async def create_talk(payload: TalkCreateRequest):
+        try:
+            title, transcript = validate_talk_input(
+                payload.title, payload.transcript
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await run_in_threadpool(
+            talks.create_talk, title, transcript, "paste"
+        )
+
+    @app.post("/api/local/talks/upload")
+    async def upload_talk_audio(
+        file: UploadFile = File(...),
+        title: str = Form(default=""),
+    ):
+        """Stage a recording and return immediately; chunks go up in back.
+
+        Long-term fix for ``GitHub API 0: The write operation timed out``:
+        the old synchronous handler held the HTTP request open across every
+        chunk PUT, so any slow uplink killed the whole upload with no way
+        forward.  Now the request only validates + encrypts + stages the
+        ciphertext locally (<1 s for typical sizes) and a background queue
+        pushes ≤4 MiB chunks with per-chunk retry; the browser polls
+        progress and the workflow is dispatched only after the manifest
+        lands, so the runner never sees a half upload.
+        """
+        credentials = _require_talk_credentials()
+        try:
+            raw = await file.read(MAX_AUDIO_BYTES + 1)
+        finally:
+            await file.close()
+        try:
+            ext, _ = validate_audio_upload(file.filename or "", raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        clean_title = str(title or "").strip()[:100]
+        try:
+            encrypted = await run_in_threadpool(
+                encrypt_talk_blob, raw, credentials.stuid, credentials.uispsw
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"音频加密失败：{exc}"
+            ) from exc
+        # Release the plaintext before any disk/network I/O.
+        del raw
+        # Mint the row first so the talk id is stable, then stage + queue.
+        created = await run_in_threadpool(
+            talks.create_audio_talk, clean_title, ext, 0, "",
+        )
+        talk_id = created["id"]
+        remote_path = talk_audio_remote_path(talk_id, ext)
+        try:
+            total = await run_in_threadpool(
+                uploads.stage_blob, talk_id, encrypted, ext, clean_title,
+            )
+        except OSError as exc:
+            await run_in_threadpool(talks.set_status, talk_id, "failed",
+                                    "本地保存录音失败，请检查磁盘空间并重新上传", "upload")
+            raise HTTPException(status_code=500, detail="本地保存录音失败，请检查磁盘空间") from exc
+        del encrypted
+        await run_in_threadpool(talks.note_audio_pushed, talk_id, 0, remote_path)
+        await run_in_threadpool(talks.bump_upload_attempts, talk_id)
+        # Persist the chunk count on the row for the progress poll loop.
+        await run_in_threadpool(
+            talks.note_chunk_uploaded, talk_id, 0, total,
+        )
+        # Undo the index-0 marker: chunk indexes are 1-based.
+        await run_in_threadpool(talks.set_status, talk_id, "uploading")
+        uploads.submit(talk_id)
+        item = await run_in_threadpool(talks.get_talk, talk_id)
+        progress = await run_in_threadpool(talks.upload_progress, talk_id)
+        return {**(item or {}), "upload_progress": progress}
+
+    @app.get("/api/local/talks/{talk_id}/upload-progress")
+    async def talk_upload_progress(talk_id: str):
+        """Progress snapshot for the upload poll loop (no secrets)."""
+        item = _talk_or_404(talk_id)
+        progress = await run_in_threadpool(talks.upload_progress, item["id"])
+        return {
+            "talk_id": item["id"],
+            "status": item.get("status"),
+            "error": item.get("error") or "",
+            "error_stage": item.get("error_stage") or "",
+            **progress,
+        }
+
+    @app.post("/api/local/talks/{talk_id}/retry-upload")
+    async def retry_talk_upload(talk_id: str):
+        """One-click resume: re-queue the staged blob, skipping done chunks."""
+        _require_talk_credentials()
+        item = _talk_or_404(talk_id)
+        if item.get("source") != "upload":
+            raise HTTPException(status_code=409, detail="该讲座不是录音上传")
+        if item["status"] == "ready":
+            raise HTTPException(status_code=409, detail="笔记已生成，无需恢复上传")
+        if uploads.is_active(item["id"]):
+            return item
+        if item["status"] in {"transcribing", "summarizing"}:
+            raise HTTPException(status_code=409, detail="云端正在处理，请等待处理结果")
+        # Missing local staging is allowed when the cloud still has the manifest.
+        # The worker checks both sources and can resume at ASR or summary.
+        await run_in_threadpool(talks.bump_upload_attempts, item["id"])
+        uploads.submit(item["id"])
+        refreshed = _talk_or_404(talk_id)
+        progress = await run_in_threadpool(
+            talks.upload_progress, item["id"]
+        )
+        return {**refreshed, "upload_progress": progress}
+
+    @app.post("/api/local/talks/{talk_id}/sync-transcript")
+    async def sync_talk_transcript(talk_id: str):
+        """Pull the cloud transcript (+ auto summary) into the local library.
+
+        Mirrors the iCourse flow: ASR and summary both run in Actions, this
+        endpoint only pulls the finished blob.  A transcript-only blob parks
+        at ``transcribed``; a full blob lands at ``ready`` with a version
+        row, so auto notes and manual notes share one display path.
+        """
+        _require_talk_credentials()
+        _talk_or_404(talk_id)
+        try:
+            item = await run_in_threadpool(cloud.sync, talk_id)
+        except (GitHubAPIError, TalkTranscribeError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"ok": item["status"] == "ready", **item,
+                "detail": "转写与笔记已同步" if item["status"] == "ready" else "已刷新处理进度"}
+
+    @app.get("/api/local/talks/{talk_id}")
+    async def get_talk(talk_id: str):
+        return _talk_or_404(talk_id)
+
+    @app.delete("/api/local/talks/{talk_id}")
+    async def delete_talk(talk_id: str):
+        item = _talk_or_404(talk_id)
+        if uploads.is_active(item["id"]) or jobs.is_running(item["id"]) or item["status"] in {"transcribing", "summarizing", "dispatching"}:
+            raise HTTPException(status_code=409, detail="讲座正在处理，请等待结束后再删除")
+        deleted = await run_in_threadpool(
+            talks.delete_talk, talk_id.strip()
+        )
+        if not deleted:
+            raise HTTPException(status_code=404, detail="讲座不存在")
+        # Drop staged ciphertext (if any) + remote shard dir; best effort.
+        await run_in_threadpool(uploads.drop_staging, item["id"])
+        remote_dir = str(item.get("remote_audio_path") or "").strip()
+        if remote_dir:
+            try:
+                await run_in_threadpool(
+                    client().delete_branch_dir,
+                    TALK_AUDIO_BRANCH, remote_dir,
+                    f"talk audio {item['id']} deleted",
+                )
+                await run_in_threadpool(
+                    client().delete_branch_file,
+                    TALK_AUDIO_BRANCH, talk_transcript_remote_path(item["id"]),
+                    f"talk checkpoint {item['id']} deleted",
+                )
+            except GitHubAPIError:
+                pass
+        return {"ok": True}
+
+    @app.put("/api/local/talks/{talk_id}/title")
+    async def rename_talk(talk_id: str, payload: TalkRenameRequest):
+        item = await run_in_threadpool(
+            talks.rename_talk, talk_id.strip(), payload.name
+        )
+        if item is None:
+            raise HTTPException(status_code=404, detail="讲座不存在")
+        return item
+
+    @app.post("/api/local/talks/{talk_id}/summarize")
+    async def summarize_talk(talk_id: str, payload: TalkSummarizeRequest):
+        """Generate a note with an explicitly chosen provider/model + key.
+
+        The API key must be re-entered every time (GitHub never reveals a
+        saved Secret, and the console never persists keys) — same rule as
+        the provider connection test.
+        """
+        item = _talk_or_404(talk_id)
+        if jobs.is_running(item["id"]) or item["status"] in {"transcribing", "dispatching", "summarizing", "uploading"}:
+            raise HTTPException(
+                status_code=409, detail="该讲座正在生成中，请稍后刷新查看"
+            )
+        transcript = str(item.get("transcript") or "").strip()
+        if not transcript:
+            raise HTTPException(
+                status_code=409, detail="该讲座没有可用转写文本"
+            )
+        api_key = payload.api_key.get_secret_value().strip()
+        if not api_key:
+            raise HTTPException(
+                status_code=400, detail="请重新输入用于生成笔记的 API Key"
+            )
+        try:
+            gh = client()
+            raw = await run_in_threadpool(
+                gh.repository_variable, "MODEL_PROVIDERS_JSON"
+            )
+            document = validate_model_config(raw or DEFAULT_MODEL_PROVIDERS)
+            provider_name = payload.provider.strip()
+            model_name = payload.model.strip()
+            provider = next(
+                (row for row in document["providers"]
+                 if row["name"] == provider_name),
+                None,
+            )
+            if provider is None or not provider["enabled"]:
+                raise HTTPException(
+                    status_code=400, detail="所选模型供应商不存在或未启用"
+                )
+            if model_name not in provider["models"]:
+                raise HTTPException(
+                    status_code=400, detail="所选模型不在当前配置中"
+                )
+        except HTTPException:
+            raise
+        except (GitHubAPIError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        try:
+            launched = await run_in_threadpool(
+                jobs.submit,
+                item["id"],
+                str(item.get("custom_title") or ""),
+                transcript,
+                provider["default_base_url"],
+                model_name,
+                api_key,
+                provider_name,
+            )
+        except TalkBusyError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        if not launched:
+            raise HTTPException(
+                status_code=409, detail="该讲座正在生成中，请稍后刷新查看"
+            )
+        return {
+            "ok": True,
+            "talk_id": item["id"],
+            "provider": provider_name,
+            "model": model_name,
+        }
 
     @app.get("/api/local/search")
     async def search(

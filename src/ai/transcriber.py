@@ -19,6 +19,7 @@ and NEVER persisted to DB (the joined transcript string is what the DB holds).
 """
 
 import os
+import queue
 import re
 import subprocess
 import threading
@@ -279,19 +280,20 @@ class Transcriber:
         """
         self._init()
         self._reset_vad()
-        t0 = time.time()
+        t0 = time.monotonic()
         print(f"[Transcriber] Starting {label} at {time.strftime('%H:%M:%S')}",
               flush=True)
 
         segments: list[dict] = []
         total_read = 0      # samples
         total_bytes = 0
+        pending = b""
         last_report = t0
         last_segment_at = 0.0
         silence_marked = False
 
         while True:
-            now = time.time()
+            now = time.monotonic()
             if now - t0 > timeout:
                 raise TimeoutError(
                     f"Transcription timed out after {timeout}s"
@@ -300,13 +302,22 @@ class Transcriber:
             raw = read_fn(BYTES_PER_SECOND)
             if not raw:
                 if is_eof_fn():
-                    break
-                if wait_on_empty_sec > 0:
-                    time.sleep(wait_on_empty_sec)
-                continue
+                    # A writer can flush its tail between read() and poll().
+                    raw = read_fn(BYTES_PER_SECOND)
+                    if not raw:
+                        break
+                else:
+                    if wait_on_empty_sec > 0:
+                        time.sleep(wait_on_empty_sec)
+                    continue
 
             total_bytes += len(raw)
-            samples = np.frombuffer(raw, dtype=np.float32)
+            raw = pending + raw
+            aligned = len(raw) - len(raw) % BYTES_PER_SAMPLE
+            pending = raw[aligned:]
+            if not aligned:
+                continue
+            samples = np.frombuffer(raw[:aligned], dtype=np.float32)
             total_read += len(samples)
             audio_pos = total_read / SAMPLE_RATE
 
@@ -361,6 +372,9 @@ class Transcriber:
                     flush=True,
                 )
 
+        if pending:
+            raise RuntimeError("ffmpeg produced an incomplete PCM sample")
+
         # Flush VAD
         self._vad.flush()
         self._drain_segments(segments)
@@ -376,7 +390,7 @@ class Transcriber:
             h, m, s = dur_match.groups()
             self._media_duration = int(h) * 3600 + int(m) * 60 + float(s)
 
-        elapsed = time.time() - t0
+        elapsed = time.monotonic() - t0
         duration = total_read / SAMPLE_RATE
         self._last_duration = duration
 
@@ -391,7 +405,7 @@ class Transcriber:
         rc = return_code_fn()
         # -9/-15: SIGKILL/SIGTERM — the downloader's release() terminates
         # ffmpeg once we're done reading; neither is an ffmpeg failure.
-        if rc not in (0, -9, -15, None):
+        if rc not in (0, None):
             stderr_text = stderr_output.decode(errors="replace")
             if "does not contain any stream" in stderr_text:
                 raise NoAudioStreamError(
@@ -571,7 +585,7 @@ class Transcriber:
     def transcribe_video(self, video_path: str) -> tuple[str, list[dict]]:
         """Transcribe a local mp4 file via ffmpeg-to-pipe."""
         cmd = [
-            "ffmpeg", "-i", video_path,
+            "ffmpeg", "-nostdin", "-i", video_path, "-vn",
             "-ar", str(SAMPLE_RATE), "-ac", "1",
             "-f", "f32le", "-",
         ]
@@ -597,21 +611,61 @@ class Transcriber:
         stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
         stderr_thread.start()
 
+        chunks = queue.Queue(maxsize=8)
+        reader_done = threading.Event()
+        stopping = threading.Event()
+        reader_errors = []
+
+        def read_stdout():
+            try:
+                while not stopping.is_set():
+                    raw = proc.stdout.read(BYTES_PER_SECOND)
+                    if not raw:
+                        break
+                    while not stopping.is_set():
+                        try:
+                            chunks.put(raw, timeout=0.1)
+                            break
+                        except queue.Full:
+                            continue
+            except OSError as exc:
+                reader_errors.append(exc)
+            finally:
+                reader_done.set()
+
+        def read_pcm(n):
+            try:
+                return chunks.get(timeout=0.1)
+            except queue.Empty:
+                if reader_errors:
+                    raise reader_errors[0]
+                return b""
+
+        reader = threading.Thread(target=read_stdout, daemon=True)
+        reader.start()
         try:
             transcript, segments = self._consume_pcm_stream(
-                read_fn=lambda n: proc.stdout.read(n),
-                is_eof_fn=lambda: True,  # pipe: empty read == EOF
+                read_fn=read_pcm,
+                is_eof_fn=lambda: reader_done.is_set() and chunks.empty() and proc.poll() is not None,
                 stderr_provider=lambda: b"".join(stderr_chunks),
-                return_code_fn=lambda: proc.returncode,
+                return_code_fn=proc.poll,
                 timeout=timeout,
                 wait_on_empty_sec=0,
                 label="pipe",
             )
+            # Consume stderr fully before the duration/completeness check.
+            stderr_thread.join(timeout=5)
+            if proc.returncode != 0:
+                raise RuntimeError(f"ffmpeg exited with code {proc.returncode}")
         finally:
+            stopping.set()
             if proc.poll() is None:
                 proc.kill()
             proc.wait()
+            reader.join(timeout=5)
             stderr_thread.join(timeout=5)
+            proc.stdout.close()
+            proc.stderr.close()
 
         # Both URL/pipe modes enforce the 90 % completeness check
         self._check_completeness(transcript, segments)
