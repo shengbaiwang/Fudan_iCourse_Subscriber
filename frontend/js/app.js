@@ -88,6 +88,19 @@ const _loadStarred = () => {
 const _saveStarred = (set) => localStorage.setItem(
   _LS + "starred", JSON.stringify(Array.from(set))
 );
+/* Sidebar course filter ({kind:'all'|'star'|'term'|'dept', value:string})
+   and section-collapse state, both persisted per-browser. */
+const _loadCourseFilter = () => {
+  try {
+    const f = JSON.parse(localStorage.getItem(_LS + "courseFilter"));
+    if (f && ["all", "star", "term", "dept"].includes(f.kind)) return f;
+  } catch {}
+  return { kind: "all", value: "" };
+};
+const _loadSidebarCollapsed = () => {
+  try { return JSON.parse(localStorage.getItem(_LS + "sidebarCollapsed")) || {}; }
+  catch { return {}; }
+};
 
 function _relativeTime(iso) {
   if (!iso) return "";
@@ -286,6 +299,13 @@ document.addEventListener("alpine:init", () => {
     singleRunUseOfficial: false,
     /* Per-browser pinned-courses set, lazily synced to localStorage. */
     starred: _loadStarred(),
+    /* Notability-style sidebar state: the selection is a filter
+       ({kind:'all'|'star'|'term'|'dept', value}) — the main list shows one
+       focused collection instead of fixed buckets. Selection and section
+       collapse persist per-browser; sidebarOpen drives the mobile drawer. */
+    courseFilter: _loadCourseFilter(),
+    sidebarCollapsed: _loadSidebarCollapsed(),
+    sidebarOpen: false,
 
     async init() {
       const detected = ICS.github.detectRepo();
@@ -386,6 +406,7 @@ document.addEventListener("alpine:init", () => {
       }
       this.view = view;
       if (view !== "lectures") this.exportDialogOpen = false;
+      this.sidebarOpen = false;  // never leave the mobile drawer over another view
       // Forward navigation starts at the top of the new view; going back
       // keeps the previous scroll position (browser-like behaviour).
       if (!(opts && opts.keepScroll)) this._scrollToTop();
@@ -400,6 +421,79 @@ document.addEventListener("alpine:init", () => {
         if (sa !== sb) return sa - sb;
         return 0;  // preserve SQL order within each group
       });
+    },
+    /* ── Sidebar (courses home) ────────────────────────────── */
+    selectCourseFilter(kind, value) {
+      this.courseFilter = { kind: kind, value: value || "" };
+      localStorage.setItem(_LS + "courseFilter", JSON.stringify(this.courseFilter));
+      this.sidebarOpen = false;  // selection closes the mobile drawer
+    },
+    toggleSidebarSection(key) {
+      this.sidebarCollapsed[key] = !this.sidebarCollapsed[key];
+      localStorage.setItem(_LS + "sidebarCollapsed", JSON.stringify(this.sidebarCollapsed));
+    },
+    isCourseFilterActive(kind, value) {
+      var f = this.courseFilter;
+      if (kind === "all" || kind === "star") return f.kind === kind;
+      return f.kind === kind && f.value === (value || "");
+    },
+    get filteredCourses() {
+      // `courses` is already starred-first, then last_updated DESC.
+      var f = this.courseFilter;
+      if (f.kind === "star") {
+        var starred = this.starred;
+        return this.courses.filter(function (c) { return starred.has(String(c.course_id)); });
+      }
+      if (f.kind === "term" || f.kind === "dept") {
+        var field = f.kind;
+        var value = f.value;
+        return this.courses.filter(function (c) { return (c[field] || "") === value; });
+      }
+      return this.courses;
+    },
+    get courseFilterCaption() {
+      var f = this.courseFilter;
+      if (f.kind === "star") return "星标";
+      if (f.kind === "term") return f.value || "未知学期";
+      if (f.kind === "dept") return f.value || "未知院系";
+      return "全部课程";
+    },
+    get courseSidebar() {
+      /* Sections of selectable filters with per-item counts, built from the
+         already-loaded courses (term/dept come from the catalog join in
+         getCourses).  Items with empty values trail each section as 未知*. */
+      var self = this;
+      function sectionItems(field) {
+        var counts = {};
+        self.courses.forEach(function (c) {
+          var v = c[field] || "";
+          counts[v] = (counts[v] || 0) + 1;
+        });
+        var vals = Object.keys(counts);
+        vals.sort(function (a, b) {
+          if (a === "") return 1;   // unknown always last
+          if (b === "") return -1;
+          // Terms like "2025-2026-1" sort correctly as plain strings.
+          return field === "term" ? (a < b ? 1 : a > b ? -1 : 0)
+                                  : a.localeCompare(b, "zh");
+        });
+        return vals.map(function (v) {
+          return { value: v, count: counts[v],
+                   label: v || (field === "term" ? "未知学期" : "未知院系") };
+        });
+      }
+      var starred = this.starred, starCount = 0;
+      this.courses.forEach(function (c) { if (starred.has(String(c.course_id))) starCount++; });
+      return {
+        allCount: this.courses.length,
+        starCount: starCount,
+        sections: [
+          { key: "term", label: "学期", collapsed: !!this.sidebarCollapsed.term,
+            items: sectionItems("term") },
+          { key: "dept", label: "院系", collapsed: !!this.sidebarCollapsed.dept,
+            items: sectionItems("dept") },
+        ],
+      };
     },
     goBack() {
       const p = this._history.pop();

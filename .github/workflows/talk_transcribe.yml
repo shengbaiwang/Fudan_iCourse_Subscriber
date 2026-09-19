@@ -1,0 +1,86 @@
+name: Transcribe Talk Recording
+
+on:
+  workflow_dispatch:
+    inputs:
+      talk_id:
+        description: "Local talk ID (e.g. t2e5e8ae00b5c)"
+        required: true
+        type: string
+      request_id:
+        description: "Persistent local request ID for status correlation"
+        required: true
+        type: string
+
+run-name: talk-${{ inputs.talk_id }}-${{ inputs.request_id }}
+
+permissions:
+  contents: write
+  actions: read
+
+# Duplicate dispatches for a talk serialize and reuse saved checkpoints.
+concurrency:
+  group: talk-transcribe-${{ inputs.talk_id }}
+  cancel-in-progress: false
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Python packages
+        id: cache-pip
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.pythonLocation }}/lib/python*/site-packages
+          key: pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Python dependencies
+        if: steps.cache-pip.outputs.cache-hit != 'true'
+        run: pip install -r requirements.txt
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      # Same ASR stack as check.yml — talks get the identical transcription.
+      - name: Cache ASR models
+        id: cache-models
+        uses: actions/cache@v4
+        with:
+          path: |
+            sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/
+            silero_vad.onnx
+          key: asr-models-sense-voice-2024-07-17
+
+      - name: Download ASR models
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2
+          tar xf sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2
+          rm sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2
+          wget -q https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
+
+      - name: Transcribe (+ summarize, like iCourse lectures)
+        env:
+          TALK_ID: ${{ inputs.talk_id }}
+          TALK_REQUEST_ID: ${{ inputs.request_id }}
+          TALK_AUDIO_BRANCH: talk-audio
+          STUID: ${{ secrets.STUID }}
+          UISPSW: ${{ secrets.UISPSW }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SECRETS_CONTEXT: ${{ toJSON(secrets) }}
+          MODEL_PROVIDERS_JSON: ${{ vars.MODEL_PROVIDERS_JSON }}
+        run: python scripts/provider_env.py -- python -u scripts/transcribe_talk.py

@@ -14,7 +14,7 @@
     })();
   </script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=models-directory-20260910">
 </head>
 <body>
   <header id="app-header" class="app-header hidden">
@@ -28,6 +28,7 @@
       </div>
       <nav class="desktop-nav" aria-label="主导航">
         <button class="nav-button" type="button" data-view="courses">课程</button>
+        <button class="nav-button" type="button" data-view="talks">讲座</button>
         <button class="nav-button" type="button" data-view="search">搜索</button>
         <button class="nav-button" type="button" data-view="subscriptions">订阅</button>
         <button class="nav-button" type="button" data-view="settings">设置</button>
@@ -68,19 +69,23 @@
     </section>
 
     <section id="dashboard" class="hidden">
-      <section id="view-courses" class="view-pane content-column">
+      <section id="view-courses" class="view-pane content-wide">
         <div class="view-heading">
-          <div><h1>课程</h1></div>
+          <div class="courses-heading">
+            <button id="course-sidebar-open" type="button" class="icon-button" aria-label="课程分类">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
+            <div><h1>课程</h1></div>
+          </div>
         </div>
-        <div class="course-zones" role="tablist" aria-label="课程分区">
-          <button type="button" class="course-zone-button active" role="tab" aria-selected="true" data-course-zone="all">全部</button>
-          <button type="button" class="course-zone-button" role="tab" aria-selected="false" data-course-zone="organize">整理区</button>
-          <button type="button" class="course-zone-button" role="tab" aria-selected="false" data-course-zone="study">学习区</button>
-          <button type="button" class="course-zone-button" role="tab" aria-selected="false" data-course-zone="reference">查阅区</button>
-          <button type="button" class="course-zone-button" role="tab" aria-selected="false" data-course-zone="archive">归档区</button>
+        <div class="courses-layout">
+          <aside id="course-sidebar" class="course-sidebar" aria-label="课程分类"></aside>
+          <div class="courses-main">
+            <p id="course-filter-caption" class="course-filter-caption"></p>
+            <div id="stats" class="stats"></div>
+            <div id="course-list" class="course-list empty">正在打开本地资料库。</div>
+          </div>
         </div>
-        <div id="stats" class="stats"></div>
-        <div id="course-list" class="course-list empty">正在打开本地资料库。</div>
       </section>
 
       <section id="view-lectures" class="view-pane content-column hidden">
@@ -90,6 +95,69 @@
         </div>
         <div id="lecture-list" class="lecture-list"></div>
       </section>
+
+      <section id="view-talks" class="view-pane content-column hidden">
+        <div class="view-heading">
+          <div><h1>讲座</h1><p class="muted">上传讲座录音，云端自动转写并生成笔记（与 iCourse 课次同款 ASR + 同款摘要链）；也可直接粘贴已有转写文本手动生成。</p></div>
+          <div class="heading-actions"><button id="talk-upload-button" type="button">上传录音</button><button id="talk-new-button" class="primary" type="button">粘贴转写</button></div>
+        </div>
+        <div id="talk-list" class="lecture-list empty">正在读取本机讲座…</div>
+      </section>
+
+      <section id="view-talk-detail" class="view-pane content-column hidden">
+        <div class="view-heading compact">
+          <div><p class="eyebrow-blue">本机讲座</p><h1 id="talk-title" title="双击改名">讲座</h1><p id="talk-subtitle" class="meta hidden"></p></div>
+          <div class="heading-actions"><button id="talk-back" type="button">全部讲座</button></div>
+        </div>
+        <div class="detail-tabs" role="tablist" aria-label="讲座内容">
+          <button class="detail-tab talk-detail-tab active" type="button" role="tab" aria-selected="true" data-talk-tab="summary">摘要</button>
+          <button class="detail-tab talk-detail-tab" type="button" role="tab" aria-selected="false" data-talk-tab="transcript">转录</button>
+        </div>
+        <section id="talk-summary-controls" class="summary-version-controls hidden" aria-label="讲座版本对比"></section>
+        <div id="talk-generate" class="talk-generate hidden">
+          <p class="muted">选择模型并重新输入 API Key 后生成笔记（Key 仅用于本次请求，不保存）。</p>
+          <div class="talk-generate-row">
+            <select id="talk-model-select" aria-label="选择生成模型"></select>
+            <input id="talk-api-key" type="password" autocomplete="off" placeholder="输入所选供应商的 API Key" aria-label="API Key">
+            <button id="talk-generate-button" class="primary" type="button">生成笔记</button>
+          </div>
+          <p id="talk-generate-hint" class="meta"></p>
+        </div>
+        <article id="talk-content" class="detail-card"></article>
+      </section>
+
+      <dialog id="talk-editor" aria-labelledby="talk-editor-title">
+        <form id="talk-editor-form" method="dialog">
+          <h2 id="talk-editor-title">新建讲座</h2>
+          <p class="muted">粘贴讲座的转写文本（纯文本即可）。有录音文件请用「上传录音」。</p>
+          <label>标题（可选）<input id="talk-editor-title-input" maxlength="100" placeholder="例如 梯度下降"></label>
+          <label>转写文本<textarea id="talk-editor-transcript" rows="10" required placeholder="在此粘贴讲座转写文本…"></textarea></label>
+          <p id="talk-editor-error" role="alert"></p>
+          <div class="section-editor-actions">
+            <button id="talk-editor-cancel" type="button">取消</button>
+            <button id="talk-editor-save" class="primary" type="submit">保存并打开</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="talk-upload" aria-labelledby="talk-upload-title">
+        <form id="talk-upload-form" method="dialog">
+          <h2 id="talk-upload-title">上传录音</h2>
+          <p class="muted">录音将加密后传到你的 Fork（talk-audio 分支），云端自动转写并生成笔记（与 iCourse 课次同款），完成后自动删除云端音频。支持 mp3/m4a/wav/flac/ogg/opus/mp4/mov，上限 500MB。上传在后台分片进行（约 4MB/片），页面会显示进度；网络中断可一键断点续传。首次使用前需把本分支 push 到 Fork 的 main（转写 workflow 须在 main 上存在才能被触发）。</p>
+          <label>标题（可选）<input id="talk-upload-title-input" maxlength="100" placeholder="例如 梯度下降"></label>
+          <label>录音文件<input id="talk-upload-file" type="file" accept=".mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.mp4,.mov,audio/*,video/mp4,video/quicktime"></label>
+          <div id="talk-upload-progress" class="talk-upload-progress hidden" aria-live="polite">
+            <div class="talk-upload-progress-bar"><div id="talk-upload-progress-fill"></div></div>
+            <p id="talk-upload-progress-text" class="meta"></p>
+          </div>
+          <p id="talk-upload-error" role="alert"></p>
+          <div class="section-editor-actions">
+            <button id="talk-upload-cancel" type="button">取消</button>
+            <button id="talk-upload-retry" type="button" class="hidden">重新上传</button>
+            <button id="talk-upload-save" class="primary" type="submit">上传并转写</button>
+          </div>
+        </form>
+      </dialog>
 
       <section id="view-detail" class="view-pane content-column hidden">
         <div class="view-heading compact">
@@ -185,8 +253,17 @@
 
       <section id="model-management" class="view-pane content-wide hidden" aria-labelledby="model-management-title">
         <div class="view-heading compact"><div><h1 id="model-management-title">模型与 API</h1><p id="model-source" class="hidden"></p></div><button id="model-close-button" type="button">返回设置</button></div>
-        <div id="model-provider-list" class="provider-list" aria-live="polite"></div>
-        <div class="model-footer"><button id="model-add-button" type="button">＋ 新增供应商</button><button id="model-save-button" class="primary" type="button">保存到 GitHub</button></div>
+        <p class="muted">先配置服务商，再添加模型。按列表顺序调用，失败时自动尝试下一项。</p>
+        <div class="model-workspace">
+          <aside class="provider-sidebar" aria-label="模型服务商">
+            <div class="section-title"><h2>服务商</h2><span id="provider-count" class="meta"></span></div>
+            <input id="provider-search" type="search" placeholder="搜索服务商" aria-label="搜索服务商">
+            <div id="provider-navigation" class="provider-navigation"></div>
+            <button id="model-add-button" type="button">＋ 添加服务商</button>
+          </aside>
+          <div id="model-provider-list" class="provider-list"></div>
+        </div>
+        <div class="model-footer"><span id="model-save-status" class="meta" role="status">正在读取配置…</span><button id="model-save-button" class="primary" type="button" disabled>保存到 GitHub</button></div>
       </section>
 
       <section id="obsidian-sync" class="view-pane content-wide hidden" aria-labelledby="obsidian-sync-title">
@@ -208,12 +285,37 @@
 
   <nav id="mobile-nav" class="mobile-nav hidden" aria-label="主导航">
     <button class="nav-button" type="button" data-view="courses">课程</button>
+    <button class="nav-button" type="button" data-view="talks">讲座</button>
     <button class="nav-button" type="button" data-view="search">搜索</button>
     <button class="nav-button" type="button" data-view="subscriptions">订阅</button>
     <button class="nav-button" type="button" data-view="settings">设置</button>
   </nav>
+  <!-- 课程分类抽屉（移动端）：放在 .view-pane 之外，避免其入场 transform
+       让 position:fixed 相对视图容器定位。 -->
+  <div id="course-drawer" class="course-drawer hidden">
+    <div id="course-drawer-backdrop" class="course-drawer-backdrop"></div>
+    <aside class="course-drawer-panel" aria-label="课程分类">
+      <div id="course-drawer-sidebar"></div>
+    </aside>
+  </div>
+  <dialog id="section-editor" aria-labelledby="section-editor-title" aria-describedby="section-editor-help">
+    <form id="section-editor-form">
+      <h2 id="section-editor-title">编辑分区</h2>
+      <p id="section-editor-help" class="muted">自由命名和调整顺序。删除分区后，课程会回到未分区，笔记仍会保留。</p>
+      <fieldset id="section-editor-fields">
+        <div id="section-editor-list"></div>
+        <p id="section-editor-empty" class="muted">还没有自定义分区，创建一个开始整理课程。</p>
+        <button id="section-editor-add" type="button">+ 新建分区</button>
+        <p id="section-editor-error" role="alert"></p>
+        <div class="section-editor-actions">
+          <button id="section-editor-cancel" type="button">取消</button>
+          <button class="primary" type="submit">保存分区</button>
+        </div>
+      </fieldset>
+    </form>
+  </dialog>
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js" defer></script>
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=models-directory-20260910" defer></script>
 </body>
 </html>

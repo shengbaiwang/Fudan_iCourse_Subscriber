@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -27,7 +28,10 @@ COURSE_ZONE_ALIASES = {
 
 def normalize_course_zone(value: object) -> str | None:
     """Normalize both stable IDs and labels saved by early local builds."""
-    return COURSE_ZONE_ALIASES.get(str(value or "").strip())
+    value = str(value or "").strip()
+    if value == "unassigned" or re.fullmatch(r"section-[a-f0-9]{32}", value):
+        return value
+    return COURSE_ZONE_ALIASES.get(value)
 
 
 def default_config_dir() -> Path:
@@ -223,6 +227,24 @@ class SubscriptionSettingsStore:
         temp.replace(self.path)
 
 
+def validate_course_sections(sections: list[dict]) -> list[dict[str, str]]:
+    if len(sections) > 100:
+        raise ValueError("最多创建 100 个分区")
+    clean, ids, names = [], set(), set()
+    for item in sections:
+        section_id = item.get("id", "")
+        name = str(item.get("name", "")).strip()
+        if (normalize_course_zone(section_id) != section_id
+                or section_id in {"archive", "unassigned"} or section_id in ids):
+            raise ValueError("分区标识无效或重复")
+        if not name or len(name) > 40 or name.casefold() in names or name in {"归档", "归档区", "未分区"}:
+            raise ValueError("分区名称应为 1–40 个字符，且不能重复或使用保留名称")
+        ids.add(section_id)
+        names.add(name.casefold())
+        clean.append({"id": section_id, "name": name})
+    return clean
+
+
 class CourseZoneStore:
     """Persist local-only course organization without touching subscriptions."""
 
@@ -247,6 +269,36 @@ class CourseZoneStore:
             if course_id and len(course_id) <= 100 and zone:
                 zones[course_id] = zone
         return zones
+
+    def load_state(self) -> dict:
+        zones = self.load()
+        try:
+            raw = json.loads(self.path.read_text("utf-8"))
+        except (OSError, ValueError, TypeError):
+            raw = {}
+        if isinstance(raw, dict) and isinstance(raw.get("sections"), list):
+            sections = validate_course_sections(raw["sections"])
+            allowed = {item["id"] for item in sections} | {"archive", "unassigned"}
+            return {
+                "zones": {key: value for key, value in zones.items() if value in allowed},
+                "sections": sections,
+                "default_zone": raw.get("default_zone") if raw.get("default_zone") in allowed - {"archive"} else "unassigned",
+                "revision": int(raw.get("revision", 0)),
+            }
+        # Preserve the implicit organize membership of existing libraries.
+        # New libraries have no presets. Legacy groups are ordinary editable sections.
+        sections = ([{"id": key, "name": name} for key, name in
+                     [("organize", "整理区"), ("study", "学习区"), ("reference", "查阅区")]]
+                    if zones else [])
+        return {"zones": zones, "sections": sections,
+                "default_zone": "organize" if zones else "unassigned", "revision": 0}
+
+    def save_state(self, state: dict) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        temp = self.path.with_suffix(".tmp")
+        temp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temp, 0o600)
+        temp.replace(self.path)
 
     def save(self, zones: dict[str, str]) -> None:
         clean = {
@@ -369,7 +421,11 @@ class RuntimeState:
         self.settings = self.store.load()
         self.obsidian_settings = self.obsidian_store.load()
         self.subscription_ids = self.subscription_store.load()
-        self.course_zones = self.course_zone_store.load()
+        organization = self.course_zone_store.load_state()
+        self.course_zones = organization["zones"]
+        self.course_sections = organization["sections"]
+        self.default_course_zone = organization["default_zone"]
+        self.course_sections_revision = organization["revision"]
         self.lecture_names = self.lecture_name_store.load()
         self.credentials = self.credential_store.load(self.settings)
         self.credentials_remembered = self.credentials is not None
@@ -430,14 +486,39 @@ class RuntimeState:
             self.subscription_ids = values
             self.subscription_store.save(values)
 
+    def course_organization(self) -> dict:
+        with self.lock:
+            return {"zones": dict(self.course_zones),
+                    "sections": [dict(item) for item in self.course_sections],
+                    "default_zone": self.default_course_zone,
+                    "revision": self.course_sections_revision}
+
+    def save_course_sections(self, sections: list[dict], revision: int) -> None:
+        sections = validate_course_sections(sections)
+        with self.lock:
+            if revision != self.course_sections_revision:
+                raise ValueError("分区已在其他窗口更新，请关闭后重新打开编辑")
+            allowed = {item["id"] for item in sections} | {"archive", "unassigned"}
+            zones = {key: value if value in allowed else "unassigned"
+                     for key, value in self.course_zones.items()}
+            default = self.default_course_zone if self.default_course_zone in allowed else "unassigned"
+            self.course_zone_store.save_state({"zones": zones, "sections": sections,
+                                              "default_zone": default, "revision": revision + 1})
+            self.course_zones, self.course_sections = zones, sections
+            self.default_course_zone = default
+            self.course_sections_revision = revision + 1
+
     def save_course_zone(self, course_id: str, zone: str) -> None:
         normalized_id = course_id.strip()
         normalized_zone = normalize_course_zone(zone)
-        if not normalized_id or len(normalized_id) > 100 or normalized_zone is None:
-            raise ValueError("课程分区无效")
         with self.lock:
-            self.course_zones = {**self.course_zones, normalized_id: normalized_zone}
-            self.course_zone_store.save(self.course_zones)
+            allowed = {item["id"] for item in self.course_sections} | {"archive", "unassigned"}
+            if not normalized_id or len(normalized_id) > 100 or normalized_zone not in allowed:
+                raise ValueError("课程分区不存在，请刷新后重试")
+            zones = {**self.course_zones, normalized_id: normalized_zone}
+            state = {**self.course_organization(), "zones": zones}
+            self.course_zone_store.save_state(state)
+            self.course_zones = zones
 
     def save_lecture_name(self, sub_id: str, name: str) -> None:
         """Set or clear a custom note name; an empty name restores auto naming."""
