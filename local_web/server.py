@@ -954,6 +954,11 @@ def create_app(
                     TALK_AUDIO_BRANCH, remote_dir,
                     f"talk audio {item['id']} deleted",
                 )
+                await run_in_threadpool(
+                    client().delete_branch_file,
+                    TALK_AUDIO_BRANCH, talk_transcript_remote_path(item["id"]),
+                    f"talk checkpoint {item['id']} deleted",
+                )
             except GitHubAPIError:
                 pass
         return {"ok": True}

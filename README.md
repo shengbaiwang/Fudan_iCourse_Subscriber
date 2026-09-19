@@ -78,18 +78,21 @@
 
 首次运行会处理所有已有录播，后续只处理新增课次。
 
-## 前端页面（索引与查看）
+## 统一控制台（本地与 GitHub Pages）
 
-![alt text](docs/frontend.png)
-
-本项目自带一个浏览器端加密数据库查看器，部署在 GitHub Pages：
+控制台以 `local_web/static/` 为唯一界面源码，采用深色主题、课程卡片分区和统一导航。
+本地服务直接提供这套页面；GitHub Pages 从同一源码打包，只切换数据访问方式：
 
 访问 `https://你的用户名.github.io/Fudan_iCourse_Subscriber/`
 
 功能介绍：
-- **浏览器端解密**：输入你的凭据，浏览器用 WebCrypto 解密 sql.js 读取 shard 数据库，凭据不离开本地
-- **按课程/课次浏览**：查看每节课的转录和摘要内容
+
+- **浏览器端解密**：输入你的凭据，浏览器用 WebCrypto 解密 sql.js 读取 shard 数据库，UIS 凭据仅用于当前浏览器内解密，Token 用于 GitHub API 认证
+- **统一浏览和管理**：课程分区、置顶、搜索筛选、摘要版本对比、模型管理、批量重跑、订阅与单次运行
+- **入口差异**：Pages 在当前标签页内存中使用凭据和解密资料；本地使用 Python 服务与可选 macOS 钥匙串，另支持 Obsidian 同步和模型连接测试
 - **导出 PDF**：通过 GitHub Actions 触发导出工作流，生成格式化课程笔记 PDF 并邮件发送
+
+> 开发与验证说明见 [统一控制台说明](docs/frontend-readme.md)。以后界面修改只改 `local_web/static/`，Pages 部署工作流会自动打包该目录。
 
 > 前端页面需要你手动在 GitHub Pages 设置中开启（Settings → Pages → Source → GitHub Actions），然后触发一次 Deploy Frontend workflow 即可部署。
 
@@ -249,7 +252,7 @@ PPT 功能区 UI 噪声清洗：PowerPoint 功能区标签（"文件""开始""�
 
 GitHub Actions 每次在全新容器中运行，无法依赖本地文件系统持久化。解决方案是独立的 `data` 分支，每次运行结束时加密推送数据库，下次运行时拉取解密。
 
-AES-256-CBC + PBKDF2 加密方案需要在三种环境中同时兼容：GitHub Actions shell（openssl CLI）、Python（pycryptodome 库）、浏览器前端（Web Crypto API）。`crypto_box.py` 和 `frontend/js/crypto.js` 保持精确对应——相同的 Salted__ 头部格式、相同的 PBKDF2 迭代次数、相同的 AES-256-CBC 模式。密钥由 `sha256("ICSv2:" + stuid + ":" + uispsw)` 派生。
+AES-256-CBC + PBKDF2 加密方案需要在三种环境中同时兼容：GitHub Actions shell（openssl CLI）、Python（pycryptodome 库）、浏览器前端（Web Crypto API）。`crypto_box.py` 和 `local_web/static/browser/crypto.js` 保持精确对应——相同的 Salted__ 头部格式、相同的 PBKDF2 迭代次数、相同的 AES-256-CBC 模式。密钥由 `sha256("ICSv2:" + stuid + ":" + uispsw)` 派生。
 
 分片的动机是增量传输。数据库约 20MB，通过 GitHub API 完整拉取会显著增加前端加载时间。按课程分组切割为 ~10MB 的 shard，每个独立加密。前端使用 git blob SHA 作为缓存键存储于 IndexedDB，未变化的 shard 自动跳过网络下载、解密、解压。
 
@@ -259,11 +262,11 @@ Schema 迁移：新增列时，旧的 shard 与新的 schema 之间存在列数�
 
 ### 前端：在静态页面中解密远程数据库
 
-前端是运行在 GitHub Pages 上的纯静态单页应用，无后端服务器。它通过 GitHub raw API 拉取位于 `data` 分支的加密 shard，在浏览器中使用 Web Crypto API 解密，并利用 sql.js（SQLite WebAssembly 编译）在内存中构建数据库。
+Pages 入口由 `python3 scripts/build_frontend.py` 打包到 `dist/frontend/`，与本地控制台共用 `local_web/static/` 下的 HTML、CSS 和交互代码；`frontend/` 仅保留开发跳转入口。Pages 运行时使用 `browser/transport.js`，无需后端服务器。它通过 GitHub raw API 拉取位于 `data` 分支的加密 shard，在浏览器中使用 Web Crypto API 解密，并利用 sql.js（SQLite WebAssembly 编译）在内存中构建数据库。
 
 解密凭证（STUID + UISPSW）通过 PBKDF2 派生密钥，不经过网络传输，在浏览器本地内存中完成解密。
 
-订阅编辑器解决了一个特殊的约束：GitHub Actions Secrets API 只支持写入，不支持读取——无法通过 API 获知当前 COURSE_IDS 的值。方案采用三层数据源：数据库 `courses` 表（实际运行过的课程）提供默认订阅状态；localStorage `lastSubscribed` 维护用户前次编辑后的状态；保存时通过 GitHub API 将选择列表写入 `COURSE_IDS` Secret。
+订阅编辑器解决了一个特殊的约束：GitHub Actions Secrets API 只支持写入，不支持读取——无法通过 API 获知当前 COURSE_IDS 的值。页面优先读取当前入口保存的课程 ID 快照，再回退到数据库 `meta` 中的订阅快照；保存时通过 GitHub API 将完整列表加密写入 `COURSE_IDS` Secret。
 
 ### 技术方法总结
 

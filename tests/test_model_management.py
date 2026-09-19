@@ -272,6 +272,28 @@ class ModelConfigurationValidationTest(unittest.TestCase):
 
 
 class ProviderConnectionTest(unittest.TestCase):
+    def test_probe_uses_provider_default_temperature(self):
+        response = BytesIO(
+            json.dumps(
+                {
+                    "model": "test-model",
+                    "choices": [{"message": {"content": "OK"}}],
+                }
+            ).encode("utf-8")
+        )
+
+        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+            result = test_provider(
+                "https://provider.example/v1",
+                "test-model",
+                "fake-key",
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertNotIn("temperature", payload)
+        self.assertTrue(result["ok"])
+
     def test_http_error_never_echoes_the_api_key(self):
         api_key = "fake-sensitive-marker"
         error = urllib.error.HTTPError(
