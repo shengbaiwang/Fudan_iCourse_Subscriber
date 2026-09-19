@@ -2855,6 +2855,7 @@ function talkDisplayName(talk) {
 }
 
 function talkStateLabel(talk) {
+  if (talk?.error_stage === "approval") return "等待 GitHub 批准";
   if (talk?.status === "ready") return "已生成";
   if (talk?.status === "summarizing") return "生成中";
   if (talk?.status === "uploading") return "上传中";
@@ -2910,7 +2911,7 @@ async function loadTalks() {
     }
     if (talk.transcript_chars) parts.push(`转写 ${talk.transcript_chars} 字`);
     if (talk.summary_model) parts.push(talk.summary_model);
-    if (talk.error && talk.status === "failed") parts.push(talk.error);
+    if (talk.error && (talk.status === "failed" || talk.error_stage === "approval")) parts.push(talk.error);
     if (!parts.length && talk.status === "transcribing") parts.push("云端转写中，稍后自动同步");
     if (parts.length) {
       meta.textContent = parts.join(" · ");
