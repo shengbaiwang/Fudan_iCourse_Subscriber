@@ -46,6 +46,7 @@ docs/*
 !docs/*.png
 !docs/frontend-readme.md
 !docs/local-web-console.md
+!docs/asr-qwen3-comparison-2026-09-20.md
 docs/specs/
 *.mp3
 bugs.md

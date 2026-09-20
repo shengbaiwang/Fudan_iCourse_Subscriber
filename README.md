@@ -211,15 +211,15 @@ ASR 阶段通过 `set_asr_active(True/False)` 向调度器主动声明状态。�
 
 音频下载器使用 `BoundedSemaphore(2)` 限制并发 ffmpeg 数量。2 是理论最小值：当前转录课次需要一路，预取课次需要另一路。在 runner 的网络带宽下，两路 ffmpeg 公平共享带宽，各获得约 10 MB/s，远高于 ASR 消费速率。
 
-### 语音识别：后处理优于更好的模型
+### 语音识别：继续使用 SenseVoice
 
 该模块经历了 SenseVoice → FireRed → SenseVoice 的三次选择。FireRed 的转录文本更"干净"（纯中文 + 英文，无跨语种污染），但 SenseVoice 的实时倍率约 25x，FireRed 仅约 6x。在 348 节课的批量场景中，FireRed 的 ASR 总时长为 2h41m，SenseVoice 降至约 37m。当将两种模型的输出分别输入 DeepSeek-V4-Pro 生成摘要时，LLM 的摘要质量差异不显著——LLM 自动忽略了 SenseVoice 混入的日语假名和韩语谚文。
 
-最终选择 SenseVoice 并附加后处理。后处理函数在每条 ASR segment 加入 segments 列表前执行多级清洗：删除日语假名和平假名/片假名 Unicode 区块、删除韩语谚文 Unicode 区块、删除英文 filler word 白名单（yeah, okay, uh, um, hmm 等）、删除 `<sil>` 和 `<|zh|>` 等 bracket token。技术英文（CNN, YOLO, Transformer）通过 `\b` 单词边界匹配不受影响。
-
-每条清洗规则都经过 7 节课 × 5 门课的真实 OCR 数据验证。选择保留"well"——"well-defined"、"well-known"在技术英文中合法。
+当前后处理仅删除已知的 ASR 控制标记并规范空白，保留日语、韩语、英文口头词和重复内容，避免把真实课堂内容当作噪声误删。
 
 VAD 参数调优：Silero VAD 的默认 `min_silence_duration=0.25s` 在课堂场景中将老师的换气、翻页、停顿都切分为独立片段。每个片段需要一次 ASR decode，且 SenseVoice 在短片段（2-3s）上的语言检测倾向于误判为日语（因为缺乏上下文）。将参数调至 0.8s，并将 `max_speech_duration` 设为 30.0s（匹配 SenseVoice 训练感受野）。片段数量减少约 60%，日语误判率大幅下降。
+
+[2026-09-20 完整 129 分钟录音对照](docs/asr-qwen3-comparison-2026-09-20.md)：Qwen3-ASR-0.6B int8 在本机 CPU 上的耗时约为 SenseVoice 的 8.84 倍，峰值内存约为 4.75 倍，术语有改善也有退化。最终继续使用 SenseVoice，撤回 Qwen 实验接入，仅保留评估记录；现有 ASR 代码、依赖、配置和工作流不变。
 
 ### PPT 流水线：计算成本驱动的去重策略
 
