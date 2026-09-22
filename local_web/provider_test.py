@@ -9,6 +9,8 @@ from typing import Any
 
 import certifi
 
+from src.runtime.model_config import is_mimo_url, normalize_base_url
+
 
 class ProviderTestError(RuntimeError):
     pass
@@ -25,12 +27,19 @@ def test_provider(
     timeout: int = 30,
 ) -> dict[str, Any]:
     """Make a minimal OpenAI-compatible request with a user-supplied key."""
-    endpoint = base_url.rstrip("/") + "/chat/completions"
+    base_url = normalize_base_url(base_url)
+    endpoint = base_url + "/chat/completions"
+    # MiMo documents max_completion_tokens and enables reasoning by default.
+    # Disable it for this tiny connectivity probe, not for real summaries.
+    limits = (
+        {"max_completion_tokens": 32, "thinking": {"type": "disabled"}}
+        if is_mimo_url(base_url) else {"max_tokens": 2}
+    )
     payload = json.dumps(
         {
             "model": model,
             "messages": [{"role": "user", "content": "Reply with OK."}],
-            "max_tokens": 2,
+            **limits,
         }
     ).encode("utf-8")
     request = urllib.request.Request(
@@ -53,6 +62,13 @@ def test_provider(
         ) as response:
             data = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            exc.close()
+            raise ProviderTestError(
+                "模型 API 404：请核对 Base URL 的 API 路径和模型 ID；"
+                "小米 MiMo 按量付费地址应为 https://api.xiaomimimo.com/v1。"
+                "Token Plan 请使用控制台提供的专属 OpenAI Base URL 和配套 Key。"
+            ) from None
         detail = exc.read().decode("utf-8", "replace")[:800]
         raise ProviderTestError(
             f"模型 API {exc.code}: {_redact(detail, api_key)}"

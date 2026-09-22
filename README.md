@@ -123,6 +123,14 @@ Obsidian Vault；该同步不会要求电脑常开，也不会覆盖检测到手
 重新生成摘要；每个课次会保留不同模型的最新版本，可在摘要页多选并排对比，当前版本
 仍会更新 `summary_model`。
 
+小米 MiMo 的按量付费 Base URL 为 `https://api.xiaomimimo.com/v1`（见
+[官方接入文档](https://mimo.mi.com/docs/zh-CN/quick-start/summary/first-api-call)）。
+控制台、模型目录和摘要运行时会自动为该官方域名的根地址补上 `/v1`，也接受粘贴
+`/v1/chat/completions` 或 `/v1/models` 的完整地址；已保存的旧配置无需重建。
+模型 ID 请从“获取模型”中选择或按控制台提供的 ID 手动填写。Token Plan 需使用
+平台提供的专属 OpenAI Base URL 和对应 Key，不与按量付费地址混用。
+连接测试会关闭 MiMo 的思考模式并限制输出长度，实际摘要保留服务商默认行为。
+
 macOS 上可选择将 Token、学号和 UIS 密码保存到系统钥匙串；本地资料库持久化为加密文件，
 启动时先打开上次资料、后台自动检查更新，明文数据库仍会在退出时清理。模型接口目前只
 支持 OpenAI-compatible `chat/completions`。细粒度 GitHub Token 需为该

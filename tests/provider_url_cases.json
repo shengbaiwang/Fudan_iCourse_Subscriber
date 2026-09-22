@@ -1,0 +1,15 @@
+[
+  ["https://api.xiaomimimo.com", "https://api.xiaomimimo.com/v1"],
+  ["  https://api.xiaomimimo.com/  ", "https://api.xiaomimimo.com/v1"],
+  ["https://api.xiaomimimo.com/v1/", "https://api.xiaomimimo.com/v1"],
+  ["https://api.xiaomimimo.com/chat/completions", "https://api.xiaomimimo.com/v1"],
+  ["https://api.xiaomimimo.com/v1/chat/completions/", "https://api.xiaomimimo.com/v1"],
+  ["https://api.xiaomimimo.com/models", "https://api.xiaomimimo.com/v1"],
+  ["https://api.xiaomimimo.com/v1/models/", "https://api.xiaomimimo.com/v1"],
+  ["https://api.xiaomimimo.com/custom/v2", "https://api.xiaomimimo.com/custom/v2"],
+  ["https://token-plan-cn.xiaomimimo.com/v1", "https://token-plan-cn.xiaomimimo.com/v1"],
+  ["https://api.xiaomimimo.com.example.com", "https://api.xiaomimimo.com.example.com"],
+  ["https://proxy.example/xiaomimimo/v1", "https://proxy.example/xiaomimimo/v1"],
+  ["https://api.deepseek.com", "https://api.deepseek.com"],
+  ["https://generativelanguage.googleapis.com/v1beta/openai/", "https://generativelanguage.googleapis.com/v1beta/openai"]
+]

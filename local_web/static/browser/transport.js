@@ -140,7 +140,7 @@
       names.add(name);
       const env = String(row.api_key_env || '').trim().toUpperCase();
       if (!['DASHSCOPE_API_KEY', 'DEEPSEEK_API_KEY', 'GEMINI_API_KEY'].includes(env) && !/^LLM_[A-Z0-9_]{1,80}_API_KEY$/.test(env)) throw new Error(`${name} 的 Secret 名称无效`);
-      const base = String(row.base_url || row.default_base_url || '').trim().replace(/\/+$/, '');
+      const base = window.ICourseProviderURLs.normalize(row.base_url || row.default_base_url || '');
       let url;
       try { url = new URL(base); } catch (_) { throw new Error(`${name} 的 Base URL 无效`); }
       if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || /[?#\\\s]/.test(base)) throw new Error(`${name} 需要无凭据和查询参数的 HTTPS Base URL`);

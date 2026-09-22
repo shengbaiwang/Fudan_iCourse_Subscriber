@@ -22,6 +22,7 @@
     node.hidden = !window.ICOURSE_CAPABILITIES[node.dataset.capability];
   });
   try {
+    await script('provider-urls.js');
     if (pages) {
       for (const src of [
         'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.js',

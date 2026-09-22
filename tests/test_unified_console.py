@@ -19,7 +19,7 @@ class SharedConsoleTest(unittest.TestCase):
             output = Path(directory) / 'pages'
             build(output)
             source = ROOT / 'local_web/static'
-            for name in ('index.html', 'styles.css', 'app.js', 'bootstrap.js'):
+            for name in ('index.html', 'styles.css', 'app.js', 'bootstrap.js', 'provider-urls.js'):
                 self.assertEqual((output / name).read_bytes(), (source / name).read_bytes())
             self.assertIn('"pages"', (output / 'runtime-config.js').read_text())
             self.assertIn('"local"', (source / 'runtime-config.js').read_text())

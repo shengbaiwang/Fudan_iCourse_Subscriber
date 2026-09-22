@@ -30,6 +30,11 @@ LEGACY_URL_ENVS = {
 }
 
 
+def is_mimo_url(value: str) -> bool:
+    """Match the official pay-as-you-go host, never a lookalike or proxy."""
+    return urlparse(value).hostname == "api.xiaomimimo.com"
+
+
 def normalize_base_url(value: Any, provider_name: str = "供应商") -> str:
     """Return a safe OpenAI-compatible base URL or raise ValueError."""
     if not isinstance(value, str):
@@ -55,6 +60,13 @@ def normalize_base_url(value: Any, provider_name: str = "供应商") -> str:
         raise ValueError(
             f"{provider_name} 的 Base URL 必须是无凭据和查询参数的 HTTPS URL"
         )
+    # MiMo's root is not an API base. Repair old saved configs as well as
+    # pasted endpoint URLs; leave custom paths and other providers untouched.
+    # Keep this rule aligned with static/provider-urls.js.
+    if is_mimo_url(base_url) and parsed.path in {
+        "", "/v1", "/chat/completions", "/v1/chat/completions", "/models", "/v1/models"
+    }:
+        return f"{parsed.scheme}://{parsed.netloc}/v1"
     return base_url
 
 

@@ -1807,7 +1807,7 @@ async function testModelProvider(index, button, resultNode) {
       method: "POST",
       body: JSON.stringify({
         name: provider.name,
-        base_url: provider.base_url,
+        base_url: window.ICourseProviderURLs.normalize(provider.base_url),
         api_key_env: provider.api_key_env,
         model,
         api_key: apiKey,
@@ -1913,7 +1913,7 @@ async function openModelDirectory(provider, refreshModels) {
     status.textContent = "正在获取模型目录…";
     try {
       const result = await api("/api/local/model-providers/models", {
-        method: "POST", body: JSON.stringify({base_url: provider.base_url, api_key: provider.api_key.trim()}),
+        method: "POST", body: JSON.stringify({base_url: window.ICourseProviderURLs.normalize(provider.base_url), api_key: provider.api_key.trim()}),
       });
       if (!dialog.open) return;
       models = result.models || [];
@@ -2105,7 +2105,11 @@ function renderModelProviders() {
     baseUrlInput.spellcheck = false;
     baseUrlInput.placeholder = "https://api.example.com/v1";
     baseUrlInput.addEventListener("input", () => { provider.base_url = baseUrlInput.value; markModelsDirty(); });
-    fields.append(createField("Base URL", baseUrlInput, "必须是兼容 OpenAI Chat Completions 的 HTTPS 地址"));
+    baseUrlInput.addEventListener("change", () => {
+      provider.base_url = window.ICourseProviderURLs.normalize(baseUrlInput.value);
+      baseUrlInput.value = provider.base_url;
+    });
+    fields.append(createField("Base URL", baseUrlInput, "兼容 OpenAI Chat Completions 的 HTTPS 地址。小米 MiMo：https://api.xiaomimimo.com/v1（根地址会自动补全）；Token Plan 使用控制台提供的专属 OpenAI 地址与配套 Key。"));
 
     const secretInput = document.createElement("input");
     secretInput.value = provider.api_key_env;
@@ -2210,7 +2214,7 @@ async function saveModelProviders() {
       const result = {
         enabled: provider.enabled,
         name: provider.name.trim(),
-        base_url: provider.base_url.trim(),
+        base_url: window.ICourseProviderURLs.normalize(provider.base_url),
         api_key_env: provider.api_key_env.trim().toUpperCase(),
         models: provider.models.map((item) => item.trim()).filter(Boolean),
       };

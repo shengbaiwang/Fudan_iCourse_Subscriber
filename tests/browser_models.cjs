@@ -46,9 +46,12 @@ const root = path.resolve(process.env.MODEL_STATIC_ROOT || path.join(__dirname, 
           }
           return json({source:'github-variable',providers});
         case '/model-providers/models':
+          assert.equal(request.postDataJSON().base_url, 'https://api.xiaomimimo.com/v1');
           if (failDirectory) { failDirectory = false; return route.fulfill({status:400,json:{detail:'synthetic directory failure'}}); }
           return json({models:['alpha-pro','alpha-directory','other-model']});
-        case '/model-providers/test': return json({model:request.postDataJSON().model,latency_ms:12});
+        case '/model-providers/test':
+          assert.equal(request.postDataJSON().base_url, 'https://api.xiaomimimo.com/v1');
+          return json({model:request.postDataJSON().model,latency_ms:12});
         default: throw new Error(`Unexpected request ${url.pathname}`);
       }
     });
@@ -59,7 +62,9 @@ const root = path.resolve(process.env.MODEL_STATIC_ROOT || path.join(__dirname, 
     assert.equal(await page.locator('.provider-card').count(),1);
     assert.equal(await page.locator('.provider-nav-item').count(),2);
     assert.equal(await page.locator('#model-save-button').isDisabled(),true);
+    await page.getByLabel('Base URL', {exact:true}).fill('https://api.xiaomimimo.com');
     await page.locator('#model-provider-list').getByLabel('API Key', {exact:true}).fill('synthetic-key');
+    assert.equal(await page.getByLabel('Base URL', {exact:true}).inputValue(), 'https://api.xiaomimimo.com/v1');
     await page.getByRole('button',{name:'获取模型',exact:true}).click();
     await page.getByText(/synthetic directory failure/).waitFor();
     await page.getByRole('button',{name:'重新获取',exact:true}).click();
@@ -109,6 +114,7 @@ const root = path.resolve(process.env.MODEL_STATIC_ROOT || path.join(__dirname, 
     await page.waitForFunction(()=>document.querySelector('#model-save-button').disabled && !document.querySelector('.model-workspace').inert);
     assert.deepEqual(saved.providers.map(p=>p.name),['beta','alpha','gamma']);
     assert.deepEqual(saved.providers[1].models,['alpha-pro','alpha-new']);
+    assert.equal(saved.providers[1].base_url,'https://api.xiaomimimo.com/v1');
     assert.equal(saved.providers[1].api_key,'synthetic-key');
     assert.equal(await page.locator('#model-provider-list').getByLabel('API Key',{exact:true}).inputValue(),'');
     await page.locator('#message').waitFor({state:'hidden'});
