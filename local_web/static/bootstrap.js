@@ -27,7 +27,7 @@
       for (const src of [
         'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.js',
         'browser/crypto.js', 'browser/github.js', 'browser/schema.js', 'browser/db.js',
-        'browser/transport.js',
+        'browser/workflow-approvals.js', 'browser/transport.js',
       ]) await script(src);
     }
     await script('app.js');

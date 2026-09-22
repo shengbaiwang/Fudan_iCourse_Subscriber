@@ -72,7 +72,7 @@ const RUN_STATUS_LABELS = {
   success: "成功", failure: "失败", cancelled: "已取消", timed_out: "超时",
   in_progress: "进行中", queued: "排队中", requested: "已请求", waiting: "等待中",
   pending: "排队中", completed: "已完成", neutral: "已完成", skipped: "已跳过",
-  stale: "已过期", action_required: "需要处理", startup_failure: "启动失败",
+  stale: "已过期", action_required: "等待 GitHub 批准", startup_failure: "启动失败",
 };
 
 function loadStarred() {
@@ -3406,7 +3406,25 @@ $("#talk-generate-button").onclick = async () => {
   }
 };
 
-refreshStatus().catch((error) => message(`无法连接本地服务：${error.message}`, true));
+let approvalPollBusy = false;
+let lastApprovalError = "";
+async function checkWorkflowApprovals() {
+  if (!statusState?.configured || approvalPollBusy) return;
+  approvalPollBusy = true;
+  try {
+    const result = await api('/api/local/workflow-approvals', {method: 'POST'});
+    const error = result.errors?.map(item => item.message).join('; ') || "";
+    if (error && error !== lastApprovalError) message(`自动批准暂未成功：${error}；可在自动化页查看任务。`, true);
+    lastApprovalError = error;
+    if (activeView === 'automation') await loadRuns();
+  } catch (error) {
+    if (error.message !== lastApprovalError) message(`审批检查暂不可用：${error.message}`, true);
+    lastApprovalError = error.message;
+  }
+  finally { approvalPollBusy = false; }
+}
+refreshStatus().then(checkWorkflowApprovals).catch((error) => message(`无法连接本地服务：${error.message}`, true));
+setInterval(checkWorkflowApprovals, 30000);
 
 let talkListRefreshBusy = false;
 setInterval(async () => {

@@ -72,7 +72,7 @@ const RUN_STATUS_LABELS = {
   success: "成功", failure: "失败", cancelled: "已取消", timed_out: "超时",
   in_progress: "进行中", queued: "排队中", requested: "已请求", waiting: "等待中",
   pending: "排队中", completed: "已完成", neutral: "已完成", skipped: "已跳过",
-  stale: "已过期", action_required: "需要处理", startup_failure: "启动失败",
+  stale: "已过期", action_required: "等待 GitHub 批准", startup_failure: "启动失败",
 };
 
 function loadStarred() {
@@ -1807,7 +1807,7 @@ async function testModelProvider(index, button, resultNode) {
       method: "POST",
       body: JSON.stringify({
         name: provider.name,
-        base_url: provider.base_url,
+        base_url: window.ICourseProviderURLs.normalize(provider.base_url),
         api_key_env: provider.api_key_env,
         model,
         api_key: apiKey,
@@ -1913,7 +1913,7 @@ async function openModelDirectory(provider, refreshModels) {
     status.textContent = "正在获取模型目录…";
     try {
       const result = await api("/api/local/model-providers/models", {
-        method: "POST", body: JSON.stringify({base_url: provider.base_url, api_key: provider.api_key.trim()}),
+        method: "POST", body: JSON.stringify({base_url: window.ICourseProviderURLs.normalize(provider.base_url), api_key: provider.api_key.trim()}),
       });
       if (!dialog.open) return;
       models = result.models || [];
@@ -2105,7 +2105,11 @@ function renderModelProviders() {
     baseUrlInput.spellcheck = false;
     baseUrlInput.placeholder = "https://api.example.com/v1";
     baseUrlInput.addEventListener("input", () => { provider.base_url = baseUrlInput.value; markModelsDirty(); });
-    fields.append(createField("Base URL", baseUrlInput, "必须是兼容 OpenAI Chat Completions 的 HTTPS 地址"));
+    baseUrlInput.addEventListener("change", () => {
+      provider.base_url = window.ICourseProviderURLs.normalize(baseUrlInput.value);
+      baseUrlInput.value = provider.base_url;
+    });
+    fields.append(createField("Base URL", baseUrlInput, "兼容 OpenAI Chat Completions 的 HTTPS 地址。小米 MiMo：https://api.xiaomimimo.com/v1（根地址会自动补全）；Token Plan 使用控制台提供的专属 OpenAI 地址与配套 Key。"));
 
     const secretInput = document.createElement("input");
     secretInput.value = provider.api_key_env;
@@ -2210,7 +2214,7 @@ async function saveModelProviders() {
       const result = {
         enabled: provider.enabled,
         name: provider.name.trim(),
-        base_url: provider.base_url.trim(),
+        base_url: window.ICourseProviderURLs.normalize(provider.base_url),
         api_key_env: provider.api_key_env.trim().toUpperCase(),
         models: provider.models.map((item) => item.trim()).filter(Boolean),
       };
@@ -3402,7 +3406,25 @@ $("#talk-generate-button").onclick = async () => {
   }
 };
 
-refreshStatus().catch((error) => message(`无法连接本地服务：${error.message}`, true));
+let approvalPollBusy = false;
+let lastApprovalError = "";
+async function checkWorkflowApprovals() {
+  if (!statusState?.configured || approvalPollBusy) return;
+  approvalPollBusy = true;
+  try {
+    const result = await api('/api/local/workflow-approvals', {method: 'POST'});
+    const error = result.errors?.map(item => item.message).join('; ') || "";
+    if (error && error !== lastApprovalError) message(`自动批准暂未成功：${error}；可在自动化页查看任务。`, true);
+    lastApprovalError = error;
+    if (activeView === 'automation') await loadRuns();
+  } catch (error) {
+    if (error.message !== lastApprovalError) message(`审批检查暂不可用：${error.message}`, true);
+    lastApprovalError = error.message;
+  }
+  finally { approvalPollBusy = false; }
+}
+refreshStatus().then(checkWorkflowApprovals).catch((error) => message(`无法连接本地服务：${error.message}`, true));
+setInterval(checkWorkflowApprovals, 30000);
 
 let talkListRefreshBusy = false;
 setInterval(async () => {

@@ -8,6 +8,39 @@
   let commitSha = null;
   let syncing = null;
   const encryptedCache = new Map();
+  let approvalCheck = null, approvalSession = null, nextApprovalCheck = 0;
+  let approvalResult = {approved: [], errors: []};
+
+  async function checkApprovals() {
+    const session = credentials;
+    if (session !== approvalSession) {
+      approvalSession = session; nextApprovalCheck = 0; approvalCheck = null;
+      approvalResult = {approved: [], errors: []};
+    }
+    if (!session || Date.now() < nextApprovalCheck) return approvalResult;
+    if (approvalCheck) return approvalCheck;
+    const {owner, repo} = repository;
+    // Bind both the token and destination to this session, including across awaits.
+    const request = async (path, options = {}) => {
+      const response = await fetch(`https://api.github.com${path}`, {...options, headers: {
+        Authorization: `Bearer ${session.token}`, Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      }});
+      const body = await response.text();
+      if (!response.ok) throw new Error(`GitHub ${response.status}：${body.slice(0,500)}`);
+      return body ? JSON.parse(body) : null;
+    };
+    const task = window.ICourseWorkflowApprovals.reconcile(request, owner, repo, () => credentials === session)
+      .catch(error => ({approved: [], errors: [{message: error.message}]}));
+    approvalCheck = task;
+    const result = await task;
+    if (credentials === session) {
+      approvalResult = result;
+      nextApprovalCheck = Date.now() + (result.errors.length ? 300000 : 30000);
+    }
+    if (approvalCheck === task) approvalCheck = null;
+    return credentials === session ? result : {approved: [], errors: []};
+  }
 
   function readJSON(key, fallback) {
     try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch (_) { return fallback; }
@@ -140,7 +173,7 @@
       names.add(name);
       const env = String(row.api_key_env || '').trim().toUpperCase();
       if (!['DASHSCOPE_API_KEY', 'DEEPSEEK_API_KEY', 'GEMINI_API_KEY'].includes(env) && !/^LLM_[A-Z0-9_]{1,80}_API_KEY$/.test(env)) throw new Error(`${name} 的 Secret 名称无效`);
-      const base = String(row.base_url || row.default_base_url || '').trim().replace(/\/+$/, '');
+      const base = window.ICourseProviderURLs.normalize(row.base_url || row.default_base_url || '');
       let url;
       try { url = new URL(base); } catch (_) { throw new Error(`${name} 的 Base URL 无效`); }
       if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || /[?#\\\s]/.test(base)) throw new Error(`${name} 需要无凭据和查询参数的 HTTPS Base URL`);
@@ -271,6 +304,7 @@
       return {ok: true};
     }
     if (!credentials) throw new Error('请先连接 GitHub 仓库');
+    if (route === '/workflow-approvals' && method === 'POST') return checkApprovals();
     if (route === '/sync' && method === 'POST') return synchronize();
     if (route === '/workflows') return (await gh('/actions/runs?per_page=10')).workflow_runs;
     const workflow = /^\/workflows\/([^/]+)\/dispatch$/.exec(route);

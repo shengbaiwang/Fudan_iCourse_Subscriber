@@ -91,6 +91,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         if (p==='/lecture-names') {if(request.method()==='PUT') {const body=request.postDataJSON();names[body.sub_id]=body.name;} return json({names});}
         if (p==='/course-zones') {if(request.method()==='PUT') {const body=request.postDataJSON();zones[body.course_id]=body.zone;} return json({zones,sections,revision:0,default_zone:"unassigned"});}
         if (p==='/workflows') return json([]);
+        if (p==='/workflow-approvals') return json({approved:[],errors:[]});
         if (p==='/courses/1/lectures') return json(lectures);
         if (p==='/lectures/10') return json(lecture);
         if (p==='/model-providers') return json({source:'github-variable',providers:[provider]});

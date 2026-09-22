@@ -23,6 +23,7 @@ from .obsidian import ObsidianSyncError, ObsidianSyncService
 from .provider_test import ProviderTestError, test_provider
 from .provider_models import ModelDirectoryError, fetch_provider_models
 from .talk_cloud import TalkCloudSync
+from .workflow_approvals import WorkflowApprovals
 from .talks import (
     MAX_AUDIO_BYTES,
     TALK_AUDIO_BRANCH,
@@ -176,13 +177,19 @@ def create_app(
 
     uploads = talk_uploads or TalkUploadQueue(talks, _upload_client)
     cloud = TalkCloudSync(talks, uploads, _upload_client, lambda: runtime.credentials)
+    approvals = WorkflowApprovals(
+        _upload_client,
+        lambda: (runtime.settings, runtime.credentials) if runtime.credentials else None,
+    )
 
     @asynccontextmanager
     async def lifespan(_app):
         cloud.start()
+        approvals.start()
         try:
             yield
         finally:
+            approvals.close()
             cloud.close()
 
     static_dir = Path(__file__).with_name("static")
@@ -199,6 +206,7 @@ def create_app(
     app.state.talk_jobs = jobs
     app.state.talk_uploads = uploads
     app.state.talk_cloud = cloud
+    app.state.workflow_approvals = approvals
     app.state.obsidian = ObsidianSyncService()
     atexit.register(db.close)
     if runtime.credentials:
@@ -1061,6 +1069,11 @@ def create_app(
             page=page,
             page_size=page_size,
         )
+
+    @app.post("/api/local/workflow-approvals")
+    async def workflow_approvals():
+        client()  # Require a configured session even when serving a cached result.
+        return await run_in_threadpool(approvals.check)
 
     @app.get("/api/local/workflows")
     async def workflows():
