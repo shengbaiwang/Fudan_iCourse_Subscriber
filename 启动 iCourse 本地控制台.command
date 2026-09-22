@@ -4,14 +4,6 @@
 set -eu
 
 PROJECT_DIR="${0:A:h}"
-PORT="8765"
-URL="http://127.0.0.1:${PORT}"
-
-if /usr/bin/curl --fail --silent --max-time 1 "${URL}/api/local/status" >/dev/null 2>&1; then
-  /usr/bin/open "${URL}"
-  exit 0
-fi
-
 cd "${PROJECT_DIR}"
 
 if [[ ! -x ".venv-web/bin/python" ]]; then
@@ -25,5 +17,31 @@ if [[ ! -x ".venv-web/bin/python" ]]; then
   .venv-web/bin/python -m pip install -r requirements-web.txt
 fi
 
+PORT=""
+for candidate in {8765..8785}; do
+  URL="http://127.0.0.1:${candidate}"
+  # An unrelated local server may answer on the port.  Only reuse iCourse.
+  if /usr/bin/curl --fail --silent --max-time 1 "${URL}/api/local/status" 2>/dev/null | \
+      /usr/bin/grep -q '"database_ready":'; then
+    echo "iCourse 已在 ${URL} 运行，正在打开浏览器…"
+    /usr/bin/open "${URL}"
+    exit 0
+  fi
+  if .venv-web/bin/python -c 'import socket, sys; s = socket.socket(); s.settimeout(0.2); occupied = s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0; s.close(); sys.exit(0 if occupied else 1)' "${candidate}"; then
+    continue
+  fi
+  if [[ -z "${PORT}" ]]; then
+    PORT="${candidate}"
+  fi
+done
+
+if [[ -z "${PORT}" ]]; then
+  echo "无法启动：8765–8785 端口都已被占用。" >&2
+  exit 1
+fi
+
+if [[ "${PORT}" != "8765" ]]; then
+  echo "默认端口 8765 已被其他程序占用，改用 ${PORT}。"
+fi
 echo "正在启动 iCourse 本地控制台…"
 exec .venv-web/bin/python -m local_web --port "${PORT}"
