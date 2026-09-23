@@ -439,3 +439,14 @@ mark.user-highlight:hover { background:var(--hl-hover); }
   .blind-panel-head { flex-direction:column; }
   .blind-identity { justify-content:flex-start; }
 }
+
+.blind-generate { margin:0 0 14px; padding:13px 15px; border:1px solid var(--line); border-radius:12px; background:var(--card); }
+.blind-generate>strong { display:block; color:var(--text-sub); font-size:12px; }
+.blind-generate-row { display:grid; grid-template-columns:minmax(180px,1fr) auto auto auto; gap:8px; align-items:center; margin-top:10px; }
+.blind-generate-row select,
+.blind-generate-row input { margin:0; min-width:0; }
+.blind-generate-row button { white-space:nowrap; }
+@media(max-width:700px) {
+  .blind-generate-row { grid-template-columns:1fr; }
+  .blind-generate-row button { width:100%; }
+}

@@ -34,6 +34,7 @@ let updatePollTimer = null;
 let rerunModelOptions = [];
 let selectedSummaryVersionKeys = new Set();
 let blindCompare = null;
+let blindRefreshTimer = null;
 const courseZoneRequests = new Map();
 let loadedLibraryIdentity = "";
 const isPages = window.ICOURSE_RUNTIME === "pages";
@@ -918,14 +919,12 @@ function renderDetail() {
     renderSummaryVersions(root);
   } else if (detailTab === "transcript") {
     $("#summary-version-controls").classList.add("hidden");
-    $("#detail-blind-compare").classList.add("hidden");
     const transcript = document.createElement("div");
     transcript.className = "transcript";
     transcript.textContent = currentLecture.transcript || "暂无转录文本";
     root.append(transcript);
   } else {
     $("#summary-version-controls").classList.add("hidden");
-    $("#detail-blind-compare").classList.add("hidden");
     const pages = currentLecture.ppt_pages || [];
     if (!pages.length) root.textContent = "暂无 PPT OCR 数据。";
     pages.forEach((page) => {
@@ -1244,8 +1243,6 @@ function formatVersionDate(value) {
 function renderSummaryVersions(root) {
   const versions = summaryVersions();
   const controls = $("#summary-version-controls");
-  const blindButton = $("#detail-blind-compare");
-  if (blindButton) blindButton.classList.toggle("hidden", versions.length < 2);
   controls.replaceChildren();
   if (!versions.length) {
     controls.classList.add("hidden");
@@ -1330,6 +1327,7 @@ function collectBlindVersions() {
   if (activeView === "detail" && currentLecture) {
     return {
       source: "lecture",
+      sourceId: String(currentLecture.sub_id || ""),
       versions: summaryVersions(),
       title: lectureDisplayName(currentLecture),
       course: currentLecture.course_title || "",
@@ -1341,6 +1339,7 @@ function collectBlindVersions() {
   if (activeView === "talkDetail" && currentTalk) {
     return {
       source: "talk",
+      sourceId: String(currentTalk.id || ""),
       versions: talkVersions(),
       title: talkDisplayName(currentTalk),
       course: "本机讲座",
@@ -1355,23 +1354,144 @@ function collectBlindVersions() {
 
 function openBlindCompare() {
   const payload = collectBlindVersions();
-  if (!payload) {
-    message("请先打开一份已有笔记的课次或讲座。", true);
+  if (!payload || !payload.sourceId) {
+    message("请先打开一篇课次或讲座笔记。", true);
     return;
   }
-  if (payload.versions.length < 2) {
-    message("至少需要 2 个笔记版本才能对比。可在设置 → 重跑中用不同模型生成。", true);
-    return;
-  }
+  // 单版本也可进入：在对比页里选模型生成对照版本后再盲测。
   blindCompare = {
     ...payload,
     revealed: new Set(),
     preferredKey: null,
     mode: "blind",
+    generating: false,
     order: shuffleKeys(payload.versions.map((version) => version.key)),
   };
   renderBlindCompare();
   showView("blindCompare");
+  ensureBlindModelOptions().catch((error) => {
+    const hint = $("#blind-generate-hint");
+    if (hint) hint.textContent = error.message;
+  });
+  scheduleBlindRefresh();
+}
+
+async function ensureBlindModelOptions() {
+  const select = $("#blind-model-select");
+  if (select.options.length) return;
+  try {
+    await populateRerunModelSelect("#blind-model-select", true);
+  } catch (error) {
+    const hint = $("#blind-generate-hint");
+    if (hint) hint.textContent = error.message;
+    throw error;
+  }
+}
+
+async function refreshBlindVersions(options = {}) {
+  if (!blindCompare) return null;
+  const previousCount = blindCompare.versions.length;
+  if (blindCompare.source === "lecture") {
+    currentLecture = await api(`/api/local/lectures/${encodeURIComponent(blindCompare.sourceId)}`);
+    if (!currentCourse || String(currentCourse.course_id) !== String(currentLecture.course_id)) {
+      currentCourse = courseRows.find((course) => String(course.course_id) === String(currentLecture.course_id)) || {
+        course_id: currentLecture.course_id,
+        title: currentLecture.course_title,
+        teacher: currentLecture.teacher,
+      };
+    }
+    blindCompare.versions = summaryVersions();
+  } else {
+    currentTalk = await api(`/api/local/talks/${encodeURIComponent(blindCompare.sourceId)}`);
+    blindCompare.versions = talkVersions();
+    blindCompare.subtitle = currentTalk.custom_title && currentTalk.ai_title && currentTalk.custom_title !== currentTalk.ai_title
+      ? `AI 标题：${currentTalk.ai_title}` : "";
+  }
+  const nextKeys = new Set(blindCompare.versions.map((version) => version.key));
+  blindCompare.revealed = new Set([...blindCompare.revealed].filter((key) => nextKeys.has(key)));
+  if (blindCompare.preferredKey && !nextKeys.has(blindCompare.preferredKey)) {
+    blindCompare.preferredKey = null;
+  }
+  const grew = blindCompare.versions.length > previousCount;
+  if (grew || options.reshuffle) {
+    blindCompare.order = shuffleKeys(blindCompare.versions.map((version) => version.key));
+    if (grew) {
+      blindCompare.revealed = new Set();
+      blindCompare.preferredKey = null;
+      blindCompare.mode = "blind";
+    }
+  } else {
+    blindCompare.order = blindCompare.order.filter((key) => nextKeys.has(key));
+    blindCompare.versions.forEach((version) => {
+      if (!blindCompare.order.includes(version.key)) blindCompare.order.push(version.key);
+    });
+  }
+  renderBlindCompare();
+  if (grew) message("已载入新版本，顺序已重新洗牌，可开始盲测。");
+  scheduleBlindRefresh();
+  return blindCompare;
+}
+
+
+function scheduleBlindRefresh() {
+  clearTimeout(blindRefreshTimer);
+  if (!blindCompare || activeView !== "blindCompare") return;
+  const talkBusy = blindCompare.source === "talk" && currentTalk
+    && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
+  // 讲座本地生成中自动刷；课次走 Actions，只在用户点「刷新版本」时取。
+  if (!talkBusy) return;
+  blindRefreshTimer = setTimeout(() => {
+    refreshBlindVersions().catch(() => {});
+  }, currentTalk?.status === "transcribing" ? 15000 : 4000);
+}
+
+async function submitBlindGenerate() {
+  if (!blindCompare) return;
+  const option = selectedRerunModel("#blind-model-select");
+  if (!option) {
+    message("请先选择模型。", true);
+    return;
+  }
+  const isTalk = blindCompare.source === "talk";
+  let apiKey = "";
+  if (isTalk) {
+    apiKey = $("#blind-api-key").value.trim();
+    if (!apiKey) {
+      message("请重新输入所选供应商的 API Key（GitHub 不允许读回已保存的密钥）。", true);
+      $("#blind-api-key").focus();
+      return;
+    }
+  }
+  const where = isTalk ? "本讲座" : "本课次";
+  if (!confirm(`使用 ${option.provider} / ${option.model} 为${where}生成对照笔记？\n\n已有版本会保留；会产生模型费用。`)) return;
+  const button = $("#blind-generate-button");
+  button.disabled = true;
+  blindCompare.generating = true;
+  renderBlindCompare();
+  try {
+    if (isTalk) {
+      await api(`/api/local/talks/${encodeURIComponent(blindCompare.sourceId)}/summarize`, {
+        method: "POST",
+        body: JSON.stringify({...option, api_key: apiKey}),
+      });
+      $("#blind-api-key").value = "";
+      message("已开始生成对照笔记，完成后会自动出现在下方。");
+    } else {
+      const result = await api("/api/local/summary-reruns", {
+        method: "POST",
+        body: JSON.stringify({...option, sub_ids: [blindCompare.sourceId], course_ids: []}),
+      });
+      message(`已提交 ${result.count} 个课次重跑；Actions 完成并「检查更新」后，点「刷新版本」载入对照笔记。`);
+    }
+    await refreshBlindVersions();
+  } catch (error) {
+    message(error.message, true);
+  } finally {
+    blindCompare.generating = false;
+    button.disabled = false;
+    renderBlindCompare();
+    scheduleBlindRefresh();
+  }
 }
 
 function reshuffleBlindCompare() {
@@ -1416,6 +1536,7 @@ function blindVersionByKey(key) {
 function renderBlindCompare() {
   if (!blindCompare) return;
   const isBlind = blindCompare.mode === "blind";
+  const versionCount = blindCompare.versions.length;
   $("#blind-compare-course").textContent = blindCompare.course || "";
   $("#blind-compare-title").textContent = isBlind ? "盲测对比" : "公开对比";
   $("#blind-compare-back").textContent = blindCompare.backLabel || "返回";
@@ -1430,23 +1551,52 @@ function renderBlindCompare() {
   });
 
   const revealAll = $("#blind-reveal-all");
-  revealAll.classList.toggle("hidden", !isBlind);
-  $("#blind-reshuffle").classList.toggle("hidden", !isBlind);
-  revealAll.disabled = !isBlind || blindCompare.revealed.size >= blindCompare.versions.length;
+  revealAll.classList.toggle("hidden", !isBlind || versionCount < 2);
+  $("#blind-reshuffle").classList.toggle("hidden", !isBlind || versionCount < 2);
+  revealAll.disabled = !isBlind || versionCount < 1 || blindCompare.revealed.size >= versionCount;
+
+  const isTalk = blindCompare.source === "talk";
+  const talkBusy = isTalk && currentTalk
+    && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
+  const apiKeyField = $("#blind-api-key");
+  apiKeyField.classList.toggle("hidden", !isTalk);
+  const generateButton = $("#blind-generate-button");
+  generateButton.disabled = Boolean(blindCompare.generating || talkBusy);
+  generateButton.textContent = blindCompare.generating || talkBusy ? "生成中…" : "生成对照笔记";
+  $("#blind-refresh-versions").disabled = Boolean(blindCompare.generating);
+
+  const generateHint = $("#blind-generate-hint");
+  if (!generateHint.dataset.custom) {
+    if (talkBusy) {
+      generateHint.textContent = "讲座正在云端/本地处理，完成后会自动出现在下方（约 4–15 秒刷新一次）。";
+    } else if (isTalk) {
+      generateHint.textContent = "讲座生成需重新输入所选供应商的 API Key（仅用于本次请求，不保存）。";
+    } else if (versionCount < 2) {
+      generateHint.textContent = "课次重跑走 GitHub Actions；完成后先「检查更新」，再点「刷新版本」载入对照笔记。";
+    } else {
+      generateHint.textContent = "可继续用其他模型生成更多对照版本；已有版本都会保留。";
+    }
+  }
 
   const hint = $("#blind-hint");
-  if (isBlind) {
-    const left = blindCompare.versions.length - blindCompare.revealed.size;
+  if (versionCount < 2 && isBlind) {
+    hint.textContent = versionCount === 0
+      ? "还没有可对比的笔记。可在下方选模型生成；有 ≥2 个版本后即可随机盲测。"
+      : "目前只有 1 个版本。可在下方选其他模型生成对照笔记，凑齐 ≥2 份后再盲测（模型名默认隐藏，点「揭示模型」才显示）。";
+  } else if (isBlind) {
+    const left = versionCount - blindCompare.revealed.size;
     hint.textContent = left > 0
-      ? `同一课堂的 ${blindCompare.versions.length} 份笔记已随机匿名排布。先盲读对比，点「揭示模型」才能看到生成模型（还有 ${left} 份未揭示）。`
+      ? `同一课堂的 ${versionCount} 份笔记已随机匿名排布。先盲读对比，点「揭示模型」才能看到生成模型（还有 ${left} 份未揭示）。`
       : "全部模型已揭示。可点「重新洗牌」再测一轮，或切换到公开对比。";
+  } else if (versionCount < 2) {
+    hint.textContent = "公开对比：版本不足时可先在下方生成对照笔记。";
   } else {
     hint.textContent = "公开对比：直接显示各版本的生成模型，适合对照检查结构与细节差异。";
   }
 
   const preference = $("#blind-preference");
   preference.replaceChildren();
-  if (isBlind) {
+  if (isBlind && versionCount >= 2) {
     preference.classList.remove("hidden");
     const title = document.createElement("strong");
     title.textContent = "盲测偏好";
@@ -1470,7 +1620,14 @@ function renderBlindCompare() {
 
   const grid = $("#blind-grid");
   grid.replaceChildren();
-  grid.classList.toggle("compare", blindCompare.versions.length > 1);
+  grid.classList.toggle("compare", versionCount > 1);
+  if (!versionCount) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "暂无笔记版本。用上方「生成对照笔记」选择模型生成后，点「刷新版本」。";
+    grid.append(empty);
+    return;
+  }
   blindCompare.order.forEach((key, index) => {
     const version = blindVersionByKey(key);
     if (!version) return;
@@ -1950,6 +2107,7 @@ function showView(view, options = {}) {
   // Forward navigation starts at the top; explicit back actions keep the
   // previous scroll position (callers pass {keepScroll: true}).
   if (changed && !options.keepScroll) window.scrollTo(0, 0);
+  if (view !== "blindCompare") clearTimeout(blindRefreshTimer);
 }
 
 function normalizeProvider(item) {
@@ -3278,7 +3436,6 @@ function renderTalkDetail() {
   controls.replaceChildren();
   if (talkTab === "transcript") {
     controls.classList.add("hidden");
-    $("#talk-blind-compare").classList.add("hidden");
     const transcript = document.createElement("div");
     transcript.className = "transcript";
     transcript.textContent = currentTalk.transcript || "暂无转写文本";
@@ -3288,7 +3445,6 @@ function renderTalkDetail() {
     if (currentTalk.status === "uploading") {
       // 分片上传在后台跑：先给占位，进度由异步回调填入（render 是同步的）。
       controls.classList.add("hidden");
-      $("#talk-blind-compare").classList.add("hidden");
       root.innerHTML = `<div class="summary"><p>录音正在后台分片上传（约 4MB/片）…此页每 4 秒刷新一次，上传完成后会自动触发云端转写。</p><div class="talk-upload-progress"><div class="talk-upload-progress-bar"><div id="talk-detail-upload-fill" style="width:0%"></div></div><p class="meta" id="talk-detail-upload-text">正在读取进度…</p></div></div>`;
       fetchTalkUploadProgress(currentTalk.id).then((progress) => {
         if (!currentTalk || currentTalk.status !== "uploading") return;
@@ -3299,22 +3455,18 @@ function renderTalkDetail() {
       }).catch(() => {});
     } else if (currentTalk.status === "failed" && currentTalk.source === "upload") {
       controls.classList.add("hidden");
-      $("#talk-blind-compare").classList.add("hidden");
       root.innerHTML = `<div class="summary"><p>${escapeHtml(currentTalk.error || "处理失败，请重试")}</p><p>录音与已完成的转写会被复用，无需重新选择文件。</p><p><button id="talk-detail-retry-upload" class="primary" type="button">继续处理</button></p></div>`;
       $("#talk-detail-retry-upload").onclick = retryCurrentTalkUpload;
     } else if (currentTalk.status === "dispatching") {
       controls.classList.add("hidden");
-      $("#talk-blind-compare").classList.add("hidden");
       root.innerHTML = '<div class="summary"><p>录音已上传，正在启动云端转写…</p></div>';
     } else if (!versions.length && !String(currentTalk.transcript || "").trim()) {
       // 上传后云端处理尚未完成：和 iCourse 课次一样，转写+摘要都在
       // Actions 里跑，完成后自动同步，无需手动生成。
       controls.classList.add("hidden");
-      $("#talk-blind-compare").classList.add("hidden");
       root.innerHTML = `<div class="summary"><p>云端处理中…转写（与 iCourse 同款 ASR）完成后会自动生成笔记，约 15 秒刷新一次，无需手动操作。</p></div>`;
     } else if (!versions.length) {
       controls.classList.add("hidden");
-      $("#talk-blind-compare").classList.add("hidden");
       root.innerHTML = `<div class="summary">${renderMarkdown(currentTalk.summary)}</div>`;
     } else {
       if (!talkSelectedVersionKeys.size) talkSelectedVersionKeys.add(versions[0].key);
@@ -3363,8 +3515,6 @@ function renderTalkDetail() {
         });
         root.append(grid);
       }
-      const talkBlind = $("#talk-blind-compare");
-      if (talkBlind) talkBlind.classList.toggle("hidden", versions.length < 2);
     }
   }
   activateMath(root);
@@ -3727,9 +3877,21 @@ $("#course-data-actions").onclick = () => openDataActions(currentCourse).catch(e
 $("#detail-data-actions").onclick = () => openDataActions(currentCourse, currentLecture.sub_id).catch(error => message(error.message, true));
 $("#detail-blind-compare").onclick = () => openBlindCompare();
 $("#talk-blind-compare").onclick = () => openBlindCompare();
-$("#blind-compare-back").onclick = () => showView(blindCompare?.backView || "detail", {keepScroll: true});
+$("#blind-compare-back").onclick = () => {
+  clearTimeout(blindRefreshTimer);
+  showView(blindCompare?.backView || "detail", {keepScroll: true});
+};
 $("#blind-reshuffle").onclick = () => reshuffleBlindCompare();
 $("#blind-reveal-all").onclick = () => revealAllBlindVersions();
+$("#blind-generate-button").onclick = () => submitBlindGenerate();
+$("#blind-refresh-versions").onclick = async () => {
+  try {
+    await refreshBlindVersions();
+    message("已刷新版本列表。");
+  } catch (error) {
+    message(error.message, true);
+  }
+};
 document.querySelectorAll(".blind-mode").forEach((button) => {
   button.onclick = () => setBlindMode(button.dataset.blindMode);
 });

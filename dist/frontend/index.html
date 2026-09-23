@@ -107,7 +107,7 @@
       <section id="view-talk-detail" class="view-pane content-column hidden">
         <div class="view-heading compact">
           <div><p class="eyebrow-blue">本机讲座</p><h1 id="talk-title" title="双击改名">讲座</h1><p id="talk-subtitle" class="meta hidden"></p></div>
-          <div class="heading-actions"><button id="talk-blind-compare" class="hidden" type="button">盲测对比</button><button id="talk-back" type="button">全部讲座</button></div>
+          <div class="heading-actions"><button id="talk-blind-compare" type="button">盲测对比</button><button id="talk-back" type="button">全部讲座</button></div>
         </div>
         <div class="detail-tabs" role="tablist" aria-label="讲座内容">
           <button class="detail-tab talk-detail-tab active" type="button" role="tab" aria-selected="true" data-talk-tab="summary">摘要</button>
@@ -174,7 +174,7 @@
           <button class="detail-tab" type="button" role="tab" aria-selected="false" data-detail-tab="ppt">PPT OCR</button>
         </div>
         <div class="detail-actions">
-          <button id="detail-blind-compare" class="hidden" type="button">盲测对比</button>
+          <button id="detail-blind-compare" type="button">盲测对比</button>
           <button id="detail-data-actions" type="button">导出 / 删除本节</button>
         </div>
         <section id="summary-version-controls" class="summary-version-controls hidden" aria-label="笔记版本对比"></section>
@@ -201,6 +201,17 @@
           </div>
         </div>
         <p id="blind-hint" class="blind-hint"></p>
+        <section id="blind-generate" class="blind-generate" aria-label="生成对照版本">
+          <strong>用其他模型生成对照笔记</strong>
+          <p class="meta">版本不够时选一个模型重跑本篇；已有版本都会保留，完成后刷新即可盲测。会产生模型费用。</p>
+          <div class="blind-generate-row">
+            <select id="blind-model-select" aria-label="选择生成模型"></select>
+            <input id="blind-api-key" class="hidden" type="password" autocomplete="off" placeholder="输入所选供应商的 API Key" aria-label="API Key">
+            <button id="blind-generate-button" class="primary" type="button">生成对照笔记</button>
+            <button id="blind-refresh-versions" type="button">刷新版本</button>
+          </div>
+          <p id="blind-generate-hint" class="meta"></p>
+        </section>
         <div id="blind-preference" class="blind-preference hidden"></div>
         <div id="blind-grid" class="blind-grid"></div>
       </section>

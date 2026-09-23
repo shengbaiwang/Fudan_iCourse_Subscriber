@@ -1,4 +1,4 @@
-"""Approve recent owner-triggered Single Run jobs through GitHub's approval API."""
+"""Approve recent owner-triggered Single Run / iCourse Check jobs via GitHub's approval API."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -7,7 +7,10 @@ import time
 
 from .github_client import GitHubAPIError
 
-WORKFLOWS = {".github/workflows/single_run.yml"}
+# Daily iCourse Check (schedule + manual dispatch) and Single Run only.
+# Talk transcription, export, delete, and deploy stay manual on purpose.
+WORKFLOWS = {".github/workflows/single_run.yml", ".github/workflows/check.yml"}
+EVENTS = {"workflow_dispatch", "schedule"}
 
 
 def eligible(run, owner, repo, now):
@@ -20,7 +23,7 @@ def eligible(run, owner, repo, now):
         and run.get("status") == "completed"
         and run.get("conclusion") == "action_required"
         and run.get("run_attempt") == 1
-        and run.get("event") == "workflow_dispatch"
+        and run.get("event") in EVENTS
         and run.get("head_branch") == "main"
         and run.get("path") in WORKFLOWS
         and run.get("pull_requests") == []

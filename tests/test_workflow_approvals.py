@@ -50,9 +50,22 @@ class ApprovalsTest(unittest.TestCase):
                 reconcile(client, now=NOW)
                 client._request.assert_not_called()
 
-    def test_schedule_and_other_workflows_are_never_approved(self):
-        for change in [{'event': 'schedule'}, {'path': '.github/workflows/check.yml'},
-                       {'path': '.github/workflows/talk_transcribe.yml'}]:
+    def test_daily_icourse_check_dispatch_and_schedule_are_approved(self):
+        for change in [{'path': '.github/workflows/check.yml'},
+                       {'path': '.github/workflows/check.yml', 'event': 'schedule'},
+                       {'event': 'schedule'}]:
+            with self.subTest(change=change):
+                self.assertTrue(eligible({**RUN, **change}, 'owner', 'repo', NOW))
+                client = self.client(fresh={**RUN, **change})
+                self.assertEqual(reconcile(client, now=NOW)['approved'], [42])
+                client._request.assert_called_once()
+
+    def test_talk_and_unrelated_workflows_are_never_approved(self):
+        for change in [{'path': '.github/workflows/talk_transcribe.yml'},
+                       {'path': '.github/workflows/export.yml'},
+                       {'path': '.github/workflows/delete_course.yml'},
+                       {'path': '.github/workflows/deploy-frontend.yml'},
+                       {'event': 'pull_request_target'}, {'event': 'repository_dispatch'}]:
             self.assertFalse(eligible({**RUN, **change}, 'owner', 'repo', NOW))
             client = self.client(fresh={**RUN, **change})
             reconcile(client, now=NOW)

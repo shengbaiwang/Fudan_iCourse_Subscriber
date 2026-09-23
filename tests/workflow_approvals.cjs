@@ -25,8 +25,16 @@ function client({fresh=run, head='trusted', user='owner', denied=false} = {}) {
   const ok = client();
   assert.deepEqual(await reconcile(ok.request,'owner','repo',()=>true,now),{approved:[42],errors:[]});
   assert.deepEqual(ok.posts,['/repos/owner/repo/actions/runs/42/approve']);
-  for (const changes of [{event:'pull_request'},{event:'push'},{event:'schedule'},
-    {path:'.github/workflows/check.yml'},{path:'.github/workflows/talk_transcribe.yml'},
+  for (const changes of [{path:'.github/workflows/check.yml'},
+    {path:'.github/workflows/check.yml',event:'schedule'},{event:'schedule'}]) {
+    const fresh = {...run,...changes};
+    assert.equal(eligible(fresh,'owner','repo',now),true,JSON.stringify(changes));
+    const api = client({fresh});
+    assert.deepEqual(await reconcile(api.request,'owner','repo',()=>true,now),{approved:[42],errors:[]});
+    assert.equal(api.posts.length,1);
+  }
+  for (const changes of [{event:'pull_request'},{event:'push'},{event:'repository_dispatch'},
+    {path:'.github/workflows/talk_transcribe.yml'},
     {head_branch:'dev'},{actor:{login:'other'}},
     {triggering_actor:{login:'other'}},{repository:{full_name:'owner/other'}},{head_repository:null},
     {head_repository:{full_name:'outsider/repo'}},{pull_requests:[{}]},{pull_requests:null},

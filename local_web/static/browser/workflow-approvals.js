@@ -1,12 +1,13 @@
 /* GitHub approval only; never rerun a failed job or change repository policies. */
 (() => {
-  const workflows = new Set(['.github/workflows/single_run.yml']);
+  const workflows = new Set(['.github/workflows/single_run.yml', '.github/workflows/check.yml']);
+  const events = new Set(['workflow_dispatch', 'schedule']);
   function eligible(run, owner, repo, now) {
     const age = now - Date.parse(run.created_at);
     const same = name => typeof name === 'string' && name.toLowerCase() === `${owner}/${repo}`.toLowerCase();
     return Number.isSafeInteger(run.id) && run.id > 0 && run.status === 'completed'
       && run.conclusion === 'action_required' && run.run_attempt === 1
-      && run.event === 'workflow_dispatch' && run.head_branch === 'main'
+      && events.has(run.event) && run.head_branch === 'main'
       && workflows.has(run.path) && Array.isArray(run.pull_requests) && !run.pull_requests.length
       && same(run.repository?.full_name) && same(run.head_repository?.full_name)
       && [run.actor, run.triggering_actor].every(actor => actor?.login?.toLowerCase() === owner.toLowerCase())

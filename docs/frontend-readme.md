@@ -50,12 +50,13 @@ GitHub Token 需要 Contents Read、Actions Read and write；修改订阅/API Ke
 Secrets Read and write，模型配置需要 Variables Read and write。模型 API Key 在 Pages
 浏览器中通过 sealed-box 加密后提交到 GitHub。Secret 明文无法读回，空白 Key 表示保留。
 
-### 自动处理 Single Run 审批
+### 自动处理 Single Run / iCourse Check 审批
 
 控制台每 30 秒检查最近 100 条运行记录，自动提交符合条件的 GitHub 工作流批准。
-只批准当前登录的仓库所有者在 `main` 手动触发的 `single_run.yml`：必须是 24 小时内的任务，首次尝试在启动前被标记为
+只批准当前登录的仓库所有者在 `main` 触发的 `single_run.yml` 与 `check.yml`（含每日定时
+iCourse Check 与手动触发）：必须是 24 小时内的任务，首次尝试在启动前被标记为
 `action_required`，且提交仍与当前 `main` 一致。批准前会再次读取运行状态和主分支提交。
-不会批准定时检查、讲座转写、PR、其他人的任务、其他分支或旧提交，也不会自动重跑失败任务。
+不会批准讲座转写、导出/删除/部署、PR、其他人的任务、其他分支或旧提交，也不会自动重跑失败任务。
 
 本地服务保持运行且已有登录凭据时，不必开着浏览器；Pages 需要保持登录的标签页打开，
 浏览器挂起时可能延迟处理。沿用已有 Token 的 Actions write 权限，不新增密钥或更改仓库
