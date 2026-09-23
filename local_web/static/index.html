@@ -107,7 +107,7 @@
       <section id="view-talk-detail" class="view-pane content-column hidden">
         <div class="view-heading compact">
           <div><p class="eyebrow-blue">本机讲座</p><h1 id="talk-title" title="双击改名">讲座</h1><p id="talk-subtitle" class="meta hidden"></p></div>
-          <div class="heading-actions"><button id="talk-back" type="button">全部讲座</button></div>
+          <div class="heading-actions"><button id="talk-blind-compare" class="hidden" type="button">盲测对比</button><button id="talk-back" type="button">全部讲座</button></div>
         </div>
         <div class="detail-tabs" role="tablist" aria-label="讲座内容">
           <button class="detail-tab talk-detail-tab active" type="button" role="tab" aria-selected="true" data-talk-tab="summary">摘要</button>
@@ -173,9 +173,36 @@
           <button class="detail-tab" type="button" role="tab" aria-selected="false" data-detail-tab="transcript">转录</button>
           <button class="detail-tab" type="button" role="tab" aria-selected="false" data-detail-tab="ppt">PPT OCR</button>
         </div>
-        <div class="detail-actions"><button id="detail-data-actions" type="button">导出 / 删除本节</button></div>
+        <div class="detail-actions">
+          <button id="detail-blind-compare" class="hidden" type="button">盲测对比</button>
+          <button id="detail-data-actions" type="button">导出 / 删除本节</button>
+        </div>
         <section id="summary-version-controls" class="summary-version-controls hidden" aria-label="笔记版本对比"></section>
         <article id="detail-content" class="detail-card"></article>
+      </section>
+
+      <section id="view-blind-compare" class="view-pane content-wide hidden">
+        <div class="view-heading compact">
+          <div>
+            <p id="blind-compare-course" class="eyebrow-blue"></p>
+            <h1 id="blind-compare-title">盲测对比</h1>
+            <p id="blind-compare-subtitle" class="meta hidden"></p>
+          </div>
+          <div class="heading-actions"><button id="blind-compare-back" type="button">返回笔记</button></div>
+        </div>
+        <div class="blind-toolbar">
+          <div class="blind-modes" role="group" aria-label="对比模式">
+            <button type="button" class="blind-mode active" data-blind-mode="blind">盲测</button>
+            <button type="button" class="blind-mode" data-blind-mode="open">公开对比</button>
+          </div>
+          <div class="blind-actions">
+            <button id="blind-reshuffle" type="button">重新洗牌</button>
+            <button id="blind-reveal-all" type="button">揭示全部</button>
+          </div>
+        </div>
+        <p id="blind-hint" class="blind-hint"></p>
+        <div id="blind-preference" class="blind-preference hidden"></div>
+        <div id="blind-grid" class="blind-grid"></div>
       </section>
 
       <section id="view-search" class="view-pane content-column hidden">

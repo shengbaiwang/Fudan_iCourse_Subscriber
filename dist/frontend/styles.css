@@ -404,3 +404,38 @@ mark.user-highlight:hover { background:var(--hl-hover); }
 .model-directory-dialog .section-title { gap:12px; }
 .model-directory-dialog button { flex-shrink:0; white-space:nowrap; }
 .model-directory-list { max-height:45dvh; overflow:auto; margin:12px 0; }
+
+/* ── 盲测 / 公开对比 ── */
+.detail-actions { gap:8px; align-items:center; }
+.blind-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px; }
+.blind-modes { display:inline-flex; gap:4px; padding:3px; border:1px solid var(--line); border-radius:999px; background:var(--card); }
+.blind-mode { border:0; border-radius:999px; background:transparent; color:var(--muted); padding:6px 14px; font-size:12px; }
+.blind-mode.active { background:var(--blue-soft); color:var(--link-strong); border:1px solid var(--accent-border); }
+.blind-actions { display:flex; flex-wrap:wrap; gap:7px; }
+.blind-actions button { padding:7px 11px; font-size:12px; }
+.blind-hint { margin:0 0 14px; padding:11px 13px; border:1px solid var(--accent-border); border-radius:10px; background:var(--blue-soft); color:var(--link-strong); font-size:12px; line-height:1.55; }
+.blind-preference { margin:0 0 14px; padding:11px 13px; border:1px solid var(--line); border-radius:10px; background:var(--card); }
+.blind-preference>strong { display:block; color:var(--text-sub); font-size:12px; }
+.blind-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:14px; }
+.blind-panel { min-width:0; display:flex; flex-direction:column; padding:16px; border:1px solid var(--line); border-radius:12px; background:var(--card); }
+.blind-panel.preferred { border-color:var(--success); box-shadow:0 0 0 1px var(--ready-border); }
+.blind-panel-head { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:12px; }
+.blind-slot { display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; background:var(--subtle-bg); color:var(--text-strong); font-size:12px; font-weight:750; letter-spacing:.04em; }
+.blind-panel.preferred .blind-slot { background:var(--ready-bg); color:var(--success); }
+.blind-identity { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:6px; min-width:0; }
+.blind-identity .detail-model { margin-bottom:0; }
+.blind-identity .meta { margin:0; }
+.blind-reveal { padding:5px 9px; font-size:11px; white-space:nowrap; }
+.blind-panel .summary { flex:1; font-size:15px; line-height:1.85; }
+.blind-panel-foot { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:14px; padding-top:12px; border-top:1px solid var(--subtle-bg); }
+.blind-prefer { padding:6px 10px; font-size:12px; }
+.blind-prefer.active { background:var(--ready-bg); border-color:var(--ready-border); color:var(--success); }
+@media(max-width:700px) {
+  .blind-toolbar { align-items:stretch; flex-direction:column; }
+  .blind-modes { width:100%; }
+  .blind-mode { flex:1; }
+  .blind-actions button { flex:1; }
+  .blind-grid { grid-template-columns:minmax(0,1fr); }
+  .blind-panel-head { flex-direction:column; }
+  .blind-identity { justify-content:flex-start; }
+}
