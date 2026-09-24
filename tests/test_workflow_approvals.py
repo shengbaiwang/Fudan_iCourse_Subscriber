@@ -83,7 +83,33 @@ class ApprovalsTest(unittest.TestCase):
         result = reconcile(client, now=NOW)
         self.assertEqual(result['approved'], [])
         self.assertIn('403', result['errors'][0]['message'])
+        self.assertFalse(result['errors'][0]['transient'])
         self.assertEqual(client._request.call_count, 1)
+
+    def test_network_blip_is_friendly_transient_and_retries_soon(self):
+        identity = Mock(return_value='session')
+        service = WorkflowApprovals(Mock(), identity)
+        blip = GitHubAPIError(0, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred')
+        with patch('local_web.workflow_approvals.reconcile', side_effect=blip) as check:
+            first = service.check()
+            self.assertEqual(first['errors'], [{
+                'message': '网络连接 GitHub 失败，稍后自动重试', 'transient': True,
+            }])
+            # Transient failures must not wait out the 5-minute denial window.
+            service._next_check = 0
+            service.check()
+            self.assertEqual(check.call_count, 2)
+
+    def test_real_denial_still_throttles_for_five_minutes(self):
+        identity = Mock(return_value='session')
+        service = WorkflowApprovals(Mock(), identity)
+        with patch('local_web.workflow_approvals.reconcile',
+                   return_value={'approved': [], 'errors': [{'message': 'GitHub API 403', 'transient': False}]}) as check:
+            service.check()
+            first_next = service._next_check
+            service.check()
+            self.assertEqual(check.call_count, 1)
+            self.assertGreaterEqual(first_next, __import__('time').monotonic() + 290)
 
     def test_service_throttles_and_resets_after_logout(self):
         identity = Mock(return_value='session')

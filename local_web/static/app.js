@@ -3807,7 +3807,9 @@ async function checkWorkflowApprovals() {
   approvalPollBusy = true;
   try {
     const result = await api('/api/local/workflow-approvals', {method: 'POST'});
-    const error = result.errors?.map(item => item.message).join('; ') || "";
+    const errors = result.errors || [];
+    // Network blips self-heal on the next poll; only surface real GitHub denials.
+    const error = errors.every(item => item.transient) ? "" : errors.map(item => item.message).join('; ');
     if (error && error !== lastApprovalError) message(`自动批准暂未成功：${error}；可在自动化页查看任务。`, true);
     lastApprovalError = error;
     if (activeView === 'automation') await loadRuns();

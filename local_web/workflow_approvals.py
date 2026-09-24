@@ -11,6 +11,23 @@ from .github_client import GitHubAPIError
 # Talk transcription, export, delete, and deploy stay manual on purpose.
 WORKFLOWS = {".github/workflows/single_run.yml", ".github/workflows/check.yml"}
 EVENTS = {"workflow_dispatch", "schedule"}
+# Network blips (TLS EOF, DNS, timeout) are retried often; real GitHub
+# denials back off long enough for the user to notice and act.
+TRANSIENT_RETRY_SECONDS = 30
+DENIAL_RETRY_SECONDS = 300
+
+
+def _error_entry(exc: Exception, run_id=None) -> dict:
+    """Normalize a failure for the console; mark network blips as transient."""
+    transient = isinstance(exc, GitHubAPIError) and exc.status == 0
+    if transient:
+        message = "网络连接 GitHub 失败，稍后自动重试"
+    else:
+        message = str(exc) or exc.__class__.__name__
+    entry = {"message": message, "transient": transient}
+    if run_id is not None:
+        entry["id"] = run_id
+    return entry
 
 
 def eligible(run, owner, repo, now):
@@ -59,7 +76,7 @@ def reconcile(client, can_approve=lambda: True, now=None):
             client._request(f"{base}/actions/runs/{run['id']}/approve", method="POST")
             result["approved"].append(run["id"])
         except GitHubAPIError as exc:
-            result["errors"].append({"id": row["id"], "message": str(exc)})
+            result["errors"].append(_error_entry(exc, row["id"]))
     return result
 
 
@@ -87,8 +104,15 @@ class WorkflowApprovals:
             except Exception as exc:
                 # A logout race or malformed API response must not kill the
                 # background worker; retain the error for the console to show.
-                self._result = {"approved": [], "errors": [{"message": str(exc)}]}
-            self._next_check = time.monotonic() + (300 if self._result["errors"] else 30)
+                self._result = {"approved": [], "errors": [_error_entry(exc)]}
+            errors = self._result.get("errors") or []
+            if not errors:
+                delay = TRANSIENT_RETRY_SECONDS
+            elif all(entry.get("transient") for entry in errors):
+                delay = TRANSIENT_RETRY_SECONDS
+            else:
+                delay = DENIAL_RETRY_SECONDS
+            self._next_check = time.monotonic() + delay
             return self._result
 
     def start(self):

@@ -31,12 +31,20 @@
       return body ? JSON.parse(body) : null;
     };
     const task = window.ICourseWorkflowApprovals.reconcile(request, owner, repo, () => credentials === session)
-      .catch(error => ({approved: [], errors: [{message: error.message}]}));
+      .catch(error => {
+        const transient = error.name === 'TypeError' || /network|fetch|Failed to fetch/i.test(error.message || '');
+        return {approved: [], errors: [{
+          message: transient ? '网络连接 GitHub 失败，稍后自动重试' : error.message,
+          transient,
+        }]};
+      });
     approvalCheck = task;
     const result = await task;
     if (credentials === session) {
       approvalResult = result;
-      nextApprovalCheck = Date.now() + (result.errors.length ? 300000 : 30000);
+      const errors = result.errors || [];
+      const delay = !errors.length || errors.every(item => item.transient) ? 30000 : 300000;
+      nextApprovalCheck = Date.now() + delay;
     }
     if (approvalCheck === task) approvalCheck = null;
     return credentials === session ? result : {approved: [], errors: []};

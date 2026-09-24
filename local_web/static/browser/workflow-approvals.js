@@ -27,7 +27,10 @@
         if (!head || run.head_sha !== head || !canApprove()) continue;
         await request(`${base}/actions/runs/${run.id}/approve`, {method: 'POST'});
         result.approved.push(run.id);
-      } catch (error) { result.errors.push({id: row.id, message: error.message}); }
+      } catch (error) {
+        const transient = error.name === 'TypeError' || /network|fetch|Failed to fetch/i.test(error.message || '');
+        result.errors.push({id: row.id, message: transient ? '网络连接 GitHub 失败，稍后自动重试' : error.message, transient});
+      }
     }
     return result;
   }
