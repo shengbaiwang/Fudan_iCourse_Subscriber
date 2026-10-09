@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import certifi
-from nacl.public import PublicKey, SealedBox
 
 
 API_ROOT = "https://api.github.com"
@@ -279,6 +278,8 @@ class GitHubClient:
 
     def upsert_repository_secret(self, name: str, value: str) -> None:
         """Encrypt a value with GitHub's public key and create/update Secret."""
+        from nacl.public import PublicKey, SealedBox
+
         public = self.actions_public_key()
         key = PublicKey(base64.b64decode(public["key"]))
         encrypted = SealedBox(key).encrypt(value.encode("utf-8"))

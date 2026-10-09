@@ -99,10 +99,6 @@ class LectureRunner:
             self._schedule_next(next_info)
             self._db.mark_processed(sub_id)
             self._db.clear_error(sub_id)
-            # The return value feeds the email batch — suppress it when
-            # this summary already went out so it isn't re-sent.
-            if existing.get("emailed_at"):
-                return None
             return existing["summary"]
 
         # ── Phase B — submit PPT pipeline (fetch + dedup, no OCR yet) ──

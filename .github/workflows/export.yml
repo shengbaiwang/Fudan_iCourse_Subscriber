@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       export_type:
-        description: "Choose export type,if use HTML email,there will be no attachment, just the email body."
+        description: "File format to download from this run's Artifacts section"
         type: choice
         options:
           - HTML
@@ -89,6 +89,7 @@ jobs:
           STUID: ${{ secrets.STUID }}
           UISPSW: ${{ secrets.UISPSW }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          # Only needed to decrypt databases created before the v2 key format.
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
         run: |
           if [ -f data/sharded/icourse-index.enc ]; then
@@ -123,9 +124,6 @@ jobs:
 
       - name: Export course summaries
         env:
-          SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
           EXPORT_COURSE_ID: ${{ inputs.course_id }}
           EXPORT_SUB_IDS: ${{ inputs.sub_ids }}
         run: |
@@ -141,7 +139,15 @@ jobs:
               ;;
           esac
           if [ -n "$EXPORT_SUB_IDS" ]; then
-            python scripts/export_course.py --course-id "$EXPORT_COURSE_ID" --sub-ids "$EXPORT_SUB_IDS" $EXPORT_FLAG
+            python scripts/export_course.py --course-id "$EXPORT_COURSE_ID" --sub-ids "$EXPORT_SUB_IDS" --output-dir exports $EXPORT_FLAG
           else
-            python scripts/export_course.py --course-id "$EXPORT_COURSE_ID" $EXPORT_FLAG
+            python scripts/export_course.py --course-id "$EXPORT_COURSE_ID" --output-dir exports $EXPORT_FLAG
           fi
+
+      - name: Upload exported notes for download
+        uses: actions/upload-artifact@v4
+        with:
+          name: course-notes-${{ github.run_id }}
+          path: exports/
+          if-no-files-found: error
+          retention-days: 7

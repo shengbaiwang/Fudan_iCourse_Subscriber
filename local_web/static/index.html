@@ -31,6 +31,7 @@
         <button class="nav-button" type="button" data-capability="talks" data-view="talks">讲座</button>
         <button class="nav-button" type="button" data-view="search">搜索</button>
         <button class="nav-button" type="button" data-view="subscriptions">订阅</button>
+        <button class="nav-button" type="button" data-view="run">运行</button>
         <button class="nav-button" type="button" data-view="settings">设置</button>
       </nav>
       <div class="header-actions">
@@ -203,11 +204,11 @@
         <p id="blind-hint" class="blind-hint"></p>
         <section id="blind-generate" class="blind-generate" aria-label="生成对照版本">
           <strong>用其他模型生成对照笔记</strong>
-          <p class="meta">版本不够时选一个模型重跑本篇；已有版本都会保留，完成后刷新即可盲测。会产生模型费用。</p>
+          <p class="meta">可一次勾选多个模型批量生成对照；已有版本都会保留。会产生模型费用。</p>
+          <div id="blind-model-list" class="blind-model-list" role="group" aria-label="选择生成模型"></div>
+          <div id="blind-api-keys" class="blind-api-keys hidden"></div>
           <div class="blind-generate-row">
-            <select id="blind-model-select" aria-label="选择生成模型"></select>
-            <input id="blind-api-key" class="hidden" type="password" autocomplete="off" placeholder="输入所选供应商的 API Key" aria-label="API Key">
-            <button id="blind-generate-button" class="primary" type="button">生成对照笔记</button>
+            <button id="blind-generate-button" class="primary" type="button" disabled>生成所选对照（0）</button>
             <button id="blind-refresh-versions" type="button">刷新版本</button>
           </div>
           <p id="blind-generate-hint" class="meta"></p>
@@ -235,13 +236,6 @@
 
       <section id="view-subscriptions" class="view-pane content-wide hidden">
         <div class="view-heading"><div><h1>订阅</h1><p class="muted">在课程目录点击“订阅”即生效，无需再保存。</p></div></div>
-        <details class="settings-card">
-          <summary>单次运行（不改变订阅）</summary>
-          <p class="muted">在下方目录点“单次运行”加入列表，也可以输入课程 ID。</p>
-          <label>课程 ID<input id="single-run-ids" placeholder="多个 ID 用逗号分隔"></label>
-          <label class="check-option"><input id="single-run-official" type="checkbox"> 使用官方转录</label>
-          <button id="single-run-button" class="primary" type="button">运行这些课程</button>
-        </details>
         <div class="subscription-toolbar">
           <select id="subscription-term" aria-label="学期筛选"><option value="">全部学期</option></select>
           <input id="subscription-query" type="search" placeholder="搜索课程、教师或课程号" aria-label="搜索课程、教师或课程号" autocomplete="off">
@@ -263,38 +257,56 @@
           <section class="subscription-panel">
             <div class="section-title"><h2>课程目录</h2></div>
             <div id="subscription-catalog" class="subscription-list empty">正在读取本地课程目录。</div>
+            <div class="subscription-catalog-footer">
+              <p id="subscription-catalog-status" class="meta" role="status" aria-live="polite"></p>
+              <button id="subscription-catalog-more" type="button" class="hidden">加载更多课程</button>
+            </div>
           </section>
         </div>
       </section>
 
-      <section id="view-rerun" class="view-pane content-column hidden">
-        <div class="view-heading">
-          <div><h1>重跑</h1><p class="muted">勾选要用新模型重跑的课程；展开课程可只选部分课次。仅处理有转录的课次，单次最多 20 节。</p></div>
-        </div>
-        <div class="rerun-toolbar">
-          <select id="rerun-page-model-select" aria-label="选择重跑模型"></select>
-          <button id="rerun-page-submit" class="primary" type="button" disabled>重跑已选</button>
-        </div>
-        <div id="rerun-course-list" class="rerun-course-list empty">正在读取课程…</div>
-      </section>
-
-      <section id="view-automation" class="view-pane content-column hidden">
-        <div class="view-heading"><div><h1>自动化</h1></div></div>
-        <section class="runs-card quick-actions-card">
-          <div class="quick-actions">
-            <button id="run-button" type="button">立即检查课程</button>
-            <button id="backfill-titles-button" type="button">补齐笔记标题</button>
-            <button data-capability="obsidian" id="obsidian-button" type="button">打开同步页面</button>
+      <section id="view-run" class="view-pane content-wide hidden">
+        <div class="view-heading"><div><h1>运行</h1><p class="muted">选择运行位置、课程和模型，按队列顺序处理。新笔记自动出现在资料库中。</p></div><span id="run-live-status" class="live-indicator" role="status">自动更新已开启</span></div>
+        <div class="run-layout">
+          <section class="settings-card run-config" aria-label="运行设置">
+            <h2>运行设置</h2>
+            <label>运行位置<select id="run-target"><option value="github">GitHub Actions</option><option value="local">本地电脑</option></select></label>
+            <p id="run-target-hint" class="meta"></p>
+            <a id="run-local-link" class="hidden" href="http://127.0.0.1:8765/#run" target="_blank" rel="noreferrer">打开本地控制台</a>
+            <label>任务<select id="run-kind"><option value="process">处理新课次</option><option value="rerun">重新生成笔记</option><option value="titles">补齐笔记标题</option></select></label>
+            <p id="run-kind-hint" class="meta"></p>
+            <label>生成模型<select id="rerun-page-model-select" aria-label="选择运行模型"></select></label>
+            <label id="run-key-field" class="hidden">本次运行的 API Key<input id="run-api-key" type="password" autocomplete="off" placeholder="已存本机钥匙串时可留空"><span class="field-hint">仅交给本地任务，不写入 GitHub。</span></label>
+            <label>课内优先级<select id="run-lecture-order"><option value="newest">最新课次优先</option><option value="oldest">最早课次优先</option><option value="api">沿用平台顺序</option></select></label>
+            <label class="check-option"><input id="single-run-official" type="checkbox"> 优先使用官方转录</label>
+            <details class="run-manual"><summary>通过课程 ID 添加</summary><label>课程 ID<input id="single-run-ids" placeholder="多个 ID 用逗号分隔"></label><button id="single-run-button" type="button">加入队列</button></details>
+            <button id="rerun-page-submit" class="primary" type="button" disabled>开始运行</button>
+            <p class="meta">会产生所选模型的 API 费用。本地运行需保持本地服务开启。</p>
+          </section>
+          <div class="run-selection">
+            <section class="runs-card">
+              <div class="section-title"><h2>运行队列</h2><button id="run-button" type="button">选择订阅课程</button></div>
+              <p class="meta">上方课程先处理；↑ ↓ 调整顺序。顺序变更用于下次提交。</p>
+              <div id="run-queue" class="run-queue empty">从下方选择课程或课次。</div>
+              <button id="run-save-priority" type="button">保存订阅课程的每日优先级</button>
+              <p id="run-priority-status" class="meta" role="status"></p>
+            </section>
+            <section class="runs-card">
+              <div class="section-title"><h2>选择课程与课次</h2><button id="run-clear-selection" type="button">清空选择</button></div>
+              <input id="run-course-query" type="search" placeholder="筛选课程名称或 ID" aria-label="筛选运行课程">
+              <div id="rerun-course-list" class="rerun-course-list empty">正在读取课程…</div>
+            </section>
           </div>
-        </section>
-        <section class="runs-card"><div class="section-title"><h2>最近运行</h2><button id="refresh-runs-button" type="button">刷新</button></div><div id="runs" class="runs-list empty">正在读取运行记录…</div></section>
+        </div>
+        <section class="runs-card run-history"><div class="section-title"><h2>本地运行</h2><span class="meta">每 3 秒自动更新</span></div><div id="local-runs" class="runs-list empty">暂无本地任务。</div></section>
+        <section class="runs-card run-history"><div class="section-title"><h2>GitHub Actions</h2><button id="refresh-runs-button" type="button">刷新状态</button></div><div id="runs" class="runs-list empty">正在读取运行记录…</div><div class="quick-actions"><button id="backfill-titles-button" type="button">设置标题补齐任务</button><button data-capability="obsidian" id="obsidian-button" type="button">打开 Obsidian 同步</button></div></section>
       </section>
 
       <section id="view-settings" class="view-pane content-column hidden">
         <div class="view-heading"><div><h1>设置</h1></div></div>
         <section class="settings-card"><h2>当前连接</h2><p id="settings-repository" class="mono-value">—</p><div class="settings-actions"><button id="configure-button" type="button">重新配置会话</button><button id="forget-credentials-button" class="danger" type="button">忘记本机登录</button></div></section>
         <section class="settings-card"><h2>管理</h2><div class="settings-actions"><button id="model-button" class="primary" type="button">打开模型管理</button><button data-capability="obsidian" id="settings-obsidian-button" type="button">打开 Obsidian 同步</button></div></section>
-        <section class="settings-card"><h2>工具</h2><div class="settings-actions"><button id="settings-rerun-button" type="button">重跑笔记</button><button id="settings-automation-button" type="button">自动化运行</button></div></section>
+        <section class="settings-card"><h2>工具</h2><div class="settings-actions"><button id="settings-rerun-button" type="button">重新生成笔记</button><button id="settings-automation-button" type="button">运行与进度</button></div></section>
       </section>
 
       <section id="model-management" class="view-pane content-wide hidden" aria-labelledby="model-management-title">
@@ -334,7 +346,8 @@
     <button class="nav-button" type="button" data-capability="talks" data-view="talks">讲座</button>
     <button class="nav-button" type="button" data-view="search">搜索</button>
     <button class="nav-button" type="button" data-view="subscriptions">订阅</button>
-    <button class="nav-button" type="button" data-view="settings">设置</button>
+    <button class="nav-button" type="button" data-view="run">运行</button>
+        <button class="nav-button" type="button" data-view="settings">设置</button>
   </nav>
   <!-- 课程分类抽屉（移动端）：放在 .view-pane 之外，避免其入场 transform
        让 position:fixed 相对视图容器定位。 -->
@@ -366,6 +379,7 @@
     <p class="muted">导出由 GitHub Actions 生成并发送至已配置邮箱。删除会清除远端对应资料；运行完成后检查更新。</p>
     <label class="check-option"><input id="data-actions-all" type="checkbox" checked> 整门课程（取消后选择课次）</label>
     <div id="data-actions-lectures" class="data-actions-lectures"></div>
+    <p class="muted">导出完成后，在自动化页打开运行记录，从 Artifacts 下载 PDF、Markdown 或 HTML 文件；文件保留 7 天。</p>
     <div class="heading-actions"><select id="data-export-type" aria-label="导出格式"><option>PDF</option><option>Markdown</option><option>HTML</option></select><button id="data-export-button" class="primary" type="button">导出</button><button id="data-delete-button" class="danger" type="button">删除所选资料</button></div>
   </dialog>
   <script src="runtime-config.js"></script>

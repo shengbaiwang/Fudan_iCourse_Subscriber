@@ -14,6 +14,8 @@ to agree on what tables and columns exist.
 from __future__ import annotations
 
 
+# Keep the historical emailed_at column so old shards and merge scripts retain
+# their shape. It is no longer read or written by the processing pipeline.
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS courses (
     course_id TEXT PRIMARY KEY,
@@ -32,7 +34,7 @@ CREATE TABLE IF NOT EXISTS lectures (
     FOREIGN KEY (course_id) REFERENCES courses(course_id)
 );
 -- A lecture's current summary remains on ``lectures`` for compatibility
--- with email/export.  This table keeps EVERY rerun as its own row — the
+-- with reading/export.  This table keeps EVERY rerun as its own row — the
 -- primary key includes ``generated_at``, so re-running with the same model
 -- appends a new version instead of overwriting the previous one.
 CREATE TABLE IF NOT EXISTS summary_versions (

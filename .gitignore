@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .venv-web/
+.venv-course/
+work/local-course-*/
 .env
 data/*
 !data/icourse.db.enc
@@ -9,8 +11,10 @@ data/*
 tests/
 !tests/
 !tests/test_local_web.py
+!tests/test_note_exports.py
 temp/
 # ASR models (downloaded at runtime)
+exports/
 sherpa-onnx-sense-voice-*/
 sherpa-onnx-fire-red-*/
 sherpa-onnx-zipformer-*/
@@ -46,6 +50,7 @@ docs/*
 !docs/*.png
 !docs/frontend-readme.md
 !docs/local-web-console.md
+!docs/local-course-4048-plan.md
 !docs/asr-qwen3-comparison-2026-09-20.md
 docs/specs/
 *.mp3

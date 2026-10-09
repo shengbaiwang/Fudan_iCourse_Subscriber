@@ -8,7 +8,7 @@ import ipaddress
 import threading
 import webbrowser
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -24,6 +24,8 @@ from .provider_test import ProviderTestError, test_provider
 from .provider_models import ModelDirectoryError, fetch_provider_models
 from .talk_cloud import TalkCloudSync
 from .workflow_approvals import WorkflowApprovals
+from .runs import LocalRuns, LocalRunBusy
+from .api_keychain import LocalAPIKeychain
 from .talks import (
     MAX_AUDIO_BYTES,
     TALK_AUDIO_BRANCH,
@@ -48,6 +50,7 @@ from .state import (
 )
 from src.runtime.config import DEFAULT_MODEL_PROVIDERS
 from src.runtime.model_config import config_json, validate_model_config
+from src.runtime.run_order import ordered_ids, ordered_lectures
 
 
 ALLOWED_WORKFLOWS = {
@@ -145,6 +148,24 @@ class SummaryBatchRerunRequest(SummaryRerunRequest):
     course_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
+class RunRequest(BaseModel):
+    target: Literal["local", "github"] = "github"
+    kind: Literal["process", "rerun", "titles"] = "process"
+    course_ids: list[str] = Field(default_factory=list, max_length=500)
+    sub_ids: list[str] = Field(default_factory=list, max_length=20)
+    priority_course_ids: list[str] = Field(default_factory=list, max_length=500)
+    lecture_order: Literal["oldest", "newest", "api"] = "newest"
+    provider: str = Field(default="", max_length=50)
+    model: str = Field(default="", max_length=200)
+    api_key: SecretStr = SecretStr("")
+    use_official_transcript: bool = False
+
+
+class RunPreferencesRequest(BaseModel):
+    course_ids: list[str] = Field(max_length=500)
+    lecture_order: Literal["oldest", "newest", "api"] = "newest"
+
+
 class TalkCreateRequest(BaseModel):
     title: str = Field(default="", max_length=100)
     transcript: str = Field(min_length=1, max_length=200_000)
@@ -171,6 +192,7 @@ def create_app(
     db = database or DatabaseManager()
     talks = talk_store or TalkStore()
     jobs = talk_jobs or TalkJobs(talks)
+    local_runs = LocalRuns(db)
 
     def _upload_client() -> GitHubClient:
         return client()
@@ -189,6 +211,7 @@ def create_app(
         try:
             yield
         finally:
+            local_runs.close()
             approvals.close()
             cloud.close()
 
@@ -207,8 +230,10 @@ def create_app(
     app.state.talk_uploads = uploads
     app.state.talk_cloud = cloud
     app.state.workflow_approvals = approvals
+    app.state.local_runs = local_runs
     app.state.obsidian = ObsidianSyncService()
     atexit.register(db.close)
+    atexit.register(local_runs.close)
     if runtime.credentials:
         try:
             db.unlock_persistent(runtime.credentials)
@@ -294,6 +319,8 @@ def create_app(
 
     @app.post("/api/local/configure")
     async def configure(payload: ConfigureRequest) -> dict[str, Any]:
+        if any(job["status"] in {"queued", "in_progress"} for job in local_runs.list()):
+            raise HTTPException(status_code=409, detail="请先结束本地任务，再切换连接")
         settings = RepositorySettings(
             owner=payload.owner.strip(),
             repo=payload.repo.strip(),
@@ -330,6 +357,8 @@ def create_app(
 
     @app.post("/api/local/credentials/forget")
     async def forget_credentials() -> dict[str, bool]:
+        if any(job["status"] in {"queued", "in_progress"} for job in local_runs.list()):
+            raise HTTPException(status_code=409, detail="请先结束本地任务，再退出连接")
         try:
             await run_in_threadpool(runtime.forget_remembered_credentials)
         except OSError as exc:
@@ -637,12 +666,12 @@ def create_app(
         return {"course_ids": course_ids, "courses": courses, "source": source}
 
     @app.get("/api/local/subscription-catalog")
-    async def subscription_catalog(q: str = "", term: str = "", limit: int = 100):
+    async def subscription_catalog(q: str = "", term: str = "", limit: int = 100, page: int = 1):
         local_db = require_db()
         return {
             "terms": await run_in_threadpool(local_db.subscription_terms),
-            "courses": await run_in_threadpool(
-                local_db.subscription_catalog, q, term, limit
+            **await run_in_threadpool(
+                local_db.subscription_catalog, q, term, limit, page
             ),
         }
 
@@ -783,6 +812,123 @@ def create_app(
         return await dispatch_summary_rerun(
             payload.sub_ids, payload.course_ids, payload.provider, payload.model
         )
+
+    @app.get("/api/local/run-capabilities")
+    async def run_capabilities():
+        result = await run_in_threadpool(local_runs.capabilities)
+        return {**result, "github": True}
+
+    @app.get("/api/local/runs")
+    async def run_jobs():
+        return {"jobs": local_runs.list()}
+
+    @app.post("/api/local/runs/{job_id}/cancel")
+    async def cancel_local_run(job_id: str):
+        client()
+        try:
+            return await run_in_threadpool(local_runs.cancel, job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/local/run-preferences")
+    async def run_preferences():
+        state = await subscriptions()
+        try:
+            order = await run_in_threadpool(client().repository_variable, "LECTURE_ORDER")
+        except GitHubAPIError:
+            order = "api"
+        return {"course_ids": state["course_ids"], "lecture_order": order or "api"}
+
+    @app.put("/api/local/run-preferences")
+    async def save_run_preferences(payload: RunPreferencesRequest):
+        # Reordering must never silently unsubscribe a course.
+        current = await subscriptions()
+        try:
+            values = ordered_ids(payload.course_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if set(values) != set(current["course_ids"]):
+            raise HTTPException(status_code=409, detail="订阅已变化，请重新打开运行页面后再保存顺序")
+        await save_subscriptions(SubscriptionRequest(course_ids=values))
+        try:
+            await run_in_threadpool(client().upsert_repository_variable, "LECTURE_ORDER", payload.lecture_order)
+        except GitHubAPIError as exc:
+            raise HTTPException(status_code=502, detail=f"课程顺序已保存，课次顺序未保存：{exc}") from exc
+        return {"course_ids": values, "lecture_order": payload.lecture_order}
+
+    @app.post("/api/local/runs")
+    async def start_run(payload: RunRequest):
+        gh = client()
+        try:
+            courses = ordered_ids(payload.course_ids)
+            selected = ordered_ids(payload.sub_ids)
+            priority = ordered_ids(payload.priority_course_ids)
+            rank = {cid: i for i, cid in enumerate(priority)}
+            courses.sort(key=lambda cid: rank.get(cid, len(rank)))
+            if payload.kind == "rerun":
+                local_db = require_db()
+                for cid in courses:
+                    selected.extend(await run_in_threadpool(local_db.rerunnable_lecture_ids, cid))
+                selected = list(dict.fromkeys(selected))
+                rows = []
+                for sid in selected:
+                    row = await run_in_threadpool(local_db.lecture, sid)
+                    if not row or not str(row.get("transcript") or "").strip():
+                        raise ValueError(f"课次没有可用转录：{sid}")
+                    rows.append(row)
+                rows = ordered_lectures(rows, payload.lecture_order)
+                rows.sort(key=lambda row: rank.get(str(row["course_id"]), len(rank)))
+                selected = [str(row["sub_id"]) for row in rows]
+                if not selected or len(selected) > 20:
+                    raise ValueError("重新生成笔记需选择 1–20 个有转录的课次")
+            elif not courses:
+                raise ValueError("请选择课程，或输入要运行的课程 ID")
+            try:
+                raw = await run_in_threadpool(gh.repository_variable, "MODEL_PROVIDERS_JSON")
+            except GitHubAPIError:
+                if payload.target != "local":
+                    raise
+                raw = runtime.model_store.load()
+            document = validate_model_config(raw or DEFAULT_MODEL_PROVIDERS)
+            provider = next((p for p in document["providers"] if p["name"] == payload.provider and p["enabled"]), None)
+            if not provider or payload.model not in provider["models"]:
+                raise ValueError("请选择已启用的模型")
+            if payload.target == "github":
+                secrets = await run_in_threadpool(gh.repository_secret_names)
+                if provider["api_key_env"] not in secrets:
+                    raise ValueError("该模型未配置 GitHub Secret，请先在模型与 API 中保存")
+                inputs = {"course_ids": ",".join(courses), "lecture_order": payload.lecture_order,
+                          "summary_provider": payload.provider, "summary_model": payload.model,
+                          "use_official_transcript": str(payload.use_official_transcript).lower()}
+                if payload.kind == "rerun":
+                    inputs["resummarize_sub_ids"] = ",".join(selected)
+                if payload.kind == "titles":
+                    inputs["backfill_titles"] = "true"
+                await run_in_threadpool(gh.dispatch_workflow, "single_run.yml", ref="main", inputs=inputs)
+                return {"ok": True, "target": "github", "count": len(selected) if payload.kind == "rerun" else len(courses)}
+            capabilities = await run_in_threadpool(local_runs.capabilities)
+            if not capabilities["summary_ready"] or payload.kind == "process" and not capabilities["process_ready"]:
+                missing = capabilities["missing"] + (["ASR 权重"] if payload.kind == "process" and not capabilities.get("models_ready") else [])
+                raise ValueError("本地运行环境未就绪，请安装 requirements-course.txt 及 ASR 权重；缺少：" + ", ".join(missing))
+            key = payload.api_key.get_secret_value().strip()
+            if not key:
+                key = await run_in_threadpool(LocalAPIKeychain().load, provider)
+            if not key:
+                import os
+                key = os.environ.get(provider["api_key_env"], "")
+            if not key:
+                raise ValueError("本地无法读取 GitHub Secret，请输入该供应商的 API Key（仅本次运行使用）")
+            request = {"kind": payload.kind, "course_ids": courses, "sub_ids": selected,
+                       "lecture_order": payload.lecture_order, "provider": payload.provider,
+                       "model": payload.model, "use_official_transcript": payload.use_official_transcript}
+            job = local_runs.start(request, runtime.credentials, document, {provider["api_key_env"]: key})
+            return {"ok": True, "target": "local", "job": job}
+        except LocalRunBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except GitHubAPIError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     # ── Talks: local-only uploaded/pasted lectures ──────────────────────
     # Independent from the course library (which mirrors the data branch);

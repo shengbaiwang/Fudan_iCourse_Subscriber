@@ -118,6 +118,8 @@ class DatabaseManager:
         )
         self.persistent_db_path = self.library_dir / "icourse.db.enc"
         self.persistent_state_path = self.library_dir / "icourse.db-state.json"
+        self.overlay_path = self.library_dir / "local-notes.db.enc"
+        self.revision = 0
         self._temp_dir = Path(tempfile.mkdtemp(prefix="icourse-local-web-"))
         try:
             os.chmod(self._temp_dir, 0o700)
@@ -188,6 +190,24 @@ class DatabaseManager:
         temp.replace(path)
         return path, True
 
+    def accept_run_note(self, source: Path, sub_id: str, credentials: RuntimeCredentials) -> None:
+        """Make a finished local note visible and durable before the next one."""
+        from .note_merge import merge_note
+        with self._lock:
+            overlay = self._temp_dir / "local-notes.db"
+            password = derive_new_password(credentials.stuid, credentials.uispsw)
+            if not overlay.is_file() and self.overlay_path.is_file():
+                overlay.write_bytes(decrypt(self.overlay_path.read_bytes(), password))
+            merge_note(source, overlay, sub_id, self._temp_dir)
+            merge_note(source, self.db_path, sub_id, self._temp_dir)
+            self.library_dir.mkdir(parents=True, exist_ok=True)
+            temporary = self.overlay_path.with_suffix(".next")
+            temporary.write_bytes(encrypt(overlay.read_bytes(), password))
+            os.chmod(temporary, 0o600)
+            temporary.replace(self.overlay_path)
+            self._persist_encrypted(credentials)
+            self.revision += 1
+
     def sync(
         self,
         client: GitHubClient,
@@ -228,7 +248,15 @@ class DatabaseManager:
 
             next_db = self._temp_dir / "icourse.next.db"
             reassemble_database(index, str(shard_dir), str(next_db), password)
+            # Local results survive future cloud refreshes and restarts.
+            # Newer remote summaries still win; historical versions are unioned.
+            if self.overlay_path.is_file():
+                from .note_merge import merge_local_notes
+                overlay = self._temp_dir / "local-notes.db"
+                overlay.write_bytes(decrypt(self.overlay_path.read_bytes(), password))
+                merge_local_notes(overlay, next_db)
             next_db.replace(self.db_path)
+            self.revision += 1
             self.commit_sha = manifest.commit_sha
             self._persist_encrypted(credentials)
             return {
@@ -265,6 +293,7 @@ class DatabaseManager:
             ).fetchone()[0]
         return {
             "commit_sha": self.commit_sha,
+            "revision": self.revision,
             "courses": courses,
             "lectures": lectures,
             "ready": ready,
@@ -641,9 +670,11 @@ class DatabaseManager:
             return [str(row[0]) for row in rows]
 
     def subscription_catalog(
-        self, query: str = "", term: str = "", limit: int = 100
-    ) -> list[dict[str, Any]]:
-        """Search the course catalog without loading its full contents into JS."""
+        self, query: str = "", term: str = "", limit: int = 100, page: int = 1
+    ) -> dict[str, Any]:
+        """Page through every match without loading the full catalog into JS."""
+        page = max(1, page)
+        page_size = max(1, min(limit, 200))
         needle = f"%{query.strip()}%"
         clauses = [
             "(title LIKE ? OR teacher LIKE ? OR dept LIKE ? OR course_id LIKE ?)",
@@ -652,19 +683,28 @@ class DatabaseManager:
         if term.strip():
             clauses.append("term = ?")
             params.append(term.strip())
-        params.append(max(1, min(limit, 200)))
+        where = ' AND '.join(clauses)
         sql = f"""
             SELECT course_id, term, title, teacher, dept
             FROM all_courses
-            WHERE {' AND '.join(clauses)}
+            WHERE {where}
             ORDER BY term DESC, title COLLATE NOCASE, course_id
-            LIMIT ?
+            LIMIT ? OFFSET ?
         """
         with closing(self._connect()) as db:
             try:
-                return [dict(row) for row in db.execute(sql, params)]
+                total = db.execute(
+                    f"SELECT COUNT(*) FROM all_courses WHERE {where}", params
+                ).fetchone()[0]
+                courses = [dict(row) for row in db.execute(
+                    sql, [*params, page_size, (page - 1) * page_size]
+                )]
             except sqlite3.OperationalError:
-                return []
+                total, courses = 0, []
+        return {
+            "courses": courses, "total": total, "page": page,
+            "page_size": page_size, "has_more": page * page_size < total,
+        }
 
     def subscription_courses(self, course_ids: list[str]) -> list[dict[str, Any]]:
         """Resolve chosen IDs using the catalog, with course history as fallback."""

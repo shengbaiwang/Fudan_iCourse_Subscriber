@@ -1,6 +1,6 @@
 # iCourse Subscriber V2
 
-自动监控复旦大学 iCourse 智慧教学平台的课程更新，对新课次的录播视频进行**语音转文字 + PPT OCR + AI 摘要**，并通过邮件推送到你的邮箱。
+自动监控复旦大学 iCourse 智慧教学平台的课程更新，对新课次的录播视频进行**语音转文字 + PPT OCR + AI 摘要**，保存笔记，在本地网页或 GitHub Pages 中阅读。
 
 部署在 GitHub Actions 上，每天定时运行，**零成本、免服务器、全自动**。
 
@@ -16,9 +16,9 @@
 1. 登录你的复旦 iCourse 账号（通过 WebVPN）
 2. 检查这两门课是否有新的录播视频
 3. 如果有：提取音频 → 语音识别 → 提取 PPT 图片 → OCR 转写 → AI 生成课程笔记
-4. 将所有新课次的笔记汇总成**一封邮件**发送给你
+4. 将新课次的笔记保存到加密资料库，打开控制台即可查看
 
-邮件包含专业排版的 Markdown 渲染内容（含 LaTeX 公式渲染）。如果老师提到了作业、考试、签到、组队等重要课程事项，会在笔记开头醒目标注。
+网页笔记支持 Markdown 与 LaTeX 公式排版，并用蓝色主标题、青色次级标题、红色加粗重点和引用底色区分内容；浅色与深色模式均适配。如果老师提到了作业、考试、签到、组队等重要课程事项，会在笔记开头醒目标注。
 
 
 ## 快速部署（5 分钟）
@@ -39,9 +39,8 @@
 | `DASHSCOPE_API_KEY` | ⬜ | ModelScope 平台 API Key | `ms-xxxxxxxx` |
 | `DEEPSEEK_API_KEY` | ⬜ | DeepSeek API Key（推荐） | `sk-xxxxxxxx` |
 | `GEMINI_API_KEY` | ⬜ | Gemini API Key | `AIza...` |
-| `SMTP_EMAIL` | ✅ | 用于发送邮件的 QQ 邮箱 | `123456@qq.com` |
-| `SMTP_PASSWORD` | ✅ | QQ 邮箱 SMTP **授权码**（不是登录密码） | `abcdefghijklmnop` |
-| `RECEIVER_EMAIL` | ✅ | 接收摘要邮件的邮箱 | `you@m.fudan.edu.com` |
+
+> 邮件推送已移除，无需配置发件邮箱或收件邮箱。只有读取旧版加密数据库时，才需保留原有 `SMTP_PASSWORD` 用于旧密钥解密。
 
 > 至少配置一个 LLM API Key（DASHSCOPE、DEEPSEEK 或 GEMINI）。程序按配置顺序自动回退尝试；需要切换模型或添加 OpenAI-compatible 供应商时，可使用下方的本地控制台“模型与 API”页面。
 
@@ -63,14 +62,7 @@
 | **DeepSeek**（`DEEPSEEK_API_KEY`） | [DeepSeek Platform](https://platform.deepseek.com/) | 注册赠额度 |
 | **Gemini**（`GEMINI_API_KEY`） | [Google AI Studio](https://aistudio.google.com/) | flash模型每日免费额度 |
 
-### 第 5 步：获取 QQ 邮箱 SMTP 授权码
-
-1. 登录 [QQ 邮箱](https://mail.qq.com) → 设置 → 账户与安全 → 安全设置
-2. 找到「POP3/IMAP/SMTP/Exchange/CardDAV/CalDAV 服务」
-3. 开启 SMTP 服务，按提示获取**授权码**（16 位字母）
-4. 将授权码填入 `SMTP_PASSWORD`
-
-### 第 6 步：运行
+### 第 5 步：运行
 
 - **自动运行**：默认每天 00:01（北京时间）自动执行
 - **手动触发**：进入仓库 → Actions → **iCourse Check** → Run workflow
@@ -90,7 +82,7 @@
 - **浏览器端解密**：输入你的凭据，浏览器用 WebCrypto 解密 sql.js 读取 shard 数据库，UIS 凭据仅用于当前浏览器内解密，Token 用于 GitHub API 认证
 - **统一浏览和管理**：课程分区、置顶、搜索筛选、摘要版本对比、模型管理、批量重跑、订阅与单次运行
 - **入口差异**：Pages 在当前标签页内存中使用凭据和解密资料；本地使用 Python 服务与可选 macOS 钥匙串，另支持 Obsidian 同步和模型连接测试
-- **导出 PDF**：通过 GitHub Actions 触发导出工作流，生成格式化课程笔记 PDF 并邮件发送
+- **导出 PDF**：通过 GitHub Actions 触发导出工作流，生成格式化课程笔记文件，完成后在“运行”页打开运行记录，从 Artifacts 下载（保留 7 天）；也支持 HTML 和 Markdown
 
 > 开发与验证说明见 [统一控制台说明](docs/frontend-readme.md)。以后界面修改只改 `local_web/static/`，Pages 部署工作流会自动打包该目录。
 
@@ -113,7 +105,8 @@ python -m local_web
 界面依赖，之后会自动打开已经运行的控制台，或启动新的本地服务并打开网页。
 
 控制台默认打开 `http://127.0.0.1:8765`，支持同步并本地解密分片、浏览和搜索笔记、
-查看 GitHub Actions 状态、手动触发课程检查，以及在“模型与 API”中管理供应商、
+在独立“运行”页选择本地或 GitHub Actions、调整课程与课次优先级、处理新课次或重写笔记，
+新生成的笔记自动载入；订阅队列顺序也可保存为每日任务的优先级。在“模型与 API”中管理供应商、
 Base URL、模型列表和回退顺序。还可以按需将已生成的笔记预览后同步到本机
 Obsidian Vault；该同步不会要求电脑常开，也不会覆盖检测到手动修改的文件。模型配置保存在非敏感的 Actions Variable
 `MODEL_PROVIDERS_JSON` 中，API Key 则只写入对应的 Actions Secret；GitHub 不允许
@@ -166,7 +159,7 @@ Secrets API，不会看到单独的 Variables 权限项。
 >
 > 本项目的设计初衷仅为辅助本校学生进行**个人的日常学习与复习**与进行技术交流。程序采用"封闭容器、流式处理、阅后即焚"的架构，默认不保存任何视频文件。任何人在部署和使用本项目时，必须严格遵守《复旦大学智慧教学资源平台使用规范》及相关校纪校规。**严禁使用者利用本程序进行以下违规操作，一切因滥用导致的账号封禁或纪律处分（如通报批评、限制平台权限等），均由使用者自行承担，与本仓库及作者无关：**
 >
-> * **严禁二次分发与传播**：《规范》第二部分明确指出，平台教学资源属于职务作品，未经许可不得传播。**禁止**将推送到你邮箱的课程摘要、转录文本或笔记转发给他人，或发布到任何公共网络平台。
+> * **严禁二次分发与传播**：《规范》第二部分明确指出，平台教学资源属于职务作品，未经许可不得传播。**禁止**将资料库中的课程摘要、转录文本或笔记转发给他人，或发布到任何公共网络平台。
 > * **严禁修改代码非法下载视频**：《规范》严禁未经许可对平台资源进行复制和下载。基于此，本项目并不留存视频，**严禁**任何人修改源代码将受版权保护的课程录播违规下载、保存到任何本地或云端存储介质。
 > * **严禁解密或泄露数据库**：仓库中的 `icourse.db.enc` 仅用于程序追踪课次进度避免重复计算。**严禁**手动解密该数据库以提取、滥用或公开其中的转录和摘要文本信息。
 > * **注意账号环境安全**：本程序会使用你的 UIS 凭证进行云端 WebVPN 自动化登录，有触发异地登录风控的可能。请妥善保管个人 Secret，因使用云端自动化服务导致的账号异常风险由使用者自行评估。
@@ -258,7 +251,7 @@ PPT 功能区 UI 噪声清洗：PowerPoint 功能区标签（"文件""开始""�
 
 ### 数据库持久化：三环境兼容的加密 + 内容寻址分片
 
-GitHub Actions 每次在全新容器中运行，无法依赖本地文件系统持久化。解决方案是独立的 `data` 分支，每次运行结束时加密推送数据库，下次运行时拉取解密。
+GitHub Actions 每次在全新容器中运行，无法依赖本地文件系统持久化。解决方案是独立的 `data` 分支，每篇笔记完成时发布加密检查点，运行结束时再发布完整数据，下次运行时拉取解密。
 
 AES-256-CBC + PBKDF2 加密方案需要在三种环境中同时兼容：GitHub Actions shell（openssl CLI）、Python（pycryptodome 库）、浏览器前端（Web Crypto API）。`crypto_box.py` 和 `local_web/static/browser/crypto.js` 保持精确对应——相同的 Salted__ 头部格式、相同的 PBKDF2 迭代次数、相同的 AES-256-CBC 模式。密钥由 `sha256("ICSv2:" + stuid + ":" + uispsw)` 派生。
 

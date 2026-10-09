@@ -26,6 +26,7 @@ from src.ai import bucketer
 from src.ai.summarizer import Summarizer
 from src.ai.title import build_title_material, split_generated_title
 from src.data.database import Database
+from src.runtime.progress import emit, note_saved
 
 
 def _lecture_ids() -> list[str]:
@@ -43,14 +44,19 @@ def run() -> int:
     db = Database()
     summarizer = Summarizer()
     completed = 0
+    emit("queue", total=len(lecture_ids))
 
     for sub_id in lecture_ids:
+        emit("lecture", sub_id=sub_id, index=lecture_ids.index(sub_id) + 1,
+             total=len(lecture_ids))
         lecture = db.get_lecture(sub_id)
         if lecture is None:
+            emit("failed", sub_id=sub_id)
             print(f"::error::课次不存在：{sub_id}", file=sys.stderr)
             continue
         transcript = str(lecture.get("transcript") or "").strip()
         if not transcript:
+            emit("failed", sub_id=sub_id)
             print(
                 f"::error::{sub_id} 没有可用转录，无法只重写摘要；请先完成原始处理。",
                 file=sys.stderr,
@@ -88,9 +94,11 @@ def run() -> int:
                     file=sys.stderr,
                 )
             completed += 1
+            note_saved(db, sub_id)
             print(f"[Re-summarize] Done {sub_id} with {model_used}", flush=True)
         except Exception as exc:
             db.update_error(sub_id, "summarize", str(exc))
+            emit("failed", sub_id=sub_id)
             print(f"::error::{sub_id} 重新生成失败：{exc}", file=sys.stderr)
 
     if completed != len(lecture_ids):

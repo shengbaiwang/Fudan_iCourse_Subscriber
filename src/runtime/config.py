@@ -126,13 +126,6 @@ def resolve_model_providers() -> list[dict]:
 DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# QQ SMTP
-SMTP_EMAIL = os.environ.get("SMTP_EMAIL", "")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
-RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
-SMTP_HOST = "smtp.qq.com"
-SMTP_PORT = 465
-
 # Database & Storage
 DATA_DIR = os.environ.get("DATA_DIR", "data")
 VIDEO_DIR = os.path.join(DATA_DIR, "videos")
@@ -190,6 +183,7 @@ COURSE_IDS = [
     for c in os.environ.get("COURSE_IDS", "").split(",")
     if c.strip()
 ]
+LECTURE_ORDER = os.environ.get("LECTURE_ORDER", "api").strip() or "api"
 
 # 学期级课程目录爬取（已弃用 — main.py 现在自动发现所有学期）。
 # 保留此变量仅用于兼容老部署环境，新部署无需设置。

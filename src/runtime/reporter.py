@@ -292,22 +292,7 @@ class Reporter:
             print(f"    [Prefetch] audio for {sub_id} failed: "
                   f"{type(exc).__name__}: {exc}", flush=True)
 
-    # ── Email / generic ──────────────────────────────────────────────────
-
-    def email_summary(self, n: int):
-        with self._lock:
-            print(f"\n[Email] Sending summary for {n} lecture(s)...",
-                  flush=True)
-
-    def email_failed(self):
-        with self._lock:
-            print("[Email] Send failed, lectures will be retried next run.",
-                  flush=True)
-
-    def email_recovered_unsent(self, n: int):
-        with self._lock:
-            print(f"[Email] Including {n} previously unsent lecture(s).",
-                  flush=True)
+    # ── Generic ──────────────────────────────────────────────────────────
 
     def info(self, msg: str):
         """Generic info line — escape hatch for one-off messages."""

@@ -27,15 +27,23 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.ai.summarizer import Summarizer
 from src.ai.title import build_title_material
 from src.data.database import Database
+from src.runtime.progress import emit, note_saved
+from src.runtime.run_order import ordered_lectures
 
 
 def _pending_lecture_ids(db: Database, limit: int) -> list[str]:
     rows = db.conn.execute(
-        """SELECT sub_id FROM lectures
+        """SELECT sub_id,course_id,date FROM lectures
            WHERE TRIM(COALESCE(summary, '')) != ''
              AND TRIM(COALESCE(ai_title, '')) = ''
            ORDER BY COALESCE(date, ''), sub_id"""
     ).fetchall()
+    rows = ordered_lectures([dict(row) for row in rows], os.environ.get("LECTURE_ORDER", "api"))
+    course_ids = [cid.strip() for cid in os.environ.get("TITLE_COURSE_IDS", "").split(",") if cid.strip()]
+    if course_ids:
+        rank = {cid: i for i, cid in enumerate(course_ids)}
+        rows = [row for row in rows if str(row["course_id"]) in rank]
+        rows.sort(key=lambda row: rank[str(row["course_id"])])
     ids = [str(row["sub_id"]) for row in rows]
     return ids[:limit] if limit > 0 else ids
 
@@ -58,6 +66,7 @@ def run() -> int:
     db = Database()
     summarizer = Summarizer()
     pending = _pending_lecture_ids(db, limit)
+    emit("queue", total=len(pending))
     if not pending:
         print("[Titles] 所有笔记已有标题，无需补齐。")
         return 0
@@ -66,9 +75,11 @@ def run() -> int:
     completed = 0
     skipped = 0
     for index, sub_id in enumerate(pending, 1):
+        emit("lecture", sub_id=sub_id, index=index, total=len(pending))
         lecture = db.get_lecture(sub_id)
         if lecture is None:
             skipped += 1
+            emit("failed", sub_id=sub_id)
             continue
         pages = db.get_done_ppt_pages(sub_id)
         material = build_title_material(
@@ -78,6 +89,7 @@ def run() -> int:
         )
         if not material:
             skipped += 1
+            emit("failed", sub_id=sub_id)
             print(
                 f"[Titles] {index}/{len(pending)} {sub_id}: 无可用材料，跳过",
                 flush=True,
@@ -88,6 +100,7 @@ def run() -> int:
             if title:
                 db.update_ai_title(sub_id, title)
                 completed += 1
+                note_saved(db, sub_id)
                 print(
                     f"[Titles] {index}/{len(pending)} {sub_id}: "
                     f"{title} ({model_used})",
@@ -95,12 +108,14 @@ def run() -> int:
                 )
             else:
                 skipped += 1
+                emit("failed", sub_id=sub_id)
                 print(
                     f"[Titles] {index}/{len(pending)} {sub_id}: 生成失败，留下次重试",
                     flush=True,
                 )
         except Exception as exc:
             skipped += 1
+            emit("failed", sub_id=sub_id)
             print(
                 f"[Titles] {index}/{len(pending)} {sub_id} 失败：{exc}",
                 file=sys.stderr,

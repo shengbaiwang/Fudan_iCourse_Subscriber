@@ -3,7 +3,7 @@
 import os
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.runtime import config
 from src.data.schema import (
@@ -114,7 +114,7 @@ class Database:
         We delete-then-upsert under one transaction so the term's catalog
         is never half-empty during a concurrent frontend export.
         """
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         keep_ids = {str(r["course_id"]) for r in rows if r.get("course_id")}
         with self._lock, self.conn:
             if keep_ids:
@@ -239,25 +239,7 @@ class Database:
         with self._lock, self.conn:
             self.conn.execute(
                 "UPDATE lectures SET processed_at = ? WHERE sub_id = ?",
-                (datetime.now().isoformat(), sub_id),
-            )
-
-    def mark_emailed(self, sub_id: str):
-        with self._lock, self.conn:
-            self.conn.execute(
-                "UPDATE lectures SET emailed_at = ? WHERE sub_id = ?",
-                (datetime.now().isoformat(), sub_id),
-            )
-
-    def mark_emailed_batch(self, sub_ids: list[str]):
-        """Mark multiple lectures as emailed in a single transaction."""
-        if not sub_ids:
-            return
-        now = datetime.now().isoformat()
-        with self._lock, self.conn:
-            self.conn.executemany(
-                "UPDATE lectures SET emailed_at = ? WHERE sub_id = ?",
-                [(now, sid) for sid in sub_ids],
+                (datetime.now(timezone.utc).isoformat(), sub_id),
             )
 
     def update_error(self, sub_id: str, stage: str, error_msg: str):
@@ -298,7 +280,7 @@ class Database:
                 """UPDATE ppt_pages
                    SET text = ?, ocr_status = ?, ocr_at = ?
                    WHERE sub_id = ? AND page_num = ?""",
-                (text, status, datetime.now().isoformat(), sub_id, page_num),
+                (text, status, datetime.now(timezone.utc).isoformat(), sub_id, page_num),
             )
 
     def update_ppt_page_dhash(self, sub_id: str, page_num: int,
@@ -402,9 +384,9 @@ class Database:
         Every rerun — including with the same model — becomes its own
         ``summary_versions`` row (keyed by ``generated_at``), so previous
         versions are never overwritten.  ``lectures.summary`` always holds
-        the latest output for email/export.
+        the latest output for reading and export.
         """
-        generated_at = datetime.now().isoformat()
+        generated_at = datetime.now(timezone.utc).isoformat()
         with self._lock, self.conn:
             self.conn.execute(
                 """UPDATE lectures
@@ -441,19 +423,6 @@ class Database:
                 "SELECT * FROM lectures WHERE sub_id = ?", (sub_id,)
             ).fetchone()
         return dict(row) if row else None
-
-    def get_unsent_lectures(self) -> list[dict]:
-        """Find lectures that are processed but not yet emailed."""
-        with self._lock:
-            rows = self.conn.execute(
-                """SELECT l.*, c.title AS course_title, c.teacher
-                   FROM lectures l
-                   JOIN courses c ON l.course_id = c.course_id
-                   WHERE l.processed_at IS NOT NULL
-                     AND l.emailed_at IS NULL
-                     AND l.summary IS NOT NULL""",
-            ).fetchall()
-        return [dict(row) for row in rows]
 
     def sync_dates_from_sub(self) -> int:
         """Fix date rows where the stored value is wrong or badly formatted.

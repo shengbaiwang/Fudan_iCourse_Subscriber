@@ -28,6 +28,13 @@ let subscriptionCourses = [];
 let subscriptionTerms = [];
 let subscriptionTimer = null;
 let catalogRows = [];
+const CATALOG_PAGE_SIZE = 100;
+let catalogPage = 0;
+let catalogTotal = 0;
+let catalogHasMore = false;
+let catalogLoading = false;
+let catalogError = false;
+let catalogRequest = 0;
 let courseZones = {};
 let lectureNames = {};
 let updatePollTimer = null;
@@ -358,7 +365,7 @@ async function refreshStatus() {
   $("#mobile-nav").classList.toggle("hidden", !statusState.configured);
   renderStats(statusState.database);
   const libraryIdentity = statusState.database_ready
-    ? `${repo.owner}/${repo.repo}/${repo.branch}:${statusState.database?.commit_sha || "local"}`
+    ? `${repo.owner}/${repo.repo}/${repo.branch}:${statusState.database?.commit_sha || "local"}:${statusState.database?.revision || 0}`
     : "";
   // While the background update is running this function polls every 1.2s.
   // Reloading courses on every poll destroys any open native <select> popup.
@@ -367,11 +374,11 @@ async function refreshStatus() {
     await loadCourseZones();
     await loadLectureNames();
     await loadCourses();
+    await refreshVisibleNotes();
     loadedLibraryIdentity = libraryIdentity;
   }
   if (statusState.configured) {
     showView(activeView);
-    loadRuns().catch((error) => message(error.message, true));
   }
   clearTimeout(updatePollTimer);
   if (statusState.configured && updateState === "checking") {
@@ -855,13 +862,7 @@ async function openLecture(subId, options = {}) {
     courseLectures = await api(`/api/local/courses/${encodeURIComponent(currentLecture.course_id)}/lectures`);
   }
   courseLectures.sort(compareLectures);
-  $("#detail-title").textContent = lectureDisplayName(currentLecture);
-  const detailSubtitle = currentLecture.sub_title || "";
-  $("#detail-subtitle").textContent = detailSubtitle;
-  $("#detail-subtitle").classList.toggle(
-    "hidden", !detailSubtitle || lectureDisplayName(currentLecture) === detailSubtitle
-  );
-  $("#detail-course").textContent = currentLecture.course_title || "";
+  renderLectureHeading();
   // 搜索结果可指定落地 tab（命中转录/OCR 时直接打开对应内容）。
   detailTab = ["summary", "transcript", "ppt"].includes(options.tab) ? options.tab : "summary";
   // Empty on purpose — renderSummaryVersions auto-selects the latest version.
@@ -875,6 +876,16 @@ async function openLecture(subId, options = {}) {
     const first = root.querySelector("mark.search-hit");
     if (first) first.scrollIntoView({ block: "center" });
   }
+}
+
+function renderLectureHeading() {
+  $("#detail-title").textContent = lectureDisplayName(currentLecture);
+  const detailSubtitle = currentLecture.sub_title || "";
+  $("#detail-subtitle").textContent = detailSubtitle;
+  $("#detail-subtitle").classList.toggle(
+    "hidden", !detailSubtitle || lectureDisplayName(currentLecture) === detailSubtitle
+  );
+  $("#detail-course").textContent = currentLecture.course_title || "";
 }
 
 function compareLectures(a, b) {
@@ -913,6 +924,7 @@ function formatTimestamp(seconds) {
 
 function renderDetail() {
   if (!currentLecture) return;
+  renderLectureHeading();
   const root = $("#detail-content");
   root.replaceChildren();
   if (detailTab === "summary") {
@@ -1365,6 +1377,9 @@ function openBlindCompare() {
     preferredKey: null,
     mode: "blind",
     generating: false,
+    selectedModelIdx: new Set(),
+    apiKeys: {},
+    pendingTalkJobs: [],
     order: shuffleKeys(payload.versions.map((version) => version.key)),
   };
   renderBlindCompare();
@@ -1372,19 +1387,134 @@ function openBlindCompare() {
   ensureBlindModelOptions().catch((error) => {
     const hint = $("#blind-generate-hint");
     if (hint) hint.textContent = error.message;
-  });
+  }).finally(() => renderBlindGeneratePanel());
   scheduleBlindRefresh();
+  runNextBlindTalkGenerate().catch(() => {});
 }
 
 async function ensureBlindModelOptions() {
-  const select = $("#blind-model-select");
-  if (select.options.length) return;
-  try {
-    await populateRerunModelSelect("#blind-model-select", true);
-  } catch (error) {
-    const hint = $("#blind-generate-hint");
-    if (hint) hint.textContent = error.message;
-    throw error;
+  if (!rerunModelOptions.length) {
+    // Reuse the shared model catalog (enabled providers with API keys).
+    const result = await api("/api/local/model-providers");
+    rerunModelOptions = [];
+    (result.providers || []).forEach((provider) => {
+      if (!provider.enabled || !provider.api_key_configured) return;
+      (provider.models || []).forEach((model) => {
+        rerunModelOptions.push({provider: String(provider.name), model: String(model)});
+      });
+    });
+  }
+  if (!rerunModelOptions.length) {
+    throw new Error("没有可用于生成的模型；请先在模型管理中启用模型并保存 API Key。");
+  }
+  renderBlindModelList();
+}
+
+function blindModelHasVersion(option) {
+  if (!blindCompare) return false;
+  const candidates = new Set([
+    option.model,
+    `${option.provider}/${option.model}`,
+    `${option.provider}:${option.model}`,
+  ]);
+  return blindCompare.versions.some((version) => candidates.has(String(version.model || "")));
+}
+
+function renderBlindModelList() {
+  const list = $("#blind-model-list");
+  if (!list) return;
+  list.replaceChildren();
+  if (!rerunModelOptions.length) {
+    const empty = document.createElement("p");
+    empty.className = "meta";
+    empty.textContent = "暂无可用模型。";
+    list.append(empty);
+    return;
+  }
+  if (!blindCompare.selectedModelIdx) blindCompare.selectedModelIdx = new Set();
+  rerunModelOptions.forEach((option, index) => {
+    const label = document.createElement("label");
+    label.className = "blind-model-choice";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = blindCompare.selectedModelIdx.has(index);
+    input.onchange = () => {
+      if (input.checked) blindCompare.selectedModelIdx.add(index);
+      else blindCompare.selectedModelIdx.delete(index);
+      renderBlindGeneratePanel();
+    };
+    const name = document.createElement("span");
+    name.textContent = `${option.provider} / ${option.model}`;
+    label.append(input, name);
+    if (blindModelHasVersion(option)) {
+      const badge = document.createElement("small");
+      badge.textContent = "已有版本";
+      label.append(badge);
+    }
+    list.append(label);
+  });
+}
+
+function selectedBlindModels() {
+  if (!blindCompare?.selectedModelIdx) return [];
+  return [...blindCompare.selectedModelIdx]
+    .filter((index) => rerunModelOptions[index])
+    .map((index) => ({index, ...rerunModelOptions[index]}));
+}
+
+function renderBlindApiKeys() {
+  const root = $("#blind-api-keys");
+  if (!root) return;
+  root.replaceChildren();
+  const isTalk = blindCompare?.source === "talk";
+  const selected = selectedBlindModels();
+  if (!isTalk || !selected.length) {
+    root.classList.add("hidden");
+    return;
+  }
+  root.classList.remove("hidden");
+  const providers = [...new Set(selected.map((item) => item.provider))];
+  if (!blindCompare.apiKeys) blindCompare.apiKeys = {};
+  providers.forEach((provider) => {
+    const label = document.createElement("label");
+    label.className = "blind-api-key-field";
+    const title = document.createElement("span");
+    title.textContent = `${provider} API Key`;
+    const input = document.createElement("input");
+    input.type = "password";
+    input.autocomplete = "off";
+    input.placeholder = "仅用于本次请求，不保存";
+    input.value = blindCompare.apiKeys[provider] || "";
+    input.oninput = () => { blindCompare.apiKeys[provider] = input.value; };
+    label.append(title, input);
+    root.append(label);
+  });
+}
+
+function renderBlindGeneratePanel() {
+  renderBlindModelList();
+  renderBlindApiKeys();
+  const selected = selectedBlindModels();
+  const button = $("#blind-generate-button");
+  const talkBusy = blindCompare?.source === "talk" && currentTalk
+    && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
+  const queued = Boolean(blindCompare?.pendingTalkJobs?.length);
+  button.disabled = !selected.length || Boolean(blindCompare?.generating) || talkBusy || queued;
+  button.textContent = blindCompare?.generating || talkBusy || queued
+    ? (queued ? "排队生成中…" : "生成中…")
+    : `生成所选对照（${selected.length}）`;
+  $("#blind-refresh-versions").disabled = Boolean(blindCompare?.generating);
+  const generateHint = $("#blind-generate-hint");
+  if (!generateHint.dataset.custom) {
+    if (talkBusy || queued) {
+      generateHint.textContent = "讲座一次只能生成一份；已勾选的模型会排队串行生成，完成后自动出现在下方。";
+    } else if (blindCompare?.source === "talk") {
+      generateHint.textContent = "可多选模型；每个供应商需填写 API Key。讲座会按勾选顺序逐个生成。";
+    } else if ((blindCompare?.versions.length || 0) < 2) {
+      generateHint.textContent = "可多选模型一次提交多个课次重跑；新版本生成后会自动载入。";
+    } else {
+      generateHint.textContent = "可继续多选模型生成更多对照版本；已有版本都会保留。";
+    }
   }
 }
 
@@ -1429,6 +1559,9 @@ async function refreshBlindVersions(options = {}) {
   renderBlindCompare();
   if (grew) message("已载入新版本，顺序已重新洗牌，可开始盲测。");
   scheduleBlindRefresh();
+  if (blindCompare.pendingTalkJobs?.length) {
+    setTimeout(() => runNextBlindTalkGenerate().catch(() => {}), 300);
+  }
   return blindCompare;
 }
 
@@ -1438,8 +1571,9 @@ function scheduleBlindRefresh() {
   if (!blindCompare || activeView !== "blindCompare") return;
   const talkBusy = blindCompare.source === "talk" && currentTalk
     && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
-  // 讲座本地生成中自动刷；课次走 Actions，只在用户点「刷新版本」时取。
-  if (!talkBusy) return;
+  const queued = Boolean(blindCompare.pendingTalkJobs?.length);
+  // 讲座生成由此轮询；课次由资料库自动同步后更新版本。
+  if (!talkBusy && !queued) return;
   blindRefreshTimer = setTimeout(() => {
     refreshBlindVersions().catch(() => {});
   }, currentTalk?.status === "transcribing" ? 15000 : 4000);
@@ -1447,50 +1581,121 @@ function scheduleBlindRefresh() {
 
 async function submitBlindGenerate() {
   if (!blindCompare) return;
-  const option = selectedRerunModel("#blind-model-select");
-  if (!option) {
-    message("请先选择模型。", true);
+  const selected = selectedBlindModels();
+  if (!selected.length) {
+    message("请至少勾选一个模型。", true);
     return;
   }
   const isTalk = blindCompare.source === "talk";
-  let apiKey = "";
   if (isTalk) {
-    apiKey = $("#blind-api-key").value.trim();
-    if (!apiKey) {
-      message("请重新输入所选供应商的 API Key（GitHub 不允许读回已保存的密钥）。", true);
-      $("#blind-api-key").focus();
+    blindCompare.apiKeys = blindCompare.apiKeys || {};
+    const missing = [...new Set(selected.map((item) => item.provider))]
+      .filter((provider) => !String(blindCompare.apiKeys[provider] || "").trim());
+    if (missing.length) {
+      message(`请填写 ${missing.join("、")} 的 API Key（GitHub 不允许读回已保存的密钥）。`, true);
+      renderBlindApiKeys();
+      $("#blind-api-keys input")?.focus();
       return;
     }
   }
+  const labels = selected.map((item) => `${item.provider} / ${item.model}`).join("\n· ");
   const where = isTalk ? "本讲座" : "本课次";
-  if (!confirm(`使用 ${option.provider} / ${option.model} 为${where}生成对照笔记？\n\n已有版本会保留；会产生模型费用。`)) return;
+  if (!confirm(`用以下 ${selected.length} 个模型为${where}生成对照笔记？\n\n· ${labels}\n\n已有版本会保留；会产生模型费用。`)) return;
+
   const button = $("#blind-generate-button");
   button.disabled = true;
   blindCompare.generating = true;
-  renderBlindCompare();
+  renderBlindGeneratePanel();
+
   try {
     if (isTalk) {
-      await api(`/api/local/talks/${encodeURIComponent(blindCompare.sourceId)}/summarize`, {
-        method: "POST",
-        body: JSON.stringify({...option, api_key: apiKey}),
-      });
-      $("#blind-api-key").value = "";
-      message("已开始生成对照笔记，完成后会自动出现在下方。");
+      // 讲座后端一次只允许一个生成任务：按勾选顺序排队串行。
+      blindCompare.pendingTalkJobs = selected.map((item) => ({
+        provider: item.provider,
+        model: item.model,
+        api_key: String(blindCompare.apiKeys[item.provider] || "").trim(),
+      }));
+      message(`已排队 ${selected.length} 个模型，将按顺序逐个生成。`);
+      await runNextBlindTalkGenerate();
     } else {
-      const result = await api("/api/local/summary-reruns", {
-        method: "POST",
-        body: JSON.stringify({...option, sub_ids: [blindCompare.sourceId], course_ids: []}),
-      });
-      message(`已提交 ${result.count} 个课次重跑；Actions 完成并「检查更新」后，点「刷新版本」载入对照笔记。`);
+      // 课次可并行提交多个 Actions 重跑，互不占用同一任务锁。
+      let ok = 0;
+      const failures = [];
+      for (const item of selected) {
+        try {
+          const result = await api("/api/local/summary-reruns", {
+            method: "POST",
+            body: JSON.stringify({
+              provider: item.provider,
+              model: item.model,
+              sub_ids: [blindCompare.sourceId],
+              course_ids: [],
+            }),
+          });
+          ok += Number(result.count || 0) ? 1 : 0;
+        } catch (error) {
+          failures.push(`${item.provider}/${item.model}: ${error.message}`);
+        }
+      }
+      if (failures.length) {
+        message(`已提交 ${ok}/${selected.length} 个模型重跑。失败：${failures[0]}`, true);
+      } else {
+        message(`已提交 ${ok} 个模型重跑；新笔记会自动载入对照版本。`);
+      }
+      await refreshBlindVersions();
     }
-    await refreshBlindVersions();
   } catch (error) {
     message(error.message, true);
   } finally {
     blindCompare.generating = false;
-    button.disabled = false;
+    renderBlindGeneratePanel();
     renderBlindCompare();
     scheduleBlindRefresh();
+  }
+}
+
+async function runNextBlindTalkGenerate() {
+  if (!blindCompare || blindCompare.source !== "talk") return;
+  const queue = blindCompare.pendingTalkJobs || [];
+  if (!queue.length) return;
+  const talkBusy = currentTalk
+    && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
+  if (talkBusy || blindCompare.generating) {
+    // 等 refresh 轮询结束后再启动下一项。
+    scheduleBlindRefresh();
+    return;
+  }
+  const job = queue[0];
+  blindCompare.generating = true;
+  renderBlindGeneratePanel();
+  try {
+    await api(`/api/local/talks/${encodeURIComponent(blindCompare.sourceId)}/summarize`, {
+      method: "POST",
+      body: JSON.stringify({provider: job.provider, model: job.model, api_key: job.api_key}),
+    });
+    queue.shift();
+    blindCompare.pendingTalkJobs = queue;
+    if (queue.length) {
+      message(`已提交 ${job.provider}/${job.model}，队列还有 ${queue.length} 个模型。`);
+    } else {
+      message("已开始生成对照笔记，完成后会自动出现在下方。");
+    }
+  } catch (error) {
+    // 409 表示仍在生成：保留队首，稍后重试。
+    if (!String(error.message || "").includes("正在生成")) {
+      queue.shift();
+      blindCompare.pendingTalkJobs = queue;
+      message(`${job.provider}/${job.model} 失败：${error.message}`, true);
+    }
+  } finally {
+    blindCompare.generating = false;
+    renderBlindGeneratePanel();
+    await refreshBlindVersions();
+    if (blindCompare.pendingTalkJobs?.length) {
+      scheduleBlindRefresh();
+      // 若已空闲，立刻尝试下一项。
+      setTimeout(() => runNextBlindTalkGenerate().catch(() => {}), 500);
+    }
   }
 }
 
@@ -1555,34 +1760,13 @@ function renderBlindCompare() {
   $("#blind-reshuffle").classList.toggle("hidden", !isBlind || versionCount < 2);
   revealAll.disabled = !isBlind || versionCount < 1 || blindCompare.revealed.size >= versionCount;
 
-  const isTalk = blindCompare.source === "talk";
-  const talkBusy = isTalk && currentTalk
-    && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
-  const apiKeyField = $("#blind-api-key");
-  apiKeyField.classList.toggle("hidden", !isTalk);
-  const generateButton = $("#blind-generate-button");
-  generateButton.disabled = Boolean(blindCompare.generating || talkBusy);
-  generateButton.textContent = blindCompare.generating || talkBusy ? "生成中…" : "生成对照笔记";
-  $("#blind-refresh-versions").disabled = Boolean(blindCompare.generating);
-
-  const generateHint = $("#blind-generate-hint");
-  if (!generateHint.dataset.custom) {
-    if (talkBusy) {
-      generateHint.textContent = "讲座正在云端/本地处理，完成后会自动出现在下方（约 4–15 秒刷新一次）。";
-    } else if (isTalk) {
-      generateHint.textContent = "讲座生成需重新输入所选供应商的 API Key（仅用于本次请求，不保存）。";
-    } else if (versionCount < 2) {
-      generateHint.textContent = "课次重跑走 GitHub Actions；完成后先「检查更新」，再点「刷新版本」载入对照笔记。";
-    } else {
-      generateHint.textContent = "可继续用其他模型生成更多对照版本；已有版本都会保留。";
-    }
-  }
+  renderBlindGeneratePanel();
 
   const hint = $("#blind-hint");
   if (versionCount < 2 && isBlind) {
     hint.textContent = versionCount === 0
-      ? "还没有可对比的笔记。可在下方选模型生成；有 ≥2 个版本后即可随机盲测。"
-      : "目前只有 1 个版本。可在下方选其他模型生成对照笔记，凑齐 ≥2 份后再盲测（模型名默认隐藏，点「揭示模型」才显示）。";
+      ? "还没有可对比的笔记。可在下方多选模型生成；有 ≥2 个版本后即可随机盲测。"
+      : "目前只有 1 个版本。可在下方一次勾选多个模型生成对照笔记，凑齐 ≥2 份后再盲测（模型名默认隐藏，点「揭示模型」才显示）。";
   } else if (isBlind) {
     const left = versionCount - blindCompare.revealed.size;
     hint.textContent = left > 0
@@ -1624,7 +1808,7 @@ function renderBlindCompare() {
   if (!versionCount) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "暂无笔记版本。用上方「生成对照笔记」选择模型生成后，点「刷新版本」。";
+    empty.textContent = "暂无笔记版本。选择模型生成后，新版本会自动载入。";
     grid.append(empty);
     return;
   }
@@ -1692,12 +1876,12 @@ function renderBlindCompare() {
   activateMath(grid);
 }
 
-async function populateRerunModelSelect(selector, refresh = false) {
+async function populateRerunModelSelect(selector, refresh = false, allowUnconfigured = false) {
   if (refresh || !rerunModelOptions.length) {
     const result = await api("/api/local/model-providers");
     rerunModelOptions = [];
     (result.providers || []).forEach((provider) => {
-      if (!provider.enabled || !provider.api_key_configured) return;
+      if (!provider.enabled || (!allowUnconfigured && !provider.api_key_configured)) return;
       (provider.models || []).forEach((model) => {
         rerunModelOptions.push({provider: String(provider.name), model: String(model)});
       });
@@ -1717,33 +1901,6 @@ function selectedRerunModel(selector) {
   return rerunModelOptions[Number($(selector).value)];
 }
 
-async function submitBatchRerun(subIds, courseIds, option, button) {
-  if (!option) {
-    message("请先选择模型。", true);
-    return null;
-  }
-  const selectionText = courseIds.length ? `${courseIds.length} 门课程` : `${subIds.length} 个课次`;
-  if (!confirm(`使用 ${option.provider} / ${option.model} 重跑已选 ${selectionText}？\n\n每个模型的版本都会保留；实际可重跑课次最多 20 个，并会产生模型费用。`)) return null;
-  button.disabled = true;
-  const original = button.textContent;
-  button.textContent = "已提交…";
-  try {
-    const result = await api("/api/local/summary-reruns", {
-      method: "POST",
-      body: JSON.stringify({...option, sub_ids: subIds, course_ids: courseIds}),
-    });
-    message(`已提交 ${result.count} 个课次重跑；完成后检查更新即可查看各模型版本。`);
-    setTimeout(() => loadRuns().catch(() => {}), 1500);
-    return result;
-  } catch (error) {
-    message(error.message, true);
-    return null;
-  } finally {
-    button.disabled = false;
-    button.textContent = original;
-  }
-}
-
 /* ── 重跑视图 ─────────────────────────────────────────────
    课程级勾选走 course_ids（该课全部有转录的课次）；展开课程
    可改选单个课次走 sub_ids。整课勾选时清空其课次选择。 */
@@ -1751,16 +1908,24 @@ const rerunSelectedCourseIds = new Set();
 const rerunSelectedSubIds = new Set();
 const rerunOpenCourseIds = new Set();
 const rerunLectureCache = new Map();
+let runPriorityIds = [];
+let runPreferencesLoaded = false;
+let runSubmitting = false;
+let localRunRows = [];
+let runCapabilities = null;
+let liveRefreshBusy = false;
+let lastCloudCheck = 0;
 
 function updateRerunSubmit() {
   const courses = rerunSelectedCourseIds.size;
   const subs = rerunSelectedSubIds.size;
   const button = $("#rerun-page-submit");
-  button.disabled = !courses && !subs;
+  button.disabled = runSubmitting || (!courses && (!subs || $("#run-kind").value !== "rerun"));
   const parts = [];
   if (courses) parts.push(`${courses} 门课程`);
   if (subs) parts.push(`${subs} 节课次`);
-  button.textContent = parts.length ? `重跑已选（${parts.join(" + ")}）` : "重跑已选";
+  button.textContent = runSubmitting ? "正在提交…" : parts.length ? `开始运行（${parts.join(" + ")}）` : "开始运行";
+  renderRunQueue();
 }
 
 async function toggleRerunCourseExpand(courseId) {
@@ -1787,13 +1952,16 @@ async function toggleRerunCourseExpand(courseId) {
 function renderRerunView() {
   const list = $("#rerun-course-list");
   list.replaceChildren();
-  if (!courseRows.length) {
+  const availableCourses = runCourses();
+  if (!availableCourses.length) {
     list.textContent = "数据库中还没有课程。";
     list.classList.add("empty");
+    updateRerunSubmit();
     return;
   }
   list.classList.remove("empty");
-  courseRows.forEach((course) => {
+  const filter = $("#run-course-query").value.trim().toLowerCase();
+  availableCourses.filter(course => `${course.title || ""} ${course.course_id}`.toLowerCase().includes(filter)).forEach((course) => {
     const cid = String(course.course_id);
     const courseChecked = rerunSelectedCourseIds.has(cid);
     const card = document.createElement("div");
@@ -1823,11 +1991,12 @@ function renderRerunView() {
     label.append(checkbox, title);
     const meta = document.createElement("span");
     meta.className = "rerun-course-meta";
-    meta.textContent = `笔记 ${course.summary_count}/${course.total_count}`;
+    meta.textContent = `笔记 ${course.summary_count ?? 0}/${course.total_count ?? 0}`;
     const expand = document.createElement("button");
     expand.type = "button";
     expand.className = "rerun-expand";
     expand.textContent = rerunOpenCourseIds.has(cid) ? "▾ 收起" : "▸ 选课次";
+    expand.disabled = $("#run-kind").value !== "rerun";
     expand.onclick = () => toggleRerunCourseExpand(cid);
     head.append(label, meta, expand);
     card.append(head);
@@ -1870,25 +2039,11 @@ function renderRerunView() {
 }
 
 async function loadRerunView() {
-  if (!courseRows.length) courseRows = await api("/api/local/courses");
-  try {
-    await populateRerunModelSelect("#rerun-page-model-select", true);
-  } catch (error) {
-    message(error.message, true);
-  }
-  renderRerunView();
+  return loadRunView();
 }
 
 $("#rerun-page-submit").onclick = async () => {
-  const result = await submitBatchRerun(
-    [...rerunSelectedSubIds], [...rerunSelectedCourseIds],
-    selectedRerunModel("#rerun-page-model-select"), $("#rerun-page-submit"),
-  );
-  if (result) {
-    rerunSelectedCourseIds.clear();
-    rerunSelectedSubIds.clear();
-    renderRerunView();
-  }
+  await submitUnifiedRun();
 };
 
 function renderSubscriptionCourse(course, action, label) {
@@ -1949,7 +2104,15 @@ function renderSubscriptions() {
     }, "移除"));
   });
   catalog.classList.toggle("empty", !catalogRows.length);
-  if (!catalogRows.length) catalog.textContent = "没有匹配的课程。";
+  if (!catalogRows.length) catalog.textContent = catalogLoading ? "正在搜索课程…"
+    : catalogError ? "课程目录加载失败，请重试。" : "没有匹配的课程。";
+  catalog.setAttribute("aria-busy", String(catalogLoading));
+  $("#subscription-catalog-status").textContent = catalogLoading && !catalogRows.length
+    ? "正在搜索课程…" : `已显示 ${catalogRows.length} / ${catalogTotal} 门课程`;
+  const more = $("#subscription-catalog-more");
+  more.classList.toggle("hidden", !catalogHasMore && !catalogError);
+  more.disabled = catalogLoading;
+  more.textContent = catalogLoading ? "加载中…" : catalogError ? "重试" : "加载更多课程";
   catalogRows.forEach((course) => {
     const subscribed = subscribedCourseIds.includes(String(course.course_id));
     const catalogItem = renderSubscriptionCourse(course, () => {
@@ -1968,27 +2131,58 @@ function renderSubscriptions() {
       const field = $("#single-run-ids");
       const ids = new Set(field.value.split(/[,，\s]+/).filter(Boolean));
       ids.add(String(course.course_id)); field.value = [...ids].join(",");
-      field.closest("details").open = true;
-      message(`已加入单次运行：${course.title || course.course_id}`);
+      rerunSelectedCourseIds.add(String(course.course_id));
+      if (!runPriorityIds.includes(String(course.course_id))) runPriorityIds.push(String(course.course_id));
+      $("#run-kind").value = "process";
+      rerunSelectedSubIds.clear();
+      showView("run");
+      loadRunView().catch(error => message(error.message, true));
+      message(`已加入运行队列：${course.title || course.course_id}`);
     }));
     catalog.append(catalogItem);
   });
 }
 
-async function loadSubscriptionCatalog() {
+async function loadSubscriptionCatalog(append = false) {
+  if (append && (catalogLoading || !catalogHasMore)) return;
+  clearTimeout(subscriptionTimer);
+  const request = ++catalogRequest;
   const query = $("#subscription-query").value.trim();
   const term = $("#subscription-term").value;
-  const result = await api(`/api/local/subscription-catalog?q=${encodeURIComponent(query)}&term=${encodeURIComponent(term)}`);
-  catalogRows = result.courses || [];
-  const select = $("#subscription-term");
-  const selected = select.value;
-  if (JSON.stringify(subscriptionTerms) !== JSON.stringify(result.terms || [])) {
-    subscriptionTerms = result.terms || [];
-    select.replaceChildren(new Option("全部学期", ""));
-    subscriptionTerms.forEach((item) => select.append(new Option(item, item)));
-    select.value = subscriptionTerms.includes(selected) ? selected : "";
+  const page = append ? catalogPage + 1 : 1;
+  if (!append) {
+    catalogRows = [];
+    catalogPage = 0;
+    catalogTotal = 0;
+    catalogHasMore = false;
   }
+  catalogLoading = true;
+  catalogError = false;
   renderSubscriptions();
+  try {
+    const result = await api(`/api/local/subscription-catalog?q=${encodeURIComponent(query)}&term=${encodeURIComponent(term)}&page=${page}&limit=${CATALOG_PAGE_SIZE}`);
+    if (request !== catalogRequest) return;
+    catalogRows = append ? [...catalogRows, ...(result.courses || [])] : result.courses || [];
+    catalogPage = result.page || page;
+    catalogTotal = result.total ?? catalogRows.length;
+    catalogHasMore = Boolean(result.has_more);
+    const select = $("#subscription-term");
+    if (JSON.stringify(subscriptionTerms) !== JSON.stringify(result.terms || [])) {
+      subscriptionTerms = result.terms || [];
+      select.replaceChildren(new Option("全部学期", ""));
+      subscriptionTerms.forEach((item) => select.append(new Option(item, item)));
+      select.value = subscriptionTerms.includes(term) ? term : "";
+    }
+  } catch (error) {
+    if (request !== catalogRequest) return;
+    catalogError = true;
+    message(error.message, true);
+  } finally {
+    if (request === catalogRequest) {
+      catalogLoading = false;
+      renderSubscriptions();
+    }
+  }
 }
 
 async function loadSubscriptions() {
@@ -2070,14 +2264,14 @@ function setObsidianView(open) {
 }
 
 function showView(view, options = {}) {
+  if (["rerun", "automation"].includes(view)) view = "run";
   const changed = view !== activeView;
   activeView = view;
   closeCourseDrawer();
   const paneIds = {
     courses: "view-courses", lectures: "view-lectures", detail: "view-detail",
     talks: "view-talks", talkDetail: "view-talk-detail",
-    search: "view-search", subscriptions: "view-subscriptions", rerun: "view-rerun",
-    automation: "view-automation", settings: "view-settings",
+    search: "view-search", subscriptions: "view-subscriptions", run: "view-run", settings: "view-settings",
     models: "model-management", obsidian: "obsidian-sync",
     blindCompare: "view-blind-compare",
   };
@@ -2085,14 +2279,14 @@ function showView(view, options = {}) {
   const title = {
     courses: "iCourse", lectures: currentCourse?.title || "课程", detail: currentLecture ? lectureDisplayName(currentLecture) : "笔记",
     talks: "讲座", talkDetail: currentTalk ? talkDisplayName(currentTalk) : "讲座",
-    search: "搜索", subscriptions: "订阅", rerun: "重跑",
-    automation: "自动化", settings: "设置", models: "模型与 API", obsidian: "同步到 Obsidian",
+    search: "搜索", subscriptions: "订阅",
+    run: "运行", settings: "设置", models: "模型与 API", obsidian: "同步到 Obsidian",
     blindCompare: blindCompare?.mode === "open" ? "公开对比" : "盲测对比",
   }[view] || "iCourse";
   $("#page-title").textContent = title;
   $("#back-button").classList.toggle("hidden", !["lectures", "detail", "talkDetail", "models", "obsidian", "rerun", "automation", "blindCompare"].includes(view));
   // Lectures/detail are depths of the courses path — keep 课程 highlighted;
-  // rerun/automation live under 设置 now. Talks is its own top-level entry.
+  // Run and Talks each have a top-level entry.
   // Blind compare inherits the source path (course notes vs talks).
   const blindNav = blindCompare?.source === "talk" ? "talks" : "courses";
   const navView = ["lectures", "detail"].includes(view) ? "courses"
@@ -2866,6 +3060,11 @@ $("#setup-form").onsubmit = async (event) => {
   submit.textContent = "正在连接…";
   try {
     await api("/api/local/configure", {method: "POST", body: JSON.stringify(data)});
+    runPreferencesLoaded = false;
+    runPriorityIds = [];
+    rerunSelectedCourseIds.clear(); rerunSelectedSubIds.clear();
+    rerunOpenCourseIds.clear(); rerunLectureCache.clear();
+    $("#run-api-key").value = "";
     message("本地会话已配置");
     activeView = "courses";
     await refreshStatus();
@@ -2978,31 +3177,17 @@ async function syncDatabase() {
 $("#header-sync-button").onclick = syncDatabase;
 
 $("#run-button").onclick = async () => {
-  if (!confirm("立即触发 iCourse Check workflow？")) return;
   try {
-    await api("/api/local/workflows/check.yml/dispatch", {
-      method: "POST",
-      body: JSON.stringify({ref: "main", inputs: {}}),
-    });
-    message("已触发课程检查");
-    setTimeout(loadRuns, 1500);
-  } catch (error) {
-    message(error.message, true);
-  }
+    await loadSubscriptions();
+    subscribedCourseIds.forEach(id => rerunSelectedCourseIds.add(String(id)));
+    $("#run-kind").value = "process";
+    updateRunSettings();
+  } catch (error) { message(error.message, true); }
 };
-
-$("#backfill-titles-button").onclick = async () => {
-  if (!confirm("为所有缺少标题的笔记生成 AI 标题？\n\n每篇笔记一次小调用（基于 PPT 与转录），不会重新生成摘要。")) return;
-  try {
-    await api("/api/local/workflows/single_run.yml/dispatch", {
-      method: "POST",
-      body: JSON.stringify({ref: "main", inputs: {backfill_titles: "true"}}),
-    });
-    message("已触发标题补齐，完成后检查更新即可看到新标题");
-    setTimeout(loadRuns, 1500);
-  } catch (error) {
-    message(error.message, true);
-  }
+$("#backfill-titles-button").onclick = () => {
+  $("#run-kind").value = "titles";
+  updateRunSettings();
+  window.scrollTo({top: 0, behavior: "smooth"});
 };
 
 $("#course-back-button").onclick = () => showView("courses", {keepScroll: true});
@@ -3074,7 +3259,7 @@ document.querySelectorAll(".nav-button").forEach((button) => {
     if (view === "subscriptions") {
       try { await loadSubscriptions(); }
       catch (error) { message(error.message, true); }
-    } else if (view === "rerun") {
+    } else if (view === "run" || view === "rerun") {
       try { await loadRerunView(); }
       catch (error) { message(error.message, true); }
     } else if (view === "talks") {
@@ -3104,15 +3289,28 @@ $("#subscription-sort-dir").onclick = () => {
 $("#subscription-term").onchange = () => loadSubscriptionCatalog().catch((error) => message(error.message, true));
 $("#subscription-query").oninput = () => {
   clearTimeout(subscriptionTimer);
+  // Invalidate in-flight pages immediately, before the debounce starts a new search.
+  ++catalogRequest;
+  catalogRows = [];
+  catalogPage = 0;
+  catalogTotal = 0;
+  catalogHasMore = false;
+  catalogError = false;
+  catalogLoading = true;
+  renderSubscriptions();
   subscriptionTimer = setTimeout(() => loadSubscriptionCatalog().catch((error) => message(error.message, true)), 240);
 };
+$("#subscription-catalog-more").onclick = () => loadSubscriptionCatalog(catalogPage > 0);
 $("#settings-obsidian-button").onclick = () => $("#obsidian-button").click();
 $("#settings-rerun-button").onclick = async () => {
-  showView("rerun");
-  try { await loadRerunView(); }
-  catch (error) { message(error.message, true); }
+  $("#run-kind").value = "rerun";
+  showView("run");
+  try { await loadRunView(); } catch (error) { message(error.message, true); }
 };
-$("#settings-automation-button").onclick = () => showView("automation");
+$("#settings-automation-button").onclick = async () => {
+  showView("run");
+  try { await loadRunView(); } catch (error) { message(error.message, true); }
+};
 $("#refresh-runs-button").onclick = () => loadRuns().catch((error) => message(error.message, true));
 
 /* ── 搜索：多关键词 AND、域/课程过滤、分页 ── */
@@ -3807,10 +4005,12 @@ async function checkWorkflowApprovals() {
   approvalPollBusy = true;
   try {
     const result = await api('/api/local/workflow-approvals', {method: 'POST'});
-    const error = result.errors?.map(item => item.message).join('; ') || "";
-    if (error && error !== lastApprovalError) message(`自动批准暂未成功：${error}；可在自动化页查看任务。`, true);
+    const errors = result.errors || [];
+    // Network blips self-heal on the next poll; only surface real GitHub denials.
+    const error = errors.every(item => item.transient) ? "" : errors.map(item => item.message).join('; ');
+    if (error && error !== lastApprovalError) message(`自动批准暂未成功：${error}；可在运行页查看任务。`, true);
     lastApprovalError = error;
-    if (activeView === 'automation') await loadRuns();
+    if (activeView === 'run') await loadRuns();
   } catch (error) {
     if (error.message !== lastApprovalError) message(`审批检查暂不可用：${error.message}`, true);
     lastApprovalError = error.message;
@@ -3859,7 +4059,7 @@ async function submitDataAction(deleting) {
   const subIds = [...$("#data-actions-lectures").querySelectorAll("input:checked")].map(input => input.value);
   if (!all && !subIds.length) { message("请至少选择一个课次。", true); return; }
   const scope = all ? "整门课程" : `${subIds.length} 个课次`;
-  if (!confirm(`${deleting ? "删除" : "导出"}「${dataActionCourse.title || dataActionCourse.course_id}」的${scope}？${deleting ? "远端资料将被清除，无法通过本页面撤销。" : "将触发后台导出并发送邮件。"}`)) return;
+  if (!confirm(`${deleting ? "删除" : "导出"}「${dataActionCourse.title || dataActionCourse.course_id}」的${scope}？${deleting ? "远端资料将被清除，无法通过本页面撤销。" : "完成后可在运行页打开运行记录，从 Artifacts 下载文件。"}`)) return;
   const buttons = [$("#data-delete-button"), $("#data-export-button")];
   buttons.forEach(button => { button.disabled = true; });
   try {
@@ -3867,7 +4067,7 @@ async function submitDataAction(deleting) {
     inputs.sub_ids = all ? "" : subIds.join(",");
     await api(`/api/local/workflows/${deleting ? "delete_course.yml" : "export.yml"}/dispatch`, {method: "POST", body: JSON.stringify({ref: "main", inputs})});
     $("#data-actions-dialog").close();
-    message(`已提交${deleting ? "删除" : "导出"}；可在自动化页查看运行状态。`);
+    message(deleting ? "已提交删除；可在运行页查看运行状态。" : "已提交导出；完成后在运行页打开运行记录，从 Artifacts 下载文件（保留 7 天）。");
   } catch (error) { message(error.message, true); }
   finally { buttons.forEach(button => { button.disabled = false; }); }
 }
@@ -3895,14 +4095,255 @@ $("#blind-refresh-versions").onclick = async () => {
 document.querySelectorAll(".blind-mode").forEach((button) => {
   button.onclick = () => setBlindMode(button.dataset.blindMode);
 });
-$("#single-run-button").onclick = async () => {
+$("#single-run-button").onclick = () => {
   const ids = [...new Set($("#single-run-ids").value.split(/[,，\s]+/).filter(Boolean))];
   if (!ids.length || ids.some(id => id.length > 100)) { message("请输入有效的课程 ID。", true); return; }
-  if (!confirm(`单次运行 ${ids.length} 门课程（${ids.join(", ")}）？将触发课程处理并产生相应模型费用。`)) return;
-  const button = $("#single-run-button"); button.disabled = true;
+  ids.forEach(id => {
+    rerunSelectedCourseIds.add(id);
+    if (!runPriorityIds.includes(id)) runPriorityIds.push(id);
+  });
+  $("#single-run-ids").value = "";
+  renderRerunView();
+};
+
+function runCourses() {
+  const rows = new Map([...subscriptionCourses, ...courseRows].map(row => [String(row.course_id), row]));
+  rerunSelectedCourseIds.forEach(id => {
+    if (!rows.has(id)) rows.set(id, {course_id: id, title: `课程 ${id}`, total_count: 0, summary_count: 0});
+  });
+  const rank = new Map(runPriorityIds.map((id, i) => [id, i]));
+  return [...rows.values()].sort((a, b) => (rank.get(String(a.course_id)) ?? rank.size) - (rank.get(String(b.course_id)) ?? rank.size));
+}
+
+function selectedRunCourseIds() {
+  const values = new Set(rerunSelectedCourseIds);
+  rerunLectureCache.forEach((lectures, cid) => {
+    if (lectures.some(row => rerunSelectedSubIds.has(String(row.sub_id)))) values.add(cid);
+  });
+  return runCourses().map(row => String(row.course_id)).filter(id => values.has(id));
+}
+
+function moveRunPriority(id, offset) {
+  const all = runCourses().map(row => String(row.course_id));
+  const visible = selectedRunCourseIds();
+  const index = visible.indexOf(id), next = visible[index + offset];
+  if (next === undefined) return;
+  const a = all.indexOf(id), b = all.indexOf(next);
+  [all[a], all[b]] = [all[b], all[a]];
+  runPriorityIds = all;
+  $("#run-priority-status").textContent = "本次队列顺序已调整；保存后也用于每日订阅运行。";
+  renderRerunView();
+}
+
+function renderRunQueue() {
+  const root = $("#run-queue");
+  root.replaceChildren();
+  const selected = selectedRunCourseIds();
+  root.classList.toggle("empty", !selected.length);
+  if (!selected.length) root.textContent = "从下方选择课程或课次。";
+  selected.forEach((id, index) => {
+    const row = document.createElement("div");
+    row.className = "run-queue-row";
+    row.dataset.courseId = id;
+    const number = document.createElement("span");
+    number.className = "run-queue-number";
+    number.textContent = String(index + 1).padStart(2, "0");
+    const label = document.createElement("span");
+    label.className = "run-queue-label";
+    label.textContent = runCourses().find(course => String(course.course_id) === id)?.title || id;
+    const actions = document.createElement("div");
+    actions.className = "run-queue-actions";
+    [-1, 1].forEach(offset => {
+      const button = createButton(offset < 0 ? "↑" : "↓", () => moveRunPriority(id, offset));
+      button.setAttribute("aria-label", `${offset < 0 ? "上移" : "下移"}${label.textContent}`);
+      button.disabled = index + offset < 0 || index + offset >= selected.length;
+      actions.append(button);
+    });
+    row.append(number, label, actions);
+    root.append(row);
+  });
+}
+
+function updateRunSettings() {
+  const local = $("#run-target").value === "local", kind = $("#run-kind").value;
+  $("#run-key-field").classList.toggle("hidden", !local || isPages);
+  $("#run-local-link").classList.toggle("hidden", !local || !isPages);
+  $("#run-target-hint").textContent = local
+    ? isPages ? "本地任务需在这台电脑的本地控制台启动。" : "使用这台电脑处理；关闭网页后任务仍会运行，本地服务需保持开启。"
+    : "任务在 GitHub 上执行，关闭电脑后仍会继续。笔记生成后自动同步。";
+  if (local && !isPages && runCapabilities && !runCapabilities.process_ready && kind === "process") {
+    $("#run-target-hint").textContent += " 当前需准备本地依赖或 ASR 权重。";
+  }
+  $("#run-kind-hint").textContent = {
+    process: "检查选中课程，跳过已完成的课次，继续未完成的处理。",
+    rerun: "复用转录与 PPT 文字重新生成，保留历史版本。可展开课程选课次，单次最多 20 节。",
+    titles: "只为选中课程中缺少标题的笔记补齐标题。",
+  }[kind];
+  $("#single-run-official").disabled = kind !== "process";
+  renderRerunView();
+  if (local && isPages) $("#rerun-page-submit").disabled = true;
+}
+
+async function loadRunView() {
+  const previousModel = selectedRerunModel("#rerun-page-model-select");
+  await loadSubscriptions();
+  if (!runPreferencesLoaded) {
+    const preferences = await api("/api/local/run-preferences");
+    runPriorityIds = [...new Set([...(preferences.course_ids || []).map(String), ...runPriorityIds])];
+    $("#run-lecture-order").value = preferences.lecture_order || "api";
+    runPreferencesLoaded = true;
+  }
+  await populateRerunModelSelect("#rerun-page-model-select", true, true);
+  if (previousModel) {
+    const index = rerunModelOptions.findIndex(option => option.provider === previousModel.provider && option.model === previousModel.model);
+    if (index >= 0) $("#rerun-page-model-select").value = String(index);
+  }
+  runCapabilities = await api("/api/local/run-capabilities");
+  updateRunSettings();
+  await refreshLocalRuns();
+  await loadRuns();
+}
+
+async function submitUnifiedRun() {
+  if (runSubmitting) return;
+  const model = selectedRerunModel("#rerun-page-model-select");
+  if (!model) { message("请先在模型与 API 中启用模型。", true); return; }
+  const priority = runCourses().map(course => String(course.course_id));
+  const courses = priority.filter(id => rerunSelectedCourseIds.has(id));
+  const payload = {...model, target: $("#run-target").value, kind: $("#run-kind").value,
+    course_ids: courses, sub_ids: [...rerunSelectedSubIds], priority_course_ids: priority,
+    lecture_order: $("#run-lecture-order").value,
+    use_official_transcript: $("#single-run-official").checked};
+  if (payload.target === "local") payload.api_key = $("#run-api-key").value;
+  runSubmitting = true;
+  updateRerunSubmit();
   try {
-    await api("/api/local/workflows/single_run.yml/dispatch", {method: "POST", body: JSON.stringify({ref: "main", inputs: {course_ids: ids.join(","), use_official_transcript: String($("#single-run-official").checked)}})});
-    message("已提交单次运行；可在自动化页查看进度。");
+    await api("/api/local/runs", {method: "POST", body: JSON.stringify(payload)});
+    $("#run-api-key").value = "";
+    message(`已开始${payload.target === "local" ? "本地" : "GitHub Actions"}任务；新笔记会自动载入。`);
+    lastCloudCheck = 0;
+    await refreshLocalRuns();
+    await loadRuns();
   } catch (error) { message(error.message, true); }
+  finally { runSubmitting = false; updateRunSettings(); }
+}
+
+async function refreshLocalRuns() {
+  const result = await api("/api/local/runs");
+  localRunRows = result.jobs || [];
+  const root = $("#local-runs");
+  const expanded = new Set([...root.querySelectorAll(".local-run")].filter(row => row.querySelector("details")?.open).map(row => row.dataset.jobId));
+  root.replaceChildren();
+  root.classList.toggle("empty", !localRunRows.length);
+  if (!localRunRows.length) root.textContent = isPages ? "请在本地控制台查看本机任务。" : "暂无本地任务。";
+  localRunRows.forEach(job => {
+    const row = document.createElement("div");
+    row.className = "local-run";
+    row.dataset.jobId = job.id;
+    const title = document.createElement("strong");
+    title.textContent = `${{process:"处理新课次",rerun:"重新生成笔记",titles:"补齐标题"}[job.kind]} · ${{queued:"排队中",in_progress:"运行中",completed:"已完成",failed:"部分失败或未完成",cancelled:"已停止"}[job.status] || job.status}`;
+    const progress = document.createElement("progress");
+    progress.max = job.total || 1;
+    if (job.total || ["completed", "failed", "cancelled"].includes(job.status)) progress.value = job.completed + job.failed;
+    const meta = document.createElement("p");
+    meta.className = "meta";
+    meta.textContent = `${job.completed}/${job.total || "—"} 篇已生成${job.failed ? ` · ${job.failed} 节失败` : ""} · ${job.current || ""}`;
+    row.append(title, progress, meta);
+    if (["queued", "in_progress"].includes(job.status)) {
+      const stop = createButton("停止本地任务", async () => {
+        stop.disabled = true;
+        try { await api(`/api/local/runs/${job.id}/cancel`, {method: "POST", body: "{}"}); await refreshLocalRuns(); }
+        catch (error) { message(error.message, true); stop.disabled = false; }
+      });
+      row.append(stop);
+    }
+    const details = document.createElement("details");
+    details.open = expanded.has(job.id);
+    const summary = document.createElement("summary");
+    summary.textContent = "运行日志";
+    const log = document.createElement("pre");
+    log.textContent = (job.logs || []).join("\n");
+    details.append(summary, log);
+    row.append(details);
+    root.append(row);
+  });
+}
+
+async function refreshVisibleNotes() {
+  if (activeView === "run") {
+    for (const id of rerunOpenCourseIds) {
+      rerunLectureCache.set(id, await api(`/api/local/courses/${encodeURIComponent(id)}/lectures`));
+    }
+    renderRerunView();
+  }
+  if (currentCourse && ["lectures", "detail"].includes(activeView)) {
+    const courseId = currentCourse.course_id, lectureId = currentLecture?.sub_id;
+    const lectures = await api(`/api/local/courses/${encodeURIComponent(courseId)}/lectures`);
+    if (currentCourse?.course_id !== courseId || !["lectures", "detail"].includes(activeView)) return;
+    courseLectures = lectures;
+    courseLectures.sort(compareLectures);
+    renderLectureList();
+    if (activeView === "detail" && currentLecture) {
+      const updated = await api(`/api/local/lectures/${encodeURIComponent(lectureId)}`);
+      if (currentLecture?.sub_id !== lectureId || activeView !== "detail") return;
+      const followLatest = updated.summary !== currentLecture.summary && selectedSummaryVersionKeys.size <= 1;
+      currentLecture = updated;
+      if (followLatest) {
+        selectedSummaryVersionKeys.clear();
+        const active = summaryVersions().find(version => version.summary === updated.summary && version.model === updated.summary_model);
+        if (active) selectedSummaryVersionKeys.add(active.key);
+      }
+      renderDetail();
+    }
+  }
+  if (activeView === "blindCompare" && blindCompare?.source === "lecture") await refreshBlindVersions();
+  if (activeView === "search" && $("#search").value.trim()) await runSearch(1);
+}
+
+async function pollRunUpdates(force = false) {
+  if (!statusState?.configured || liveRefreshBusy || document.hidden && !force) return;
+  liveRefreshBusy = true;
+  try {
+    await refreshLocalRuns();
+    const busy = localRunRows.some(job => ["queued", "in_progress"].includes(job.status));
+    await refreshStatus();
+    if (Date.now() - lastCloudCheck >= 15000 || force) {
+      lastCloudCheck = Date.now();
+      await api("/api/local/sync", {method: "POST", body: "{}"});
+      await refreshStatus();
+      if (activeView === "run") await loadRuns();
+    }
+    $("#run-live-status").textContent = busy ? "本地任务运行中 · 自动更新" : "自动更新已开启";
+  } catch (error) {
+    $("#run-live-status").textContent = "更新暂未成功，正在自动重试";
+  } finally { liveRefreshBusy = false; }
+}
+
+$("#run-target").onchange = updateRunSettings;
+$("#run-kind").onchange = () => { rerunSelectedSubIds.clear(); updateRunSettings(); };
+$("#run-course-query").oninput = renderRerunView;
+$("#run-clear-selection").onclick = () => { rerunSelectedCourseIds.clear(); rerunSelectedSubIds.clear(); renderRerunView(); };
+$("#run-save-priority").onclick = async () => {
+  const button = $("#run-save-priority");
+  button.disabled = true;
+  try {
+    const subscription = await api("/api/local/subscriptions");
+    const ids = new Set((subscription.course_ids || []).map(String));
+    const ordered = runCourses().map(row => String(row.course_id)).filter(id => ids.has(id));
+    (subscription.course_ids || []).forEach(id => { if (!ordered.includes(String(id))) ordered.push(String(id)); });
+    const saved = await api("/api/local/run-preferences", {method: "PUT", body: JSON.stringify({course_ids: ordered, lecture_order: $("#run-lecture-order").value})});
+    subscribedCourseIds = saved.course_ids;
+    $("#run-priority-status").textContent = "已保存，下次每日订阅运行按此顺序处理。";
+  } catch (error) { $("#run-priority-status").textContent = error.message; }
   finally { button.disabled = false; }
 };
+setInterval(pollRunUpdates, 3000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) pollRunUpdates(true); });
+if (location.hash === "#run") {
+  showView("run");
+  const openRun = () => {
+    if (statusState?.configured) loadRunView().catch(error => message(error.message, true));
+    else setTimeout(openRun, 1000);
+  };
+  openRun();
+}

@@ -11,6 +11,7 @@ from pathlib import Path
 from local_web.database import DatabaseManager, auto_lecture_title
 from local_web.github_client import GitHubClient
 from local_web.server import create_app
+from local_web.talks import TalkStore
 from local_web.state import (
     CourseZoneStore,
     LectureNameStore,
@@ -224,7 +225,7 @@ class DatabaseQueryTest(unittest.TestCase):
                 self.assertEqual(manager.subscription_ids(), ["1", "2"])
                 self.assertEqual(manager.subscription_terms(), ["2026-秋"])
                 self.assertEqual(
-                    manager.subscription_catalog("目录")[0]["course_id"], "2"
+                    manager.subscription_catalog("目录")["courses"][0]["course_id"], "2"
                 )
                 self.assertEqual(
                     [item["course_id"] for item in manager.subscription_courses(["2", "1"])],
@@ -239,6 +240,65 @@ class DatabaseQueryTest(unittest.TestCase):
                 )
                 self.assertEqual(detailed_notes[0]["transcript"], "转录关键词")
                 self.assertEqual(detailed_notes[0]["ocr_pages"][0]["text"], "OCR 关键词")
+            finally:
+                manager.close()
+
+    def test_subscription_catalog_exposes_every_match_across_pages(self):
+        class EmptyKeychain:
+            available = False
+
+            def load(self, _settings):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            manager = DatabaseManager(path)
+            try:
+                with closing(sqlite3.connect(manager.db_path)) as db:
+                    db.executescript(SCHEMA_SQL)
+                    db.executemany(
+                        "INSERT INTO all_courses(course_id, term, title, teacher, dept) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        [(f"catalog-{i:03d}", "2026-秋" if i < 205 else "2026-春",
+                          "目录课程", "目录教师", "目录学院") for i in range(207)]
+                        + [("field-id", "2026-秋", "另一课程", "独特教师", "独特学院")],
+                    )
+                    db.commit()
+                pages = [manager.subscription_catalog("目录课程", page=i) for i in (1, 2, 3)]
+                self.assertEqual([len(p["courses"]) for p in pages], [100, 100, 7])
+                self.assertEqual([p["total"] for p in pages], [207, 207, 207])
+                self.assertEqual([p["has_more"] for p in pages], [True, True, False])
+                found = [r["course_id"] for p in pages for r in p["courses"]]
+                self.assertEqual(len(set(found)), 207)
+                self.assertEqual(set(found), {f"catalog-{i:03d}" for i in range(207)})
+                self.assertEqual(manager.subscription_catalog("目录课程", page=4)["courses"], [])
+                filtered = manager.subscription_catalog("目录课程", "2026-秋", page=3)
+                self.assertEqual(filtered["total"], 205)
+                self.assertEqual(len(filtered["courses"]), 5)
+                self.assertFalse(filtered["has_more"])
+                for query in ("独特教师", "独特学院", "field-id"):
+                    result = manager.subscription_catalog(query)
+                    self.assertEqual(result["total"], 1)
+                    self.assertEqual(result["courses"][0]["course_id"], "field-id")
+                empty = manager.subscription_catalog("不存在的课程")
+                self.assertEqual(empty["total"], 0)
+                self.assertEqual(empty["courses"], [])
+                self.assertFalse(empty["has_more"])
+                bounded = manager.subscription_catalog("目录课程", limit=500, page=0)
+                self.assertEqual((bounded["page"], bounded["page_size"]), (1, 200))
+                self.assertEqual(len(bounded["courses"]), 200)
+
+                app = create_app(
+                    state=RuntimeState(store=SettingsStore(path), credential_store=EmptyKeychain()),
+                    database=manager, talk_store=TalkStore(path / "talks"),
+                )
+                endpoint = next(route.endpoint for route in app.routes
+                                if getattr(route, "path", None) == "/api/local/subscription-catalog")
+                response = asyncio.run(endpoint(q="目录课程", term="2026-秋", page=3))
+                self.assertEqual(response["terms"], ["2026-秋", "2026-春"])
+                self.assertEqual(response["total"], 205)
+                self.assertEqual(len(response["courses"]), 5)
+                self.assertFalse(response["has_more"])
             finally:
                 manager.close()
 

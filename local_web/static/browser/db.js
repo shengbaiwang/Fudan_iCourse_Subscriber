@@ -341,10 +341,15 @@ function _getAllCoursesTerms() {
 
 function _buildCatalogWhere(filters) {
   // Shared WHERE/params builder for paged search + count + dept distinct.
-  // Filters: { terms: string[], depts: string[], title: string, teacher: string }
+  // Filters: { terms: string[], depts: string[], title: string, teacher: string, query: string }
   var ex = _invalidTermExclusion();
   var clauses = ex.clauses.slice();
   var params = ex.params.slice();
+  if (filters.query && filters.query.trim()) {
+    clauses.push("(title LIKE ? OR teacher LIKE ? OR dept LIKE ? OR course_id LIKE ?)");
+    var needle = "%" + filters.query.trim() + "%";
+    params.push(needle, needle, needle, needle);
+  }
   if (filters.terms && filters.terms.length) {
     clauses.push("term IN (" + filters.terms.map(function () { return "?"; }).join(",") + ")");
     for (var i = 0; i < filters.terms.length; i++) params.push(filters.terms[i]);
@@ -367,15 +372,16 @@ function _buildCatalogWhere(filters) {
   };
 }
 
-function _searchAllCourses(filters, limit) {
+function _searchAllCourses(filters, limit, offset) {
   // Paged catalog search — used by the subscriptions editor middle column.
   // Pushes all filtering into sqlite so the JS heap never holds the full
   // 20k-row catalog.
   var w = _buildCatalogWhere(filters || {});
   var sql = "SELECT course_id, term, title, teacher, dept FROM all_courses "
-          + w.where + " ORDER BY term DESC, title LIMIT ?";
+          + w.where + " ORDER BY term DESC, title COLLATE NOCASE, course_id LIMIT ? OFFSET ?";
   var p = w.params.slice();
   p.push(limit || 200);
+  p.push(offset || 0);
   return _queryAll(sql, p);
 }
 

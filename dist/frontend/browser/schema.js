@@ -9,6 +9,7 @@
  * idx_ppt_pages_sub_status index are dropped because sql.js does not
  * enforce FKs by default and the frontend's row counts are too small for
  * the index to matter.
+ * emailed_at is retained only for compatibility with historical shards.
  */
 
 window.ICS = window.ICS || {};

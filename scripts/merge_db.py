@@ -111,10 +111,15 @@ def merge(local_path: str, remote_path: str):
             conn.execute("""
                 UPDATE main.lectures SET
                     transcript    = COALESCE(l.transcript,    main.lectures.transcript),
-                    summary       = COALESCE(l.summary,       main.lectures.summary),
-                    summary_model = COALESCE(l.summary_model, main.lectures.summary_model),
-                    ai_title      = COALESCE(l.ai_title,      main.lectures.ai_title),
-                    processed_at  = COALESCE(l.processed_at,  main.lectures.processed_at),
+                    summary = CASE WHEN COALESCE(julianday(l.processed_at), 0) >= COALESCE(julianday(main.lectures.processed_at), 0)
+                        THEN COALESCE(l.summary, main.lectures.summary) ELSE COALESCE(main.lectures.summary, l.summary) END,
+                    summary_model = CASE WHEN COALESCE(julianday(l.processed_at), 0) >= COALESCE(julianday(main.lectures.processed_at), 0)
+                        THEN COALESCE(l.summary_model, main.lectures.summary_model) ELSE COALESCE(main.lectures.summary_model, l.summary_model) END,
+                    ai_title = CASE WHEN COALESCE(julianday(l.processed_at), 0) >= COALESCE(julianday(main.lectures.processed_at), 0)
+                        THEN COALESCE(l.ai_title, main.lectures.ai_title) ELSE COALESCE(main.lectures.ai_title, l.ai_title) END,
+                    processed_at = CASE WHEN COALESCE(julianday(l.processed_at), 0) >= COALESCE(julianday(main.lectures.processed_at), 0)
+                        THEN COALESCE(NULLIF(l.processed_at, ''), NULLIF(main.lectures.processed_at, ''))
+                        ELSE COALESCE(NULLIF(main.lectures.processed_at, ''), NULLIF(l.processed_at, '')) END,
                     emailed_at    = COALESCE(l.emailed_at,    main.lectures.emailed_at),
                     error_msg = CASE
                         WHEN COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL

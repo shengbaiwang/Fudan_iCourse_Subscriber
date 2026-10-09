@@ -7,8 +7,7 @@ AudioDownloader.  This file does only orchestration:
   1. Build all components.
   2. Login + enumerate.
   3. Drive LectureRunner across the queued lectures.
-  4. Email + bookkeeping.
-  5. Shutdown.
+  4. Shutdown (each lecture persists its notes as it completes).
 
 Anything more interesting belongs in one of ``src/*`` modules.
 """
@@ -19,11 +18,12 @@ import traceback
 
 from src.runtime import config
 from src.data.database import Database
-from src.api.emailer import Emailer
 from src.api.icourse import ICourseClient
 from src.pipeline.lecture_runner import LectureRunner
 from src.runtime.reporter import Reporter
 from src.runtime.scheduler import Scheduler
+from src.runtime.run_order import ordered_lectures
+from src.runtime.progress import emit, note_saved
 from src.ai.summarizer import Summarizer
 from src.ai.transcriber import Transcriber
 from src.api.webvpn import WebVPNSession
@@ -127,6 +127,7 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
                 for u in unprocessed if u["sub_id"] not in new_ids
             ]
             new_lectures.extend(retry_only)
+            new_lectures = ordered_lectures(new_lectures, config.LECTURE_ORDER)
             reporter.course_new_count(len(new_lectures))
             if not new_lectures:
                 continue
@@ -140,6 +141,7 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
                 )
                 out.append((course_id, course_title, lecture))
         except Exception:
+            emit("course_failed", course_id=course_id)
             reporter.course_enumeration_error(course_id)
             traceback.print_exc()
     return out
@@ -148,8 +150,7 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
 def _drive_lectures(client: ICourseClient, db: Database,
                     scheduler: Scheduler, transcriber: Transcriber,
                     summarizer: Summarizer, reporter: Reporter,
-                    all_lectures: list[tuple[str, str, dict]],
-                    email_items: list) -> None:
+                    all_lectures: list[tuple[str, str, dict]], *, runner=None) -> None:
     """Phase 2: run each lecture through LectureRunner.
 
     Pre-schedules the first lecture's prefetch (audio + images) before
@@ -159,9 +160,10 @@ def _drive_lectures(client: ICourseClient, db: Database,
     if not all_lectures:
         return
 
-    runner = LectureRunner(
+    runner = runner or LectureRunner(
         client, db, scheduler, transcriber, summarizer, reporter,
     )
+    emit("queue", total=len(all_lectures))
 
     first_course, _, first_lec = all_lectures[0]
     runner.prefetch_first(first_course, str(first_lec["sub_id"]))
@@ -174,19 +176,19 @@ def _drive_lectures(client: ICourseClient, db: Database,
             next_info = (next_course, str(next_lec["sub_id"]))
 
         _check_session(client)
+        emit("lecture", sub_id=sub_id, course_id=course_id, index=i + 1,
+             total=len(all_lectures), title=lecture.get("sub_title", ""))
         try:
-            summary = runner.run(
+            runner.run(
                 course_id, course_title, lecture, next_info=next_info,
             )
-            if summary:
-                email_items.append({
-                    "sub_id": sub_id,
-                    "course_title": course_title,
-                    "sub_title": lecture.get("sub_title", sub_id),
-                    "date": lecture.get("date", ""),
-                    "summary": summary,
-                })
+            saved = db.get_lecture(sub_id) or {}
+            if saved.get("summary"):
+                note_saved(db, sub_id)
+            else:
+                emit("failed", sub_id=sub_id)
         except Exception:
+            emit("failed", sub_id=sub_id)
             reporter.lecture_error(sub_id)
             traceback.print_exc()
         finally:
@@ -195,36 +197,6 @@ def _drive_lectures(client: ICourseClient, db: Database,
             # PPTPipeline.submit released the cache.
             scheduler.image_cache.discard(sub_id)
             scheduler.audio_downloader.release(sub_id)
-
-
-def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
-                email_items: list) -> None:
-    """Append any previously-processed-but-unsent lectures, then send."""
-    unsent = db.get_unsent_lectures()
-    if unsent:
-        seen_sub_ids = {item["sub_id"] for item in email_items}
-        for row in unsent:
-            if row["sub_id"] not in seen_sub_ids:
-                email_items.append({
-                    "sub_id": row["sub_id"],
-                    "course_title": row["course_title"],
-                    "sub_title": row["sub_title"],
-                    "date": row["date"],
-                    "summary": row["summary"],
-                })
-        reporter.email_recovered_unsent(len(unsent))
-
-    if not (emailer and email_items):
-        return
-    try:
-        reporter.email_summary(len(email_items))
-        if emailer.send(email_items):
-            db.mark_emailed_batch([item["sub_id"] for item in email_items])
-        else:
-            reporter.email_failed()
-    except Exception:
-        reporter.info("[Email] Failed to send:")
-        traceback.print_exc()
 
 
 def _crawl_semester_catalog(client: ICourseClient, db: Database,
@@ -294,13 +266,9 @@ def run():
         print(f"  [Date] Synced {corrected} lecture date(s) from sub_title", flush=True)
     transcriber = Transcriber()
     summarizer = Summarizer() if config.COURSE_IDS else None
-    emailer = Emailer() if (
-        config.SMTP_EMAIL and config.SMTP_PASSWORD
-    ) else None
 
     vpn = login_with_retry()
     client = ICourseClient(vpn)
-    email_items: list = []
 
     # Refresh the semester catalog: run on the 5th and 25th of each month,
     # or immediately if the database has no catalog data yet.
@@ -323,13 +291,12 @@ def run():
         all_lectures = _enumerate_lectures(client, db, reporter)
         _drive_lectures(
             client, db, scheduler, transcriber, summarizer, reporter,
-            all_lectures, email_items,
+            all_lectures,
         )
 
     finally:
         scheduler.shutdown()
 
-    _send_email(emailer, db, reporter, email_items)
     reporter.run_footer()
 
 

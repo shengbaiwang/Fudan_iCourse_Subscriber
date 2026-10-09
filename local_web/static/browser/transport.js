@@ -169,6 +169,12 @@
     await github.putRepoSecret(repository.owner, repository.repo, credentials.token, name,
       sodium.to_base64(cipher, sodium.base64_variants.ORIGINAL), pub.key_id);
   }
+  async function setVariable(name, value) {
+    const old = await gh(`/actions/variables/${name}`, {}, true);
+    await gh(old ? `/actions/variables/${name}` : '/actions/variables', {
+      method: old ? 'PATCH' : 'POST', body: JSON.stringify({name, value}),
+    });
+  }
   function validateProviders(document) {
     if (Array.isArray(document)) document = {version: 1, providers: document};
     if (![undefined, 1, '1'].includes(document?.version)) throw new Error('不支持的模型配置版本');
@@ -252,6 +258,40 @@
     await dispatch('single_run.yml', {inputs: {course_ids: '', resummarize_sub_ids: subIds.join(','), summary_provider: payload.provider, summary_model: payload.model, use_official_transcript: 'false'}});
     return {ok: true, sub_ids: subIds, count: subIds.length};
   }
+
+  async function startRun(payload) {
+    if (payload.target !== 'github') throw new Error('请在本地控制台启动本机任务');
+    const kind = payload.kind;
+    if (!['process','rerun','titles'].includes(kind) || !['oldest','newest','api'].includes(payload.lecture_order)) throw new Error('运行选项无效');
+    const priority = ids(payload.priority_course_ids), rank = new Map(priority.map((id, i) => [id, i]));
+    const courseIds = ids(payload.course_ids).sort((a,b) => (rank.get(a) ?? rank.size) - (rank.get(b) ?? rank.size));
+    if (courseIds.some(id => id.length > 100 || /[,\s]/.test(id))) throw new Error('课程 ID 格式不正确');
+    const config = await providers();
+    const provider = config.providers.find(row => row.name === payload.provider && row.enabled && row.api_key_configured);
+    if (!provider?.models.includes(payload.model)) throw new Error('所选模型未启用或尚未配置 GitHub Key');
+    const inputs = {course_ids:courseIds.join(','),lecture_order:payload.lecture_order,
+      summary_provider:payload.provider,summary_model:payload.model,use_official_transcript:String(!!payload.use_official_transcript)};
+    let count = courseIds.length;
+    if (kind === 'rerun') {
+      const selected = ids(payload.sub_ids);
+      courseIds.forEach(cid => db.getLectures(cid).forEach(row => {
+        if (row.transcript_available && !selected.includes(String(row.sub_id))) selected.push(String(row.sub_id));
+      }));
+      if (!selected.length || selected.length > 20) throw new Error(`已选择 ${selected.length} 个可重跑课次；一次请选择 1–20 个`);
+      const rows = selected.map(id => {
+        const row = db.getLecture(id);
+        if (!row?.transcript?.trim() || id.length > 100 || /[,\s]/.test(id)) throw new Error(`课次没有可用转录：${id}`);
+        return row;
+      });
+      if (payload.lecture_order !== 'api') rows.sort((a,b) => String(a.date || '').localeCompare(String(b.date || '')) * (payload.lecture_order === 'newest' ? -1 : 1));
+      rows.sort((a,b) => (rank.get(String(a.course_id)) ?? rank.size) - (rank.get(String(b.course_id)) ?? rank.size));
+      inputs.resummarize_sub_ids = rows.map(row => String(row.sub_id)).join(',');
+      count = rows.length;
+    } else if (!courseIds.length) throw new Error('请选择要运行的课程');
+    if (kind === 'titles') inputs.backfill_titles = 'true';
+    await dispatch('single_run.yml', {inputs});
+    return {ok:true,target:'github',count};
+  }
   function plainMarkdown(value) {
     return String(value || '').replace(/\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\$[^$\n]+\$|\\\([\s\S]*?\\\)/g, ' ')
       .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
@@ -314,6 +354,22 @@
     if (!credentials) throw new Error('请先连接 GitHub 仓库');
     if (route === '/workflow-approvals' && method === 'POST') return checkApprovals();
     if (route === '/sync' && method === 'POST') return synchronize();
+    if (route === '/run-capabilities') return {local:false,github:true,process_ready:false,summary_ready:false};
+    if (route === '/runs') return method === 'POST' ? startRun(payload) : {jobs:[]};
+    if (route === '/run-preferences') {
+      if (method === 'PUT') {
+        const current = ids(subscriptions().course_ids), ordered = ids(payload.course_ids);
+        if (ordered.some(id => id.length > 100 || /[,\s]/.test(id))) throw new Error('课程 ID 格式不正确');
+        if (current.length !== ordered.length || current.some(id => !ordered.includes(id))) throw new Error('订阅已变化，请重新打开运行页面');
+        if (!['oldest','newest','api'].includes(payload.lecture_order)) throw new Error('课次顺序无效');
+        await setSecret('COURSE_IDS', ordered.join(','));
+        savePreference('subscriptions', ordered);
+        await setVariable('LECTURE_ORDER', payload.lecture_order);
+        return {course_ids:ordered,lecture_order:payload.lecture_order};
+      }
+      const variable = await gh('/actions/variables/LECTURE_ORDER', {}, true);
+      return {course_ids:subscriptions().course_ids,lecture_order:variable?.value || 'api'};
+    }
     if (route === '/workflows') return (await gh('/actions/runs?per_page=10')).workflow_runs;
     const workflow = /^\/workflows\/([^/]+)\/dispatch$/.exec(route);
     if (workflow && method === 'POST') return dispatch(workflow[1], payload);
@@ -402,11 +458,16 @@
       return subscriptions();
     }
     if (route === '/subscription-catalog') {
-      const q = `%${(url.searchParams.get('q') || '').trim()}%`;
+      const q = (url.searchParams.get('q') || '').trim();
       const term = url.searchParams.get('term') || '';
-      return {terms: db.getAllCoursesTerms(), courses: query(`SELECT course_id, title, teacher, term, dept FROM all_courses
-        WHERE term NOT GLOB '*_19_*' AND term != '25' AND (title LIKE ? OR teacher LIKE ? OR dept LIKE ? OR course_id LIKE ?)
-        ${term ? 'AND term = ?' : ''} ORDER BY term DESC, title LIMIT 100`, [q, q, q, q, ...(term ? [term] : [])])};
+      const page = Math.max(1, Number.parseInt(url.searchParams.get('page'), 10) || 1);
+      const requestedLimit = Number.parseInt(url.searchParams.get('limit'), 10);
+      const pageSize = Math.max(1, Math.min(Number.isFinite(requestedLimit) ? requestedLimit : 100, 200));
+      const filters = {query: q, terms: term ? [term] : []};
+      const total = db.countAllCourses(filters);
+      return {terms: db.getAllCoursesTerms(),
+        courses: db.searchAllCourses(filters, pageSize, (page - 1) * pageSize),
+        total, page, page_size: pageSize, has_more: page * pageSize < total};
     }
     throw new Error('这项操作需要启动本地控制台');
   }

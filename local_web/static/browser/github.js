@@ -280,9 +280,7 @@ async function _triggerExportWorkflow(
   owner, repo, ref, token, courseId, exportType, subIds
 ) {
   // Fires the existing .github/workflows/export.yml workflow_dispatch.
-  // The workflow runs scripts/export_course.py (WeasyPrint) and emails
-  // the resulting PDF to RECEIVER_EMAIL — same output the user gets when
-  // triggering the workflow manually from the Actions UI.
+  // The workflow saves HTML, Markdown or PDF files as downloadable artifacts.
   //
   // Requires the PAT to grant Actions: Write (in addition to Contents:RW).
   const url = `${_GH_API}/repos/${owner}/${repo}/actions/workflows/export.yml/dispatches`;
