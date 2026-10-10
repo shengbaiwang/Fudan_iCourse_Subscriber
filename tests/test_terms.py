@@ -12,18 +12,22 @@ from src.data.terms import normalize_term, term_sort_key
 
 
 CASES = [
-    ("2026-20271", "2026–2027 第一学期"),
+    ("2026-20271", "2026–2027 秋季"),
     ("2025-2026暑期", "2025–2026 暑期"),
-    ("2025-20262", "2025–2026 第二学期"),
-    ("2025-20261", "2025–2026 第一学期"),
-    ("2024-20252", "2024–2025 第二学期"),
-    ("2024-20251", "2024–2025 第一学期"),
-    ("2023-2024-2", "2023–2024 第二学期"),
-    ("2030-20311", "2030–2031 第一学期"),
-    ("2030–2031 第二学期", "2030–2031 第二学期"),
-    (" 2030 — 2031 第1学期 ", "2030–2031 第一学期"),
+    ("2025-20262", "2025–2026 春季"),
+    ("2025-20261", "2025–2026 秋季"),
+    ("2024-20252", "2024–2025 春季"),
+    ("2024-20251", "2024–2025 秋季"),
+    ("2023-2024-2", "2023–2024 春季"),
+    ("2030-20311", "2030–2031 秋季"),
+    ("2030–2031 春季", "2030–2031 春季"),
+    (" 2030 — 2031 第1学期 ", "2030–2031 秋季"),
     ("2030-2031学年暑期学期", "2030–2031 暑期"),
-    ("2030-2031-2", "2030–2031 第二学期"),
+    ("2030-2031-2", "2030–2031 春季"),
+    ("2030–2031 第一学期", "2030–2031 秋季"),
+    ("2030–2031 第二学期", "2030–2031 春季"),
+    ("2030-2031 秋季学期", "2030–2031 秋季"),
+    ("2030-2031春季", "2030–2031 春季"),
     (None, ""), ("", ""), (" \t　", ""),
     ("2026-秋", "2026-秋"), ("25", "25"),
     ("2030-20321", "2030-20321"),
@@ -60,10 +64,10 @@ def test_legacy_terms_group_filter_and_sort_without_rewriting_catalog(tmp_path):
         expected = [name for _, name in CASES[:7]]
         # Unknown names are preserved; known ones retain chronological order.
         assert manager.subscription_terms() == expected[:1] + ["2026-2026暑期"] + expected[1:]
-        for term in ("2025–2026 第一学期", "2025-20261", "2025-2026-1"):
+        for term in ("2025–2026 秋季", "2025–2026 第一学期", "2025-20261", "2025-2026-1"):
             result = manager.subscription_catalog(term=term, limit=1)
             assert result["total"] == 2
-            assert result["courses"][0]["term"] == "2025–2026 第一学期"
+            assert result["courses"][0]["term"] == "2025–2026 秋季"
             second = manager.subscription_catalog(term=term, limit=1, page=2)
             assert second["courses"][0]["course_id"] != result["courses"][0]["course_id"]
         assert manager.subscription_courses(["0"])[0]["term"] == expected[0]
@@ -79,14 +83,14 @@ def test_future_imports_and_catalog_replacements_keep_format(tmp_path):
     writer = Database(str(manager.db_path))
     try:
         writer.upsert_all_courses_for_term("2035-20361", [{"course_id": "new"}, {"course_id": "dropped"}])
-        assert manager.subscription_terms() == ["2035–2036 第一学期"]
+        assert manager.subscription_terms() == ["2035–2036 秋季"]
         writer.upsert_all_courses_for_term("2035-20361", [{"course_id": "new"}])
         writer.upsert_all_courses_for_term("2035-2036-2", [{"course_id": "new"}])
         writer.upsert_all_courses_for_term("2035-2036暑期", [{"course_id": "summer"}])
-        assert manager.subscription_terms() == ["2035–2036 暑期", "2035–2036 第二学期", "2035–2036 第一学期"]
+        assert manager.subscription_terms() == ["2035–2036 暑期", "2035–2036 春季", "2035–2036 秋季"]
         assert manager.subscription_catalog()["total"] == 3
-        assert manager.subscription_courses(["new"])[0]["term"] == "2035–2036 第二学期"
-        assert manager.subscription_catalog(term="2035–2036 第一学期")["total"] == 1
+        assert manager.subscription_courses(["new"])[0]["term"] == "2035–2036 春季"
+        assert manager.subscription_catalog(term="2035–2036 秋季")["total"] == 1
     finally:
         writer.conn.close()
         manager.close()

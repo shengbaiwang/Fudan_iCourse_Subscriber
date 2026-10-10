@@ -414,24 +414,17 @@
     }
     if (route === '/course-zones' || route === '/course-sections') {
       const legacy = readPreference('zones', {});
-      const state = readPreference('organization', {zones: legacy, revision: 0,
+      const state = window.ICS.organization.migrateOrganization(readPreference('organization', {zones: legacy, revision: 0,
         default_zone: Object.keys(legacy).length ? 'organize' : 'unassigned',
-        sections: Object.keys(legacy).length ? [{id:'organize',name:'整理区'}, {id:'study',name:'学习区'}, {id:'reference',name:'查阅区'}] : []});
+        sections: Object.keys(legacy).length ? [{id:'organize',name:'整理区'}, {id:'study',name:'学习区'}, {id:'reference',name:'查阅区'}] : []}));
       if (method === 'PUT' && route === '/course-sections') {
         if (payload.revision !== state.revision) throw new Error('分区已在其他页面更新，请刷新后重试');
-        const sections = payload.sections;
-        if (!Array.isArray(sections) || sections.length > 100) throw new Error('最多创建 100 个分区');
-        const sectionIds = new Set(), sectionNames = new Set();
-        for (const section of sections) {
-          const name = String(section.name || '').trim();
-          if (!(/^(organize|study|reference|section-[a-f0-9]{32})$/.test(section.id)) || ['archive','unassigned'].includes(section.id) || sectionIds.has(section.id)) throw new Error('分区标识无效或重复');
-          if (!name || name.length > 40 || ['归档','归档区','未分区'].includes(name) || sectionNames.has(name.toLowerCase())) throw new Error('分区名称无效或重复');
-          sectionIds.add(section.id); sectionNames.add(name.toLowerCase()); section.name = name;
-        }
+        const sections = window.ICS.organization.validateSections(payload.sections);
+        const sectionIds = new Set(sections.map(s => s.id));
         const allowed = new Set([...sectionIds, 'archive', 'unassigned']);
-        state.sections = sections.map(({id,name}) => ({id,name}));
+        state.sections = sections;
         state.zones = Object.fromEntries(Object.entries(state.zones).map(([id,zone]) => [id, allowed.has(zone) ? zone : 'unassigned']));
-        if (!allowed.has(state.default_zone)) state.default_zone = 'unassigned';
+        state.default_zone = 'unassigned';
         state.revision += 1;
         savePreference('organization', state);
       } else if (method === 'PUT') {

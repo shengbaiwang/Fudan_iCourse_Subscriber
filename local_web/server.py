@@ -134,6 +134,7 @@ class CourseZoneRequest(BaseModel):
 class CourseSectionRequest(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=40)
+    parent_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class CourseSectionsRequest(BaseModel):
@@ -627,7 +628,7 @@ def create_app(
     async def save_course_sections(payload: CourseSectionsRequest) -> dict:
         try:
             await run_in_threadpool(runtime.save_course_sections,
-                                    [item.model_dump() for item in payload.sections], payload.revision)
+                                    [item.model_dump(exclude_none=True) for item in payload.sections], payload.revision)
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return runtime.course_organization()

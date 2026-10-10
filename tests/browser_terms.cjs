@@ -25,12 +25,12 @@ const vm = require('node:vm');
   const bytes = legacy.export();
   legacy.close();
   const check = () => {
-    assert.deepEqual(Array.from(api.getAllCoursesTerms()), ['2025–2026 暑期', '2025–2026 第二学期', '2025–2026 第一学期']);
-    assert.equal(api.getCourses()[0].term, '2025–2026 第二学期');
-    assert.equal(api.getCoursesByIds(['1'])[0].term, '2025–2026 第二学期');
-    for (const term of ['2025–2026 第一学期', '2025-2026-1', '2025-20261']) {
+    assert.deepEqual(Array.from(api.getAllCoursesTerms()), ['2025–2026 暑期', '2025–2026 春季', '2025–2026 秋季']);
+    assert.equal(api.getCourses()[0].term, '2025–2026 春季');
+    assert.equal(api.getCoursesByIds(['1'])[0].term, '2025–2026 春季');
+    for (const term of ['2025–2026 秋季', '2025–2026 第一学期', '2025-2026-1', '2025-20261']) {
       assert.equal(api.countAllCourses({terms: [term]}), 2);
-      assert.equal(api.searchAllCourses({terms: [term]}, 1)[0].term, '2025–2026 第一学期');
+      assert.equal(api.searchAllCourses({terms: [term]}, 1)[0].term, '2025–2026 秋季');
       assert.deepEqual(Array.from(api.getAllCoursesDepts([term])), ['院系']);
     }
     assert.equal(api.queryAll("SELECT term FROM all_courses WHERE course_id = '2'")[0].term, '2025-20261');
@@ -45,8 +45,8 @@ const vm = require('node:vm');
   await api.attachShard(bytes);
   check();
   api.queryAll("INSERT INTO all_courses VALUES ('future','2030-20311','新课程','教师','院系','new')");
-  assert.equal(api.getAllCoursesTerms()[0], '2030–2031 第一学期');
-  assert.equal(api.countAllCourses({terms: ['2030–2031 第一学期']}), 1);
+  assert.equal(api.getAllCoursesTerms()[0], '2030–2031 秋季');
+  assert.equal(api.countAllCourses({terms: ['2030–2031 秋季']}), 1);
   api.close();
   console.log('Browser term queries passed (legacy, cache, shards, future imports).');
 })().catch(error => { console.error(error); process.exitCode = 1; });

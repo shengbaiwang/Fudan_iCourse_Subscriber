@@ -258,20 +258,30 @@ mark.user-highlight:hover { background:var(--hl-hover); }
 /* Custom sections share the sidebar across desktop and mobile. */
 .sidebar-section-heading { display:flex; align-items:center; gap:4px; }
 .sidebar-section-heading .sidebar-section-toggle { flex:1; width:auto; }
-.sidebar-edit { flex:none; padding:4px 8px; border:0; background:transparent; color:var(--muted); font-size:11px; }
 .sidebar-add { color:var(--blue); font-weight:500; }
-.course-archive-button { padding:4px 7px; border:0; background:transparent; color:var(--muted); font-size:12px; }
-#section-editor { width:min(560px, calc(100% - 24px)); max-height:85dvh; overflow:auto; padding:24px; border:1px solid var(--line); border-radius:16px; background:var(--card); color:var(--ink); box-shadow:0 24px 80px #0004; }
-#section-editor::backdrop { background:#0007; }
-#section-editor h2 { margin:0 0 8px; font-size:19px; }
-#section-editor-fields { margin:20px 0 0; padding:0; border:0; min-width:0; }
-#section-editor-list { display:grid; gap:8px; margin-bottom:12px; }
-.section-editor-row { display:flex; align-items:center; gap:6px; }
-.section-editor-row input { flex:1; min-width:0; margin:0; }
-.section-editor-row button { flex:none; padding:8px; }
-.section-editor-row [data-action="delete"], #section-editor-error { color:var(--danger); }
+.sidebar-tree-row { position:relative; display:flex; align-items:center; min-width:0; margin-left:calc(8px + var(--depth) * 12px); border-radius:8px; }
+.sidebar-tree-row .sidebar-item { flex:1; min-width:0; padding-right:4px; }
+.sidebar-tree-toggle, .sidebar-tree-spacer { flex:none; width:18px; }
+.sidebar-tree-toggle { padding:4px 0; border:0; background:transparent; color:var(--text-faint); font-size:12px; }
+.sidebar-tree-row > .sidebar-item { -webkit-touch-callout:none; user-select:none; }
+.sidebar-item.drop-target, [data-drop-position="inside"] { background:var(--blue-soft); outline:1px solid var(--blue); }
+.sidebar-tree-row[data-drop-position="before"]::before, .sidebar-tree-row[data-drop-position="after"]::after { content:""; position:absolute; left:18px; right:0; height:2px; background:var(--blue); pointer-events:none; }
+.sidebar-tree-row[data-drop-position="before"]::before { top:-2px; }
+.sidebar-tree-row[data-drop-position="after"]::after { bottom:-2px; }
+.sidebar-tree-row.dragging, .course-card.dragging { opacity:.45; }
+.section-inline-field { flex:1; min-width:0; padding:2px 0; }
+.section-name-input { width:100%; min-width:0; margin:0; padding:5px 7px; border:1px solid var(--blue); border-radius:6px; background:var(--card); color:var(--ink); font-size:13px; font-weight:600; }
+.section-inline-error { display:block; margin:4px 2px; color:var(--danger); font-size:11px; line-height:1.4; }
+.section-context-menu { position:fixed; z-index:80; display:grid; gap:2px; width:min(220px, calc(100vw - 16px)); max-height:calc(100dvh - 16px); overflow:auto; padding:5px; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--ink); box-shadow:0 8px 30px #0004; }
+.section-context-menu button { width:100%; padding:8px 10px; border:0; border-radius:6px; background:transparent; color:var(--ink); text-align:left; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.section-context-menu button:hover, .section-context-menu button:focus-visible { background:var(--blue-soft); color:var(--blue); }
+.section-context-menu button:disabled { opacity:.4; }
+.section-context-menu button.danger { color:var(--danger); }
+.section-undo { margin-left:12px; padding:3px 8px; border:0; background:transparent; color:var(--blue); font-size:13px; font-weight:650; }
 .section-editor-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; }
-@media (max-width:420px) { #section-editor { padding:16px; } .section-editor-row { gap:4px; } }
+.course-drag-handle { flex:none; cursor:grab; color:var(--text-faint); font-size:18px; }
+.course-archive-button { padding:4px 7px; border:0; background:transparent; color:var(--muted); font-size:12px; }
+@media (hover:none), (pointer:coarse) { .section-context-menu button { min-height:40px; } .section-name-input { font-size:16px; } }
 
 /* Model settings: provider navigation and one focused editor. */
 .model-workspace { display:grid; grid-template-columns:230px minmax(0,1fr); gap:18px; margin-top:20px; align-items:start; }

@@ -19,6 +19,8 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   const SQL = await require(path.join(sqlDir, 'sql-wasm.js'))({locateFile: name => path.join(sqlDir, name)});
   const schemaContext = {window: {}};
   vm.runInNewContext(fs.readFileSync(path.join(root, 'local_web/static/browser/schema.js'), 'utf8'), schemaContext);
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'local_web/static/organization.js'), 'utf8'), schemaContext);
+  const organization = schemaContext.window.ICS.organization;
   const database = new SQL.Database();
   database.exec(schemaContext.window.ICS.schema.SCHEMA_SQL);
   database.run("INSERT INTO courses VALUES ('1', '现代思想史', '陈老师'), ('2', '科学与社会', '李老师')");
@@ -61,6 +63,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   const lectures = rows("SELECT *,summary IS NOT NULL has_summary,transcript IS NOT NULL transcript_available FROM lectures WHERE course_id='1'");
   const lecture = {...rows("SELECT l.*,c.title course_title,c.teacher FROM lectures l JOIN courses c USING(course_id) WHERE sub_id='10'")[0],summary_versions:rows("SELECT * FROM summary_versions"),ppt_pages:rows("SELECT * FROM ppt_pages")};
   let sections = [{id:'study', name:'学习区'}];
+  let sectionsRevision = 0;
   let zones = {}, names = {}, version = 'commit-1', missingShard = false, legacy = false, liveShard = false;
   let localRevision = 0, localJobs = [], runRequests = [], preferences = {course_ids:['1'],lecture_order:'api'};
   let dispatches = [];
@@ -77,7 +80,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  let browser;
+  let browser, lastPage;
   try {
     browser = await chromium.launch({headless:true, channel: process.env.BROWSER_CHANNEL || 'chrome'});
     const context = await browser.newContext({viewport: {width:1280,height:900}, colorScheme: 'dark'});
@@ -127,7 +130,16 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         if(p==='/runs/local-job/cancel') {localJobs[0].status='cancelled';return json(localJobs[0]);}
         if (p==='/courses') return json(courses);
         if (p==='/lecture-names') {if(request.method()==='PUT') {const body=request.postDataJSON();names[body.sub_id]=body.name;} return json({names});}
-        if (p==='/course-zones') {if(request.method()==='PUT') {const body=request.postDataJSON();zones[body.course_id]=body.zone;} return json({zones,sections,revision:0,default_zone:"unassigned"});}
+        if (p==='/course-zones') {if(request.method()==='PUT') {const body=request.postDataJSON();zones[body.course_id]=body.zone;} return json({zones,sections,revision:sectionsRevision,default_zone:"unassigned"});}
+        if (p==='/course-sections' && request.method()==='PUT') {
+          const body = request.postDataJSON();
+          if (body.revision !== sectionsRevision) return route.fulfill({status:400,json:{detail:'分区已在其他窗口更新'}});
+          sections = organization.validateSections(body.sections);
+          const allowed = new Set(['archive','unassigned',...sections.map(s=>s.id)]);
+          zones = Object.fromEntries(Object.entries(zones).map(([id,zone])=>[id,allowed.has(zone)?zone:'unassigned']));
+          sectionsRevision++;
+          return json({zones,sections,revision:sectionsRevision,default_zone:'unassigned'});
+        }
         if (p==='/workflows') return json([]);
         if (p==='/workflow-approvals') return json({approved:[],errors:[]});
         if (p==='/courses/1/lectures') return json(lectures);
@@ -169,6 +181,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
     });
     for (const mode of ['local','fork']) {
       const page=await context.newPage();
+      lastPage=page;
       const errors=[];
       page.on('pageerror', error => errors.push(error.message));
       page.on('dialog', dialog=>dialog.accept());
@@ -194,6 +207,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         assert.equal(await page.evaluate(() => window.ICS.db.queryAll("SELECT COUNT(*) n FROM all_courses WHERE dept = '014 历史学系'")[0].n), 0);
       }
       await page.locator('#course-sidebar [data-filter-kind="all"]').click();
+      await page.waitForFunction(()=>document.querySelector('#course-filter-caption').textContent.startsWith('全部课程'));
       // Raw API labels, saved filters and future years share one display format.
       await page.evaluate(async () => {
         window.termTestApi = window.ICOURSE_API;
@@ -213,30 +227,30 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         courseFilter = loadCourseFilter();
         await loadCourses();
       });
-      const termItem = page.locator('#course-sidebar [data-filter-kind="term"][data-filter-value="2025–2026 第一学期"]');
+      const termItem = page.locator('#course-sidebar [data-filter-kind="term"][data-filter-value="2025–2026 秋季"]');
       assert.equal(await termItem.count(), 1);
       assert.equal(await termItem.locator('.sidebar-count').textContent(), '2');
       assert.equal(await termItem.getAttribute('aria-current'), 'page');
       assert.equal(await page.locator('.course-card').count(), 2);
-      assert.match(await page.locator('.course-meta').first().innerText(), /2025–2026 第一学期/);
+      assert.match(await page.locator('.course-meta').first().innerText(), /2025–2026 秋季/);
       assert.deepEqual(await page.locator('#course-sidebar [data-filter-kind="term"] .sidebar-label').allTextContents(), [
-        '2030–2031 第一学期','2025–2026 暑期','2025–2026 第二学期','2025–2026 第一学期',
-        '2024–2025 第二学期','2024–2025 第一学期','2023–2024 第二学期',
+        '2030–2031 秋季','2025–2026 暑期','2025–2026 春季','2025–2026 秋季',
+        '2024–2025 春季','2024–2025 秋季','2023–2024 春季',
       ]);
       assert.equal(await termItem.locator('.sidebar-label').evaluate(node => node.scrollWidth <= node.clientWidth), true);
-      await page.locator('#course-sidebar [data-filter-value="2030–2031 第一学期"]').click();
+      await page.locator('#course-sidebar [data-filter-value="2030–2031 秋季"]').click();
       await page.waitForFunction(() => document.querySelectorAll('.course-card').length === 1);
       await page.evaluate(async () => { await loadSubscriptionCatalog(); });
-      assert.equal(await page.locator('#subscription-term option[value="2025–2026 第一学期"]').count(), 1);
-      await page.locator('#subscription-term').evaluate(node => { node.value = '2025–2026 第一学期'; });
+      assert.equal(await page.locator('#subscription-term option[value="2025–2026 秋季"]').count(), 1);
+      await page.locator('#subscription-term').evaluate(node => { node.value = '2025–2026 秋季'; });
       await page.evaluate(async () => { await loadSubscriptionCatalog(); });
       assert.equal(await page.locator('#subscription-catalog .subscription-row').count(), 2);
-      assert.match(await page.locator('#subscription-catalog .meta').first().innerText(), /2025–2026 第一学期/);
+      assert.match(await page.locator('#subscription-catalog .meta').first().innerText(), /2025–2026 秋季/);
       await page.screenshot({path:`/tmp/icourse-${mode}-terms-desktop.png`,fullPage:true});
       await page.setViewportSize({width:390,height:844});
       await page.locator('#course-sidebar-open').click();
       await page.waitForFunction(() => Math.abs(document.querySelector('.course-drawer-panel').getBoundingClientRect().left) < 0.1);
-      const mobileTerm = page.locator('#course-drawer-sidebar [data-filter-value="2030–2031 第一学期"] .sidebar-label');
+      const mobileTerm = page.locator('#course-drawer-sidebar [data-filter-value="2030–2031 秋季"] .sidebar-label');
       assert.equal(await mobileTerm.evaluate(node => node.scrollWidth <= node.clientWidth), true);
       await page.screenshot({path:`/tmp/icourse-${mode}-terms-mobile.png`,fullPage:true});
       await page.locator('#course-drawer-backdrop').click({position:{x:380,y:20}});
@@ -253,6 +267,129 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       });
       assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
       if (mode === 'fork') await page.evaluate(async () => { await api('/api/local/course-sections', {method:'PUT', body:JSON.stringify({sections:[{id:'study',name:'学习区'}],revision:0})}); await loadCourseZones(); await loadCourses(); });
+      // Organization is edited in place; double click survives the first click's filter update.
+      assert.equal(await page.locator('#section-editor').count(),0);
+      assert.equal(await page.locator('#course-sidebar .sidebar-edit').count(),0);
+      assert.equal(await page.locator('#course-sidebar > nav > [data-filter-value="unassigned"] .sidebar-label').textContent(),'待整理');
+      assert.equal(await page.locator('#course-sidebar .sidebar-section [data-filter-value="unassigned"]').count(),0);
+      const sidebar = page.locator('#course-sidebar');
+      const studyRow = sidebar.locator('[data-section-id="study"]');
+      await studyRow.locator('.sidebar-item').dblclick();
+      await page.locator('.section-name-input').fill('取消的名称');
+      await page.evaluate(async()=>{ await refreshStatus(); await loadCourses(); });
+      assert.equal(await page.locator('.section-name-input').inputValue(),'取消的名称');
+      assert.equal(await page.locator('.section-name-input').evaluate(node=>node===document.activeElement),true);
+      await page.locator('.section-name-input').press('Escape');
+      assert.equal(await page.evaluate(()=>courseSections.find(s=>s.id==='study').name),'学习区');
+      await studyRow.locator('.sidebar-item').focus();
+      await page.keyboard.press('F2');
+      await page.locator('.section-name-input').fill('学习');
+      await page.locator('.section-name-input').press('Enter');
+      await page.waitForFunction(()=>!inlineSectionEdit&&!sectionsSaving);
+      await studyRow.locator('.sidebar-item').click({button:'right'});
+      await page.getByRole('menuitem',{name:'新建子分区',exact:true}).click();
+      await page.locator('.section-name-input').fill('英语');
+      await page.locator('.section-name-input').press('Tab');
+      await page.waitForFunction(()=>!inlineSectionEdit&&!sectionsSaving);
+      const childId = await page.evaluate(()=>courseSections.find(s=>s.parent_id==='study').id);
+      await sidebar.locator('.sidebar-add').click();
+      await page.locator('.section-name-input').fill('资料库');
+      await page.locator('.section-name-input').press('Enter');
+      await page.waitForFunction(()=>!inlineSectionEdit&&!sectionsSaving);
+      const libraryId = await page.evaluate(()=>courseSections.find(s=>s.name==='资料库').id);
+      // Duplicate names stay editable, and a failed save retains the draft for retry.
+      const libraryRow = sidebar.locator(`[data-section-id="${libraryId}"]`);
+      await libraryRow.locator('.sidebar-item').dblclick();
+      await page.locator('.section-name-input').fill('学习');
+      await page.locator('.section-name-input').press('Enter');
+      await page.locator('.section-inline-error').waitFor();
+      assert.equal(await page.locator('.section-name-input').inputValue(),'学习');
+      await page.locator('.section-name-input').press('Escape');
+      await page.evaluate(()=>{
+        window.sectionTestOriginalApi=window.ICOURSE_API;
+        window.sectionTestApi=window.ICOURSE_API||(async(path,options)=>{
+          const response=await fetch(path,{...options,headers:{'Content-Type':'application/json'}});
+          const body=await response.json();
+          if(!response.ok) throw new Error(body.detail||'合成接口失败');
+          return body;
+        });
+        let fail=true;
+        window.ICOURSE_API=async(path,options)=>{
+          if(path==='/api/local/course-sections'&&fail){fail=false;throw new Error('合成保存失败');}
+          return window.sectionTestApi(path,options);
+        };
+      });
+      await studyRow.locator('.sidebar-item').dblclick();
+      await page.locator('.section-name-input').fill('学习分类');
+      await page.locator('.section-name-input').press('Enter');
+      await page.getByText('合成保存失败',{exact:true}).waitFor();
+      assert.equal(await page.locator('.section-name-input').inputValue(),'学习分类');
+      await page.locator('.section-name-input').press('Enter');
+      await page.waitForFunction(()=>!inlineSectionEdit&&!sectionsSaving);
+      await page.evaluate(()=>{window.ICOURSE_API=window.sectionTestOriginalApi;delete window.sectionTestApi;delete window.sectionTestOriginalApi;});
+      await sidebar.locator('[data-filter-kind="all"]').click();
+      await page.waitForFunction(()=>document.querySelectorAll('.course-card').length===2);
+      await page.locator('.course-card').filter({hasText:'现代思想史'}).locator('select').selectOption(childId);
+      await page.waitForFunction(id=>courseZones['1']===id,childId);
+      assert.equal(await studyRow.locator('.sidebar-count').textContent(),'1');
+      const grip = page.locator('.course-card').filter({hasText:'科学与社会'}).locator('.course-drag-handle');
+      await grip.dragTo(libraryRow.locator('.sidebar-item'));
+      await page.waitForFunction(id=>courseZones['2']===id,libraryId);
+      await studyRow.locator('.sidebar-item').click();
+      await page.waitForFunction(()=>document.querySelectorAll('.course-card').length===1);
+      await sidebar.locator('[aria-label="折叠学习分类"]').click();
+      assert.equal(await sidebar.locator(`[data-section-id="${childId}"]`).count(),0);
+      await sidebar.locator('[aria-label="展开学习分类"]').click();
+      // Edge drops reorder; center drops move the complete subtree into a category.
+      await libraryRow.locator('.sidebar-item').dragTo(studyRow,{targetPosition:{x:50,y:3}});
+      await page.waitForFunction(id=>!sectionsSaving&&courseSections[0].id===id,libraryId);
+      assert.equal(await page.evaluate(id=>courseSections.find(s=>s.id===id).parent_id,childId),'study');
+      await sidebar.locator(`[data-section-id="${childId}"] .sidebar-item`).dragTo(libraryRow.locator('.sidebar-item'));
+      await page.waitForFunction(({childId,libraryId})=>!sectionsSaving&&courseSections.find(s=>s.id===childId).parent_id===libraryId,{childId,libraryId});
+      await sidebar.locator(`[data-section-id="${childId}"] .sidebar-item`).dragTo(sidebar.locator('.sidebar-section-heading').first());
+      await page.waitForFunction(id=>!sectionsSaving&&!courseSections.find(s=>s.id===id).parent_id,childId);
+      // Context menus provide the same hierarchy operations without dragging.
+      await sidebar.locator(`[data-section-id="${childId}"] .sidebar-item`).focus();
+      await page.keyboard.press('Shift+F10');
+      await page.getByRole('menuitem',{name:'移动到…',exact:true}).click();
+      await page.getByRole('menuitem',{name:'移入 资料库',exact:true}).click();
+      await page.waitForFunction(({childId,libraryId})=>!sectionsSaving&&courseSections.find(s=>s.id===childId).parent_id===libraryId,{childId,libraryId});
+      await sidebar.locator('[data-filter-kind="all"]').click();
+      await page.waitForFunction(()=>document.querySelectorAll('.course-card').length===2);
+      assert.equal(await libraryRow.locator('.sidebar-count').textContent(),'2');
+      await page.screenshot({path:`/tmp/icourse-${mode}-inline-sections-desktop.png`,fullPage:true});
+      await page.setViewportSize({width:390,height:844});
+      await page.locator('#course-sidebar-open').click();
+      await page.waitForFunction(()=>Math.abs(document.querySelector('.course-drawer-panel').getBoundingClientRect().left)<.1);
+      const mobileLibrary = page.locator(`#course-drawer-sidebar [data-section-id="${libraryId}"] .sidebar-item`);
+      const mobileBox = await mobileLibrary.boundingBox();
+      assert.equal(await page.locator('#course-drawer').evaluate(node=>!node.classList.contains('hidden')),true);
+      const touch = await context.newCDPSession(page);
+      await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:mobileBox.x+40,y:mobileBox.y+mobileBox.height/2}]});
+      await page.getByRole('menu',{name:'资料库 的操作',exact:true}).waitFor();
+      await page.evaluate(async()=>{ await refreshStatus(); await loadCourses(); });
+      await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      const menuBox=await page.locator('.section-context-menu').boundingBox();
+      assert.equal(menuBox.x>=0&&menuBox.x+menuBox.width<=390,true);
+      assert.equal(await page.locator('#course-drawer').evaluate(node=>!node.classList.contains('hidden')),true);
+      await page.screenshot({path:`/tmp/icourse-${mode}-inline-sections-mobile.png`,fullPage:true});
+      await page.getByRole('menuitem',{name:'删除分区',exact:true}).click();
+      await page.waitForFunction(id=>!sectionsSaving&&!courseSections.some(s=>s.id===id),libraryId);
+      await page.getByRole('button',{name:'撤销删除分区',exact:true}).waitFor();
+      assert.equal(await page.evaluate(()=>courseZones['2']),'unassigned');
+      assert.equal(await page.evaluate(id=>courseSections.find(s=>s.id===id).parent_id||null,childId),null);
+      assert.equal(await page.evaluate(id=>courseZones['1']===id,childId),true);
+      await page.getByRole('button',{name:'撤销删除分区',exact:true}).click();
+      await page.waitForFunction(({childId,libraryId})=>!sectionsSaving&&courseZones['2']===libraryId&&courseSections.find(s=>s.id===childId).parent_id===libraryId,{childId,libraryId});
+      await touch.detach();
+      await page.locator('#course-drawer-backdrop').click({position:{x:380,y:20}});
+      await page.setViewportSize({width:1280,height:900});
+      // Restore the fixture for the remaining course/note workflow checks.
+      await page.evaluate(async()=>{
+        const result=await api('/api/local/course-sections',{method:'PUT',body:JSON.stringify({sections:[{id:'study',name:'学习区'}],revision:courseSectionsRevision})});
+        applyCourseOrganization(result);
+        await loadCourses();
+      });
       await page.locator('.course-card').filter({hasText:'现代思想史'}).locator('select').selectOption('study');
       await page.locator('#course-sidebar [data-filter-kind="zone"][data-filter-value="study"]').click();
       await page.waitForFunction(()=>document.querySelectorAll('.course-card').length===1);
@@ -585,6 +722,14 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       console.log(`${mode}: shared UI, zones, ordering, versions, export, search, catalog, run queue, backend selection, live note refresh, mobile layout passed`);
     }
     console.log('Pages: encrypted shards, legacy decryption, rollback, rerun, logout passed');
+  } catch (error) {
+    if (lastPage && !lastPage.isClosed()) {
+      await lastPage.screenshot({path:'/tmp/icourse-browser-failure.png',fullPage:true});
+      console.error(await lastPage.evaluate(()=>({sections:courseSections,saving:sectionsSaving,
+        edit:inlineSectionEdit?{id:inlineSectionEdit.id,name:inlineSectionEdit.name,error:inlineSectionEdit.error}:null,
+        message:document.querySelector('#message').textContent,drag:sectionDragId})));
+    }
+    throw error;
   } finally {
     if(browser) await browser.close();
     await new Promise(resolve=>server.close(resolve));

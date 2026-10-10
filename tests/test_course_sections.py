@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 import asyncio
 from fastapi import HTTPException
-from local_web.state import CourseZoneStore, RuntimeState, SettingsStore
+from local_web.state import CourseZoneStore, RuntimeState, SettingsStore, validate_course_sections
 from local_web.server import create_app, CourseSectionsRequest, CourseZoneRequest
 from local_web.database import DatabaseManager
 from src.data.database import Database
@@ -131,8 +131,9 @@ def test_legacy_migration_and_delete_all_preserves_archive(tmp_path, wrapped):
     legacy = {"1": "学习区", "2": "archive", "3": "整理区"}
     (tmp_path / 'course-zones.json').write_text(json.dumps({"zones": legacy} if wrapped else legacy))
     state = runtime(tmp_path)
-    assert state.default_course_zone == 'organize'
-    assert [s['id'] for s in state.course_sections] == ['organize', 'study', 'reference']
+    assert state.default_course_zone == 'unassigned'
+    assert state.course_zones == {'1': 'study', '2': 'archive', '3': 'unassigned'}
+    assert state.course_sections == [{'id': 'study', 'name': '学习区'}, {'id': 'reference', 'name': '资料库'}]
     state.save_course_sections([], 0)
     restored = runtime(tmp_path)
     assert restored.course_zones == {'1': 'unassigned', '2': 'archive', '3': 'unassigned'}
@@ -153,6 +154,80 @@ def test_rename_reorder_persist_and_reject_deleted_destination(tmp_path):
     with pytest.raises(ValueError):
         restored.save_course_zone('1', A['id'])
     assert runtime(tmp_path).course_zones['1'] == 'unassigned'
+
+
+def test_existing_organization_migrates_without_losing_custom_sections(tmp_path):
+    old = {'zones': {'1': 'organize', '2': 'reference', '3': A['id'], '4': 'archive'},
+           'sections': [{'id': 'organize', 'name': '整理区'}, {'id': 'reference', 'name': '查阅区'}, A],
+           'default_zone': 'reference', 'revision': 7}
+    (tmp_path / 'course-zones.json').write_text(json.dumps(old))
+    state = runtime(tmp_path)
+    assert state.default_course_zone == 'unassigned'
+    assert state.course_sections_revision == 7
+    assert state.course_zones == {**old['zones'], '1': 'unassigned'}
+    assert state.course_sections == [{'id': 'reference', 'name': '资料库'}, A]
+    state.save_course_zone('5', 'unassigned')
+    assert runtime(tmp_path).course_organization() == state.course_organization()
+    # A user-renamed organize section remains an ordinary category.
+    old['sections'][0]['name'] = '研究项目'
+    (tmp_path / 'course-zones.json').write_text(json.dumps(old))
+    assert runtime(tmp_path).course_zones['1'] == 'organize'
+    assert runtime(tmp_path).course_sections[0]['name'] == '研究项目'
+
+
+def test_reference_rename_preserves_existing_library_category(tmp_path):
+    document = {'zones': {'1': 'reference', '2': A['id']}, 'sections': [
+        {'id': 'reference', 'name': '查阅区'}, {**A, 'name': '资料库'}], 'revision': 2}
+    (tmp_path / 'course-zones.json').write_text(json.dumps(document))
+    state = runtime(tmp_path)
+    assert [s['name'] for s in state.course_sections] == ['资料库 2', '资料库']
+    assert state.course_zones == document['zones']
+
+
+def test_nested_sections_keep_membership_when_moved_and_parent_deleted(tmp_path):
+    state = runtime(tmp_path)
+    child = {'id': 'section-' + 'c' * 32, 'name': '英语', 'parent_id': A['id']}
+    state.save_course_sections([A, child, B], 0)
+    state.save_course_zone('1', A['id'])
+    state.save_course_zone('2', child['id'])
+    state.save_course_sections([A, B, {**child, 'parent_id': B['id']}], 1)
+    restored = runtime(tmp_path)
+    assert restored.course_sections[-1]['parent_id'] == B['id']
+    assert restored.course_zones == {'1': A['id'], '2': child['id']}
+    # The UI promotes children when a parent is removed; direct members go to the inbox.
+    state.save_course_sections([B, {**child, 'parent_id': B['id']}], 2)
+    assert runtime(tmp_path).course_zones == {'1': 'unassigned', '2': child['id']}
+
+
+def test_same_name_allowed_in_different_parents():
+    child_a = {'id': 'section-' + 'c' * 32, 'name': '笔记', 'parent_id': A['id']}
+    child_b = {'id': 'section-' + 'd' * 32, 'name': '笔记', 'parent_id': B['id']}
+    assert validate_course_sections([A, B, child_a, child_b]) == [A, B, child_a, child_b]
+    with pytest.raises(ValueError):
+        validate_course_sections([A, B, child_a, {**child_b, 'parent_id': A['id']}])
+
+
+@pytest.mark.parametrize('sections', [
+    [{**A, 'parent_id': A['id']}],
+    [{**A, 'parent_id': B['id']}, {**B, 'parent_id': A['id']}],
+    [{**A, 'parent_id': B['id']}], [{**A, 'parent_id': 'unassigned'}],
+    [{**A, 'parent_id': ''}], [{**A, 'name': '待整理'}],
+])
+def test_invalid_hierarchy_does_not_overwrite_existing_state(tmp_path, sections):
+    state = runtime(tmp_path)
+    state.save_course_sections([A], 0)
+    before = state.course_organization()
+    with pytest.raises(ValueError):
+        state.save_course_sections(sections, 1)
+    assert state.course_organization() == runtime(tmp_path).course_organization() == before
+
+
+def test_hierarchy_depth_limit():
+    chain = [{'id': f'section-{i:032x}', 'name': f'层级 {i}',
+              **({'parent_id': f'section-{i-1:032x}'} if i else {})} for i in range(7)]
+    assert validate_course_sections(chain[:6]) == chain[:6]
+    with pytest.raises(ValueError, match='6 层'):
+        validate_course_sections(chain)
 
 
 def test_failed_write_keeps_memory_and_disk_unchanged(tmp_path):
@@ -192,9 +267,10 @@ def test_api_create_move_archive_restore_and_delete(tmp_path):
         sections = routes[('/api/local/course-sections', 'PUT')]
         move = routes[('/api/local/course-zones', 'PUT')]
         get = routes[('/api/local/course-zones', 'GET')]
-        response = await sections(CourseSectionsRequest(sections=[A], revision=0))
-        assert response['sections'] == [A]
-        for zone in [A['id'], 'archive', 'unassigned']:
+        nested = {**B, 'parent_id': A['id']}
+        response = await sections(CourseSectionsRequest(sections=[A, nested], revision=0))
+        assert response['sections'] == [A, nested]
+        for zone in [A['id'], B['id'], 'archive', 'unassigned']:
             response = await move(CourseZoneRequest(course_id='1', zone=zone))
             assert response['zones']['1'] == zone
         with pytest.raises(HTTPException) as error:

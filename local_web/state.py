@@ -23,6 +23,8 @@ COURSE_ZONE_ALIASES = {
     "整理区": "organize",
     "学习区": "study",
     "查阅区": "reference",
+    "资料库": "reference",
+    "待整理": "unassigned",
     "归档区": "archive",
 }
 
@@ -242,21 +244,71 @@ class SubscriptionSettingsStore:
 
 
 def validate_course_sections(sections: list[dict]) -> list[dict[str, str]]:
-    if len(sections) > 100:
+    if not isinstance(sections, list) or len(sections) > 100:
         raise ValueError("最多创建 100 个分区")
     clean, ids, names = [], set(), set()
     for item in sections:
+        if not isinstance(item, dict):
+            raise ValueError("分区格式无效")
         section_id = item.get("id", "")
         name = str(item.get("name", "")).strip()
-        if (normalize_course_zone(section_id) != section_id
+        parent = item.get("parent_id")
+        if (not isinstance(section_id, str) or normalize_course_zone(section_id) != section_id
                 or section_id in {"archive", "unassigned"} or section_id in ids):
             raise ValueError("分区标识无效或重复")
-        if not name or len(name) > 40 or name.casefold() in names or name in {"归档", "归档区", "未分区"}:
-            raise ValueError("分区名称应为 1–40 个字符，且不能重复或使用保留名称")
+        if parent is not None and (not isinstance(parent, str) or not parent):
+            raise ValueError("父分区无效")
+        if not name or len(name) > 40 or (parent, name.casefold()) in names or name in {"归档", "归档区", "未分区", "待整理"}:
+            raise ValueError("分区名称应为 1–40 个字符，同层不能重复或使用保留名称")
         ids.add(section_id)
-        names.add(name.casefold())
-        clean.append({"id": section_id, "name": name})
+        names.add((parent, name.casefold()))
+        clean.append({"id": section_id, "name": name, **({"parent_id": parent} if parent else {})})
+    by_id = {item["id"]: item for item in clean}
+    for item in clean:
+        seen, current = set(), item
+        while current:
+            if current["id"] in seen:
+                raise ValueError("分区不能移入自身或子分区")
+            seen.add(current["id"])
+            if len(seen) > 6:
+                raise ValueError("分类最多支持 6 层")
+            parent = current.get("parent_id")
+            if parent and parent not in by_id:
+                raise ValueError("父分区不存在")
+            current = by_id.get(parent)
     return clean
+
+
+def migrate_course_organization(state: dict) -> dict:
+    """Turn the old organizing section into the fixed inbox, keeping custom names."""
+    sections = [dict(item) for item in state["sections"]]
+    inbox_ids = {item["id"] for item in sections
+                 if item["id"] == "organize" and item["name"] in {"整理区", "待整理"}}
+    parents = {item["id"]: item.get("parent_id") for item in sections}
+    migrated = []
+    for item in sections:
+        if item["id"] in inbox_ids:
+            continue
+        if item["id"] == "reference" and item["name"] == "查阅区":
+            item["name"] = "资料库"
+            sibling_names = {s["name"] for s in sections
+                             if s["id"] != item["id"] and s.get("parent_id") == item.get("parent_id")}
+            suffix = 2
+            while item["name"] in sibling_names:
+                item["name"] = f"资料库 {suffix}"
+                suffix += 1
+        if item.get("parent_id") in inbox_ids:
+            parent = parents[item["parent_id"]]
+            item.pop("parent_id", None)
+            if parent:
+                item["parent_id"] = parent
+        migrated.append(item)
+    migrated = validate_course_sections(migrated)
+    allowed = {item["id"] for item in migrated} | {"archive", "unassigned"}
+    return {"sections": migrated,
+            "zones": {key: value if value in allowed else "unassigned"
+                      for key, value in state["zones"].items()},
+            "default_zone": "unassigned", "revision": state.get("revision", 0)}
 
 
 class CourseZoneStore:
@@ -291,21 +343,14 @@ class CourseZoneStore:
         except (OSError, ValueError, TypeError):
             raw = {}
         if isinstance(raw, dict) and isinstance(raw.get("sections"), list):
-            sections = validate_course_sections(raw["sections"])
-            allowed = {item["id"] for item in sections} | {"archive", "unassigned"}
-            return {
-                "zones": {key: value for key, value in zones.items() if value in allowed},
-                "sections": sections,
-                "default_zone": raw.get("default_zone") if raw.get("default_zone") in allowed - {"archive"} else "unassigned",
-                "revision": int(raw.get("revision", 0)),
-            }
-        # Preserve the implicit organize membership of existing libraries.
-        # New libraries have no presets. Legacy groups are ordinary editable sections.
+            return migrate_course_organization({"zones": zones, "sections": raw["sections"],
+                                                "revision": int(raw.get("revision", 0))})
+        # Existing libraries retain their learning/reference categories.
+        # Unclassified courses always go into the fixed inbox.
         sections = ([{"id": key, "name": name} for key, name in
                      [("organize", "整理区"), ("study", "学习区"), ("reference", "查阅区")]]
                     if zones else [])
-        return {"zones": zones, "sections": sections,
-                "default_zone": "organize" if zones else "unassigned", "revision": 0}
+        return migrate_course_organization({"zones": zones, "sections": sections, "revision": 0})
 
     def save_state(self, state: dict) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -521,7 +566,7 @@ class RuntimeState:
             allowed = {item["id"] for item in sections} | {"archive", "unassigned"}
             zones = {key: value if value in allowed else "unassigned"
                      for key, value in self.course_zones.items()}
-            default = self.default_course_zone if self.default_course_zone in allowed else "unassigned"
+            default = "unassigned"
             self.course_zone_store.save_state({"zones": zones, "sections": sections,
                                               "default_zone": default, "revision": revision + 1})
             self.course_zones, self.course_sections = zones, sections

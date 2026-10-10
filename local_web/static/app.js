@@ -77,12 +77,16 @@ let sidebarCollapsed = loadSidebarCollapsed();
 let courseSections = [];
 let defaultCourseZone = "unassigned";
 let courseSectionsRevision = 0;
-let sectionDraft = [];
-let sectionEditorRevision = 0;
 let sectionsSaving = false;
+let inlineSectionEdit = null;
+let sectionMenu = null;
+let sectionDragId = null;
+let sectionTouchInProgress = false;
+let sidebarRenderPending = false;
+const organization = window.ICS.organization;
 
 function courseZoneLabels() {
-  return Object.fromEntries([["unassigned", "未分区"], ...courseSections.map(s => [s.id, s.name])]);
+  return Object.fromEntries([["unassigned", "待整理"], ...organization.sectionTree(courseSections).map(({section, path}) => [section.id, path])]);
 }
 const RUN_STATUS_LABELS = {
   success: "成功", failure: "失败", cancelled: "已取消", timed_out: "超时",
@@ -385,7 +389,8 @@ async function refreshStatus() {
     loadedLibraryIdentity = libraryIdentity;
   }
   if (statusState.configured) {
-    showView(activeView);
+    // A status poll updates the current view without interrupting sidebar gestures.
+    showView(activeView, {preserveDrawer: true});
   }
   clearTimeout(updatePollTimer);
   if (statusState.configured && updateState === "checking") {
@@ -424,7 +429,7 @@ async function loadCourseZones() {
 function applyCourseOrganization(result) {
   courseZones = result.zones || {};
   courseSections = result.sections || [];
-  defaultCourseZone = result.default_zone || "unassigned";
+  defaultCourseZone = "unassigned";
   courseSectionsRevision = result.revision || 0;
   if (courseFilter.kind === "zone" && courseFilter.value !== "archive"
       && !Object.hasOwn(courseZoneLabels(), courseFilter.value)) {
@@ -440,7 +445,10 @@ function visibleCourseRows() {
   if (f.kind === "zone" && f.value === "archive") return courseRows.filter(c => courseZone(c.course_id) === "archive");
   const rows = courseRows.filter(c => courseZone(c.course_id) !== "archive");
   if (f.kind === "star") return rows.filter((c) => starredCourses.has(String(c.course_id)));
-  if (f.kind === "zone") return rows.filter((c) => courseZone(c.course_id) === f.value);
+  if (f.kind === "zone") {
+    const zones = organization.descendantIds(courseSections, f.value);
+    return rows.filter((c) => zones.has(courseZone(c.course_id)));
+  }
   if (f.kind === "term") return rows.filter((c) => window.ICS.normalizeTerm(c.term) === f.value);
   if (f.kind === "dept") return rows.filter((c) => (c.dept || "") === f.value);
   return rows;
@@ -455,21 +463,34 @@ function courseFilterCaption() {
   return "全部课程";
 }
 
-function selectCourseFilter(kind, value) {
+function selectCourseFilter(kind, value, keepSidebar = false) {
   courseFilter = {kind, value: kind === "dept" ? window.ICS.normalizeDepartment(value)
     : kind === "term" ? window.ICS.normalizeTerm(value) : value || ""};
   localStorage.setItem(COURSE_FILTER_KEY, JSON.stringify(courseFilter));
   closeCourseDrawer();
-  renderCourseSidebar();
-  loadCourses().catch((error) => message(error.message, true));
+  if (keepSidebar) {
+    document.querySelectorAll('.sidebar-item[data-filter-kind]').forEach(button => {
+      const active = button.dataset.filterKind === kind && button.dataset.filterValue === (value || "");
+      button.classList.toggle("active", active);
+      if (active) button.setAttribute("aria-current", "page");
+      else button.removeAttribute("aria-current");
+    });
+  } else renderCourseSidebar();
+  loadCourses({keepSidebar}).catch((error) => message(error.message, true));
 }
 
-function renderCourseSidebar() {
+function renderCourseSidebar(force = false) {
+  if (!force && (inlineSectionEdit || sectionTouchInProgress || sectionMenu)) { sidebarRenderPending = true; return; }
+  sidebarRenderPending = false;
+  closeSectionMenu(false);
+  if (inlineSectionEdit) inlineSectionEdit.input = null;
   const activeRows = courseRows.filter(c => courseZone(c.course_id) !== "archive");
-  const zoneItems = Object.entries(courseZoneLabels()).map(([value, label]) => ({
-    value, label,
-    count: courseRows.filter((c) => courseZone(c.course_id) === value).length,
-  }));
+  const displaySections = inlineSectionEdit?.newSection ? [...courseSections, inlineSectionEdit.newSection] : courseSections;
+  const zoneItems = organization.sectionTree(displaySections).map(({section, depth}) => {
+    const zones = organization.descendantIds(courseSections, section.id);
+    return {value: section.id, label: section.name, parent: section.parent_id, depth,
+      count: activeRows.filter(c => zones.has(courseZone(c.course_id))).length};
+  });
   // Dynamic sections aggregate the already-loaded course rows; items with
   // empty values trail the section as 未知*.
   const dynItems = (field, unknownLabel) => {
@@ -513,10 +534,27 @@ function renderCourseSidebar() {
       btn.dataset.filterValue = value;
       if (active) btn.setAttribute("aria-current", "page");
       btn.onclick = () => selectCourseFilter(kind, value);
+      if (kind === "zone") {
+        btn.ondragover = event => {
+          if (!event.dataTransfer.types.includes("application/x-icourse-course")) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          btn.classList.add("drop-target");
+        };
+        btn.ondragleave = () => btn.classList.remove("drop-target");
+        btn.ondrop = event => {
+          event.preventDefault();
+          btn.classList.remove("drop-target");
+          const id = event.dataTransfer.getData("application/x-icourse-course");
+          if (id && courseRows.some(c => String(c.course_id) === id)) moveCourseToZone(id, value).catch(error => message(error.message, true));
+        };
+      }
       parent.append(btn);
+      return btn;
     };
     addItem(nav, "all", "", "全部课程", activeRows.length, false);
     addItem(nav, "star", "", "星标", starredCount, false);
+    addItem(nav, "zone", "unassigned", "待整理", activeRows.filter(c => courseZone(c.course_id) === "unassigned").length, false);
     addItem(nav, "zone", "archive", "归档", courseRows.length - activeRows.length, false);
     sections.forEach((sec) => {
       const secEl = document.createElement("div");
@@ -540,26 +578,51 @@ function renderCourseSidebar() {
       const heading = document.createElement("div");
       heading.className = "sidebar-section-heading";
       heading.append(toggle);
-      if (sec.key === "zone") {
-        const edit = document.createElement("button");
-        edit.type = "button";
-        edit.className = "sidebar-edit";
-        edit.textContent = "编辑";
-        edit.setAttribute("aria-label", "编辑分区");
-        edit.onclick = () => openSectionEditor().catch(error => message(error.message, true));
-        heading.append(edit);
-      }
+      if (sec.key === "zone") bindSectionRootDrop(heading);
       secEl.append(heading);
       if (!collapsed) {
         const items = document.createElement("div");
         items.className = "sidebar-section-items";
-        sec.items.forEach((it) => addItem(items, sec.key, it.value, it.label, it.count, true));
+        if (sec.key === "zone") {
+          const hidden = new Set();
+          sec.items.forEach(it => {
+            const key = `section:${it.value}`, hasChildren = courseSections.some(s => s.parent_id === it.value);
+            if (it.parent && hidden.has(it.parent)) { hidden.add(it.value); return; }
+            if (hasChildren && sidebarCollapsed[key]) hidden.add(it.value);
+            const row = document.createElement("div");
+            row.className = "sidebar-tree-row";
+            row.dataset.sectionId = it.value;
+            row.style.setProperty("--depth", it.depth);
+            if (hasChildren) {
+              const expand = document.createElement("button");
+              expand.type = "button";
+              expand.className = "sidebar-tree-toggle";
+              expand.textContent = sidebarCollapsed[key] ? "▸" : "▾";
+              expand.setAttribute("aria-label", `${sidebarCollapsed[key] ? "展开" : "折叠"}${it.label}`);
+              expand.setAttribute("aria-expanded", String(!sidebarCollapsed[key]));
+              expand.onclick = () => {
+                sidebarCollapsed = {...sidebarCollapsed, [key]: !sidebarCollapsed[key]};
+                localStorage.setItem(SIDEBAR_COLLAPSED_KEY, JSON.stringify(sidebarCollapsed));
+                renderCourseSidebar();
+              };
+              row.append(expand);
+            } else {
+              const spacer = document.createElement("span");
+              spacer.className = "sidebar-tree-spacer";
+              row.append(spacer);
+            }
+            const button = addItem(row, "zone", it.value, it.label, it.count, false);
+            bindSectionInteractions(row, button, it, root);
+            items.append(row);
+          });
+        } else sec.items.forEach((it) => addItem(items, sec.key, it.value, it.label, it.count, true));
         if (sec.key === "zone") {
           const add = document.createElement("button");
           add.type = "button";
           add.className = "sidebar-item sidebar-subitem sidebar-add";
           add.textContent = "+ 新建分区";
-          add.onclick = () => openSectionEditor(true).catch(error => message(error.message, true));
+          add.onclick = () => beginSectionCreate(null, root);
+          add.disabled = sectionsSaving || courseSections.length >= 100;
           items.append(add);
         }
         secEl.append(items);
@@ -568,91 +631,362 @@ function renderCourseSidebar() {
     });
     root.replaceChildren(nav);
   });
+  if (inlineSectionEdit) renderInlineSectionName();
 }
 
-async function openSectionEditor(add = false) {
-  await loadCourseZones();
-  sectionDraft = courseSections.map(section => ({...section}));
-  sectionEditorRevision = courseSectionsRevision;
-  $("#section-editor-error").textContent = "";
-  renderSectionEditor();
-  closeCourseDrawer();
-  $("#section-editor").showModal();
-  if (add) addSectionDraft();
-}
-
-function addSectionDraft() {
-  if (sectionDraft.length >= 100) return;
-  sectionDraft.push({id: `section-${crypto.randomUUID().replaceAll("-", "")}`, name: ""});
-  renderSectionEditor();
-  $("#section-editor-list").lastElementChild.querySelector("input").focus();
-}
-
-function renderSectionEditor(focusId, focusAction) {
-  const list = $("#section-editor-list");
-  list.replaceChildren();
-  $("#section-editor-empty").hidden = sectionDraft.length > 0;
-  $("#section-editor-add").disabled = sectionDraft.length >= 100;
-  sectionDraft.forEach((section, index) => {
-    const row = document.createElement("div");
-    row.className = "section-editor-row";
-    row.dataset.sectionId = section.id;
-    const input = document.createElement("input");
-    input.value = section.name;
-    input.placeholder = "分区名称";
-    input.maxLength = 40;
-    input.required = true;
-    input.setAttribute("aria-label", `分区 ${index + 1} 名称`);
-    input.oninput = () => { section.name = input.value; };
-    row.append(input);
-    [["up", "↑", "上移", -1], ["down", "↓", "下移", 1], ["delete", "删除", "删除", 0]].forEach(([action, label, title, offset]) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = label;
-      button.dataset.action = action;
-      button.setAttribute("aria-label", `${title}分区 ${section.name || index + 1}`);
-      button.disabled = action === "up" && index === 0 || action === "down" && index === sectionDraft.length - 1;
-      button.onclick = () => {
-        if (action === "delete") sectionDraft.splice(index, 1);
-        else [sectionDraft[index], sectionDraft[index + offset]] = [sectionDraft[index + offset], sectionDraft[index]];
-        renderSectionEditor(section.id, action);
-      };
-      row.append(button);
-    });
-    list.append(row);
-  });
-  if (focusId) {
-    const row = [...list.children].find(row => row.dataset.sectionId === focusId);
-    const button = row?.querySelector(`[data-action="${focusAction}"]`);
-    (button && !button.disabled ? button : row?.querySelector("input") || $("#section-editor-add")).focus();
-  }
-}
-
-$("#section-editor-add").onclick = addSectionDraft;
-$("#section-editor-cancel").onclick = () => $("#section-editor").close();
-$("#section-editor").addEventListener("cancel", event => { if (sectionsSaving) event.preventDefault(); });
-$("#section-editor-form").onsubmit = async event => {
-  event.preventDefault();
-  if (sectionsSaving) return;
+async function persistSectionChange(sections) {
+  if (sectionsSaving) throw new Error("正在保存，请稍后再操作");
+  const clean = organization.validateSections(sections);
   sectionsSaving = true;
-  $("#section-editor-fields").disabled = true;
-  $("#section-editor-error").textContent = "";
   try {
     const result = await api("/api/local/course-sections", {method: "PUT", body: JSON.stringify({
-      sections: sectionDraft.map(s => ({id: s.id, name: s.name.trim()})), revision: sectionEditorRevision,
+      sections: clean, revision: courseSectionsRevision,
     })});
     applyCourseOrganization(result);
-    $("#section-editor").close();
-    await loadCourses();
-    message("分区已保存");
+    return result;
   } catch (error) {
-    $("#section-editor-error").textContent = error.message;
-    if (!$("#section-editor").open) message(error.message, true);
-  } finally {
-    sectionsSaving = false;
-    $("#section-editor-fields").disabled = false;
+    if (/其他|刷新/.test(error.message)) await loadCourseZones().catch(() => {});
+    throw error;
+  } finally { sectionsSaving = false; }
+}
+
+async function changeSections(sections, success) {
+  try {
+    await persistSectionChange(sections);
+    await loadCourses();
+    if (success) message(success);
+  } catch (error) { message(error.message, true); }
+}
+
+function beginSectionCreate(parentId, root) {
+  if (sectionsSaving || inlineSectionEdit || courseSections.length >= 100) return;
+  closeSectionMenu(false);
+  const section = {id: `section-${crypto.randomUUID().replaceAll("-", "")}`, name: "",
+    ...(parentId ? {parent_id: parentId} : {})};
+  inlineSectionEdit = {id: section.id, name: "", newSection: section, root};
+  sidebarCollapsed = {...sidebarCollapsed, zone: false, ...(parentId ? {[`section:${parentId}`]: false} : {})};
+  renderCourseSidebar(true);
+}
+
+function beginSectionRename(id, root) {
+  if (sectionsSaving || inlineSectionEdit) return;
+  const section = courseSections.find(s => s.id === id);
+  if (!section) return;
+  closeSectionMenu(false);
+  inlineSectionEdit = {id, name: section.name, root};
+  renderInlineSectionName();
+}
+
+function cancelSectionName() {
+  if (!inlineSectionEdit || inlineSectionEdit.saving) return;
+  const {id, root} = inlineSectionEdit;
+  inlineSectionEdit = null;
+  renderCourseSidebar();
+  (root.querySelector(`[data-section-id="${id}"] .sidebar-item`) || root.querySelector(".sidebar-add"))?.focus();
+}
+
+function renderInlineSectionName() {
+  const edit = inlineSectionEdit;
+  if (!edit) return;
+  const row = edit.root.querySelector(`[data-section-id="${edit.id}"]`);
+  if (!row) { inlineSectionEdit = null; return; }
+  const button = row.querySelector(".sidebar-item");
+  if (!button) return;
+  row.classList.add("renaming");
+  const field = document.createElement("div");
+  field.className = "section-inline-field";
+  const input = document.createElement("input");
+  input.className = "section-name-input";
+  input.value = edit.name;
+  input.maxLength = 40;
+  input.placeholder = "分区名称";
+  input.setAttribute("aria-label", edit.newSection ? "新分区名称" : "重命名分区");
+  input.disabled = !!edit.saving;
+  edit.input = input;
+  input.oninput = () => {
+    edit.name = input.value;
+    edit.error = "";
+    input.removeAttribute("aria-invalid");
+    input.removeAttribute("aria-describedby");
+    field.querySelector(".section-inline-error")?.remove();
+  };
+  input.onkeydown = event => {
+    if (event.isComposing) return;
+    if (event.key === "Enter") { event.preventDefault(); commitSectionName(); }
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); cancelSectionName(); }
+  };
+  input.onblur = () => {
+    if (inlineSectionEdit === edit && edit.input === input && !edit.saving) commitSectionName();
+  };
+  field.append(input);
+  if (edit.error) {
+    input.setAttribute("aria-invalid", "true");
+    const error = document.createElement("span");
+    error.className = "section-inline-error";
+    error.id = `section-name-error-${edit.id}`;
+    input.setAttribute("aria-describedby", error.id);
+    error.setAttribute("role", "alert");
+    error.textContent = edit.error;
+    field.append(error);
   }
-};
+  button.replaceWith(field);
+  input.focus();
+  input.select();
+}
+
+async function commitSectionName() {
+  const edit = inlineSectionEdit;
+  if (!edit || edit.saving || sectionsSaving) return;
+  const name = edit.name.trim();
+  if (!name && edit.newSection) { cancelSectionName(); return; }
+  const original = courseSections.find(s => s.id === edit.id);
+  if (original?.name === name) { cancelSectionName(); return; }
+  const sections = edit.newSection ? [...courseSections, {...edit.newSection, name}]
+    : courseSections.map(s => s.id === edit.id ? {...s, name} : s);
+  edit.saving = true;
+  edit.input.disabled = true;
+  try {
+    await persistSectionChange(sections);
+    inlineSectionEdit = null;
+    await loadCourses();
+    edit.root.querySelector(`[data-section-id="${edit.id}"] .sidebar-item`)?.focus();
+  } catch (error) {
+    if (inlineSectionEdit !== edit) { message(error.message, true); renderCourseSidebar(); return; }
+    edit.saving = false;
+    edit.error = error.message;
+    renderCourseSidebar(true);
+  }
+}
+
+function closeSectionMenu(restoreFocus = true) {
+  if (!sectionMenu) return;
+  const {node, anchor, id, root} = sectionMenu;
+  sectionMenu = null;
+  node.remove();
+  if (sidebarRenderPending && !inlineSectionEdit && !sectionTouchInProgress) renderCourseSidebar();
+  if (restoreFocus) (anchor.isConnected ? anchor : root.querySelector(`[data-section-id="${id}"] .sidebar-item`))?.focus();
+}
+
+function openSectionMenu(id, root, anchor, point, moving = false) {
+  if (sectionsSaving || inlineSectionEdit) return;
+  const section = courseSections.find(s => s.id === id);
+  if (!section) return;
+  closeSectionMenu(false);
+  if (!anchor.isConnected) anchor = root.querySelector(`[data-section-id="${id}"] .sidebar-item`);
+  if (!anchor) return;
+  const menu = document.createElement("div");
+  menu.className = "section-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", moving ? "移动分区" : `${section.name} 的操作`);
+  const item = (label, action, {danger = false, disabled = false} = {}) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "menuitem");
+    button.textContent = label;
+    button.title = label;
+    button.disabled = disabled;
+    if (danger) button.className = "danger";
+    button.onclick = () => { closeSectionMenu(false); action(); };
+    menu.append(button);
+  };
+  const siblings = courseSections.filter(s => (s.parent_id || null) === (section.parent_id || null));
+  const index = siblings.findIndex(s => s.id === id);
+  if (moving) {
+    item("‹ 返回", () => openSectionMenu(id, root, anchor, point));
+    item("移到顶层", () => changeSections(organization.reparentSections(courseSections, id, null)), {disabled: !section.parent_id});
+    organization.sectionTree(courseSections).forEach(({section: target, path}) => {
+      if (organization.canParent(courseSections, id, target.id)) {
+        item(`移入 ${path}`, () => changeSections(organization.reparentSections(courseSections, id, target.id)), {disabled: section.parent_id === target.id});
+      }
+    });
+  } else {
+    item("重命名", () => beginSectionRename(id, root));
+    const depth = organization.sectionTree(courseSections).find(row => row.section.id === id).depth;
+    item("新建子分区", () => beginSectionCreate(id, root), {disabled: depth + 1 >= organization.MAX_DEPTH || courseSections.length >= 100});
+    item("移动到…", () => openSectionMenu(id, root, anchor, point, true));
+    item("上移", () => changeSections(organization.reorderSections(courseSections, id, siblings[index - 1].id)), {disabled: index === 0});
+    item("下移", () => changeSections(organization.reorderSections(courseSections, id, siblings[index + 1].id, true)), {disabled: index === siblings.length - 1});
+    item("删除分区", () => deleteSection(id), {danger: true});
+  }
+  document.body.append(menu);
+  const rect = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth, height = menu.offsetHeight;
+  menu.style.left = `${Math.max(8, Math.min(point?.x ?? rect.left, innerWidth - width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(point?.y ?? rect.bottom + 4, innerHeight - height - 8))}px`;
+  sectionMenu = {node: menu, anchor, id, root};
+  menu.onkeydown = event => {
+    const buttons = [...menu.querySelectorAll("button:not(:disabled)")];
+    const current = buttons.indexOf(document.activeElement);
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+        : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    }
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeSectionMenu(); }
+    if (event.key === "Tab") closeSectionMenu(false);
+  };
+  menu.querySelector("button:not(:disabled)")?.focus();
+}
+
+document.addEventListener("pointerdown", event => {
+  if (sectionMenu && !sectionMenu.node.contains(event.target) && !sectionMenu.anchor.contains(event.target)) closeSectionMenu(false);
+});
+window.addEventListener("resize", () => closeSectionMenu(false));
+document.addEventListener("scroll", event => {
+  if (sectionMenu && !sectionMenu.node.contains(event.target)) closeSectionMenu(false);
+}, true);
+
+async function deleteSection(id) {
+  if (sectionsSaving) return;
+  const deleted = courseSections.find(s => s.id === id);
+  if (!deleted) return;
+  const before = courseSections.map(s => ({...s}));
+  const members = Object.keys(courseZones).filter(courseId => courseZones[courseId] === id);
+  const next = courseSections.filter(s => s.id !== id).map(s => {
+    if (s.parent_id !== id) return s;
+    const child = {...s};
+    delete child.parent_id;
+    if (deleted.parent_id) child.parent_id = deleted.parent_id;
+    return child;
+  });
+  try {
+    await persistSectionChange(next);
+    const revision = courseSectionsRevision;
+    await loadCourses();
+    message(`已删除「${deleted.name}」，笔记保留`);
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "section-undo";
+    undo.textContent = "撤销";
+    undo.setAttribute("aria-label", "撤销删除分区");
+    undo.onclick = async () => {
+      if (sectionsSaving) return;
+      undo.disabled = true;
+      try {
+        if (courseSectionsRevision !== revision) throw new Error("分类已更新，请刷新后重新整理");
+        await persistSectionChange(before);
+        for (const courseId of members) {
+          if (courseZone(courseId) === "unassigned") await api("/api/local/course-zones", {method: "PUT", body: JSON.stringify({course_id: courseId, zone: id})});
+        }
+        await loadCourseZones();
+        await loadCourses();
+        message("已恢复分区和课程归属");
+      } catch (error) { message(error.message, true); }
+    };
+    $("#message").append(undo);
+    clearTimeout(messageTimer);
+    messageTimer = setTimeout(() => $("#message").classList.add("hidden"), 8000);
+  } catch (error) { message(error.message, true); }
+}
+
+function bindSectionInteractions(row, button, item, root) {
+  let pressTimer = null, pressStart = null, suppressClickUntil = 0, longPress = false;
+  const cancelPress = () => {
+    clearTimeout(pressTimer);
+    pressTimer = null;
+    sectionTouchInProgress = false;
+    if (sidebarRenderPending && !sectionMenu && !inlineSectionEdit) requestAnimationFrame(() => renderCourseSidebar());
+  };
+  button.title = "双击改名；右键或长按显示操作；拖动排序或移入分区";
+  button.setAttribute("aria-haspopup", "menu");
+  button.onclick = event => {
+    if (Date.now() < suppressClickUntil || event.detail > 1) return;
+    selectCourseFilter("zone", item.value, true);
+  };
+  button.ondblclick = event => { event.preventDefault(); beginSectionRename(item.value, root); };
+  button.oncontextmenu = event => {
+    event.preventDefault();
+    if (sectionTouchInProgress) { longPress = true; suppressClickUntil = Date.now() + 900; }
+    cancelPress();
+    openSectionMenu(item.value, root, button, {x: event.clientX, y: event.clientY});
+  };
+  button.onpointerdown = event => {
+    if (event.pointerType === "mouse") return;
+    sectionTouchInProgress = true;
+    longPress = false;
+    pressStart = {x: event.clientX, y: event.clientY};
+    pressTimer = setTimeout(() => {
+      longPress = true;
+      suppressClickUntil = Date.now() + 900;
+      openSectionMenu(item.value, root, button, pressStart);
+    }, 500);
+  };
+  button.onpointermove = event => {
+    if (pressStart && Math.hypot(event.clientX - pressStart.x, event.clientY - pressStart.y) > 10) cancelPress();
+  };
+  button.onpointerup = button.onpointercancel = button.onpointerleave = cancelPress;
+  button.addEventListener("touchend", event => {
+    if (longPress) event.preventDefault();
+  }, {passive: false});
+  button.onkeydown = event => {
+    if (event.key === "F2") { event.preventDefault(); beginSectionRename(item.value, root); }
+    if (event.key === "ContextMenu" || event.key === "F10" && event.shiftKey) {
+      event.preventDefault(); openSectionMenu(item.value, root, button);
+    }
+    if (event.key === "Delete") { event.preventDefault(); deleteSection(item.value); }
+  };
+  button.draggable = true;
+  button.ondragstart = event => {
+    cancelPress();
+    if (sectionsSaving || inlineSectionEdit) { event.preventDefault(); return; }
+    closeSectionMenu(false);
+    sectionDragId = item.value;
+    event.dataTransfer.setData("application/x-icourse-section", item.value);
+    event.dataTransfer.effectAllowed = "move";
+    row.classList.add("dragging");
+  };
+  button.ondragend = clearSectionDrop;
+  row.ondragover = event => {
+    if (!sectionDragId || !event.dataTransfer.types.includes("application/x-icourse-section")) return;
+    const ratio = (event.clientY - row.getBoundingClientRect().top) / row.offsetHeight;
+    const position = ratio < .25 ? "before" : ratio > .75 ? "after" : "inside";
+    try {
+      const next = position === "inside" ? organization.reparentSections(courseSections, sectionDragId, item.value)
+        : organization.reorderSections(courseSections, sectionDragId, item.value, position === "after");
+      organization.validateSections(next);
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      row.dataset.dropPosition = position;
+    } catch (_) { delete row.dataset.dropPosition; event.dataTransfer.dropEffect = "none"; }
+  };
+  row.ondragleave = event => { if (!row.contains(event.relatedTarget)) delete row.dataset.dropPosition; };
+  row.ondrop = event => {
+    if (!sectionDragId || !row.dataset.dropPosition) return;
+    event.preventDefault();
+    const position = row.dataset.dropPosition, source = sectionDragId;
+    clearSectionDrop();
+    const next = position === "inside" ? organization.reparentSections(courseSections, source, item.value)
+      : organization.reorderSections(courseSections, source, item.value, position === "after");
+    if (position === "inside") sidebarCollapsed = {...sidebarCollapsed, [`section:${item.value}`]: false};
+    changeSections(next);
+  };
+}
+
+function clearSectionDrop() {
+  sectionDragId = null;
+  document.querySelectorAll(".sidebar-tree-row.dragging, [data-drop-position]").forEach(row => {
+    row.classList.remove("dragging");
+    delete row.dataset.dropPosition;
+  });
+}
+
+function bindSectionRootDrop(heading) {
+  heading.ondragover = event => {
+    if (!sectionDragId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    heading.dataset.dropPosition = "inside";
+  };
+  heading.ondragleave = () => { delete heading.dataset.dropPosition; };
+  heading.ondrop = event => {
+    if (!sectionDragId) return;
+    event.preventDefault();
+    const source = sectionDragId;
+    clearSectionDrop();
+    changeSections(organization.reparentSections(courseSections, source, null));
+  };
+}
 
 function openCourseDrawer() {
   renderCourseSidebar();
@@ -698,7 +1032,7 @@ async function moveCourseToZone(courseId, zone, select) {
     // list is filtered by zone the card just moved away, so redraw only
     // after the picker has closed.  Zone counts in the sidebar change in
     // every view.
-    if (zone === "archive" || previous === "archive" || (courseFilter.kind === "zone" && courseFilter.value !== zone)) {
+    if (!select || zone === "archive" || previous === "archive" || (courseFilter.kind === "zone" && courseFilter.value !== zone)) {
       await loadCourses();
     } else {
       renderCourseSidebar();
@@ -722,7 +1056,7 @@ async function moveCourseToZone(courseId, zone, select) {
   }
 }
 
-async function loadCourses() {
+async function loadCourses({keepSidebar = false} = {}) {
   courseRows = (await api("/api/local/courses")).map(course => ({
     ...course, dept: window.ICS.normalizeDepartment(course.dept),
   }));
@@ -732,7 +1066,7 @@ async function loadCourses() {
   list.classList.remove("empty");
   const visibleCourses = visibleCourseRows();
   $("#course-filter-caption").textContent = `${courseFilterCaption()} · ${visibleCourses.length} 门`;
-  renderCourseSidebar();
+  if (!keepSidebar) renderCourseSidebar();
   if (!visibleCourses.length) {
     list.textContent = courseFilter.kind === "all" ? "数据库中还没有课程。" : "这个分类暂时没有课程。";
     list.classList.add("empty");
@@ -742,6 +1076,7 @@ async function loadCourses() {
   visibleCourses.forEach((course) => {
     const card = document.createElement("article");
     card.className = "course-card";
+    card.dataset.courseId = course.course_id;
     const row = document.createElement("div");
     row.className = "course-row";
     const titleRow = document.createElement("div");
@@ -780,7 +1115,22 @@ async function loadCourses() {
       textBlock.append(meta);
     }
     open.append(textBlock);
-    titleRow.append(open, star);
+    const drag = document.createElement("span");
+    drag.className = "course-drag-handle";
+    drag.textContent = "⠿";
+    drag.draggable = true;
+    drag.title = "拖到侧栏分区即可移动，也可使用分区下拉菜单";
+    drag.setAttribute("aria-hidden", "true");
+    drag.ondragstart = event => {
+      event.dataTransfer.setData("application/x-icourse-course", String(course.course_id));
+      event.dataTransfer.effectAllowed = "move";
+      card.classList.add("dragging");
+    };
+    drag.ondragend = () => {
+      card.classList.remove("dragging");
+      document.querySelectorAll(".drop-target").forEach(el => el.classList.remove("drop-target"));
+    };
+    titleRow.append(drag, open, star);
     const aside = document.createElement("div");
     aside.className = "course-aside";
     const count = document.createElement("span");
@@ -800,7 +1150,7 @@ async function loadCourses() {
     archiveButton.className = "course-archive-button";
     archiveButton.textContent = archived ? "移出归档" : "归档";
     archiveButton.setAttribute("aria-label", `${archived ? "移出归档" : "归档"}：${course.title || course.course_id}`);
-    archiveButton.title = archived ? "移出归档后放入未分区" : "移到独立的归档列表";
+    archiveButton.title = archived ? "移出归档后放入待整理" : "移到独立的归档列表";
     archiveButton.onclick = () => moveCourseToZone(course.course_id, archived ? "unassigned" : "archive", archiveButton);
     if (!archived) zoneControl.append(select);
     aside.append(count, zoneControl, archiveButton, createButton("导出 / 删除", () => openDataActions(course).catch(error => message(error.message, true))));
@@ -2367,7 +2717,10 @@ function showView(view, options = {}) {
   if (["rerun", "automation"].includes(view)) view = "run";
   const changed = view !== activeView;
   activeView = view;
-  closeCourseDrawer();
+  if (!options.preserveDrawer) {
+    closeSectionMenu(false);
+    closeCourseDrawer();
+  }
   const paneIds = {
     courses: "view-courses", lectures: "view-lectures", detail: "view-detail",
     talks: "view-talks", talkDetail: "view-talk-detail",
