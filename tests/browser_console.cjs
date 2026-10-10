@@ -63,6 +63,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   let zones = {}, names = {}, version = 'commit-1', missingShard = false, legacy = false, liveShard = false;
   let localRevision = 0, localJobs = [], runRequests = [], preferences = {course_ids:['1'],lecture_order:'api'};
   let dispatches = [];
+  let autoCheckPauses = {};
   const server = http.createServer((req,res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     const relative = pathname.replace(/^\/(fork|local)\//, '') || 'index.html';
@@ -99,6 +100,10 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         if (p==='/actions/runs') return json({workflow_runs:[]});
         if (p==='/actions/variables/MODEL_PROVIDERS_JSON') return json({value:JSON.stringify({version:1,providers:[provider]})});
         if (p==='/actions/variables/LECTURE_ORDER') return json({value:'api'});
+        if (p==='/actions/variables/COURSE_AUTO_CHECK_JSON') {
+          if (request.method()==='PATCH') autoCheckPauses=JSON.parse(request.postDataJSON().value);
+          return json({value:JSON.stringify(autoCheckPauses)});
+        }
         if (p==='/actions/secrets') return json({secrets:[{name:'LLM_TEST_API_KEY'}]});
         if (p.endsWith('/dispatches')) {dispatches.push({path:p,body:request.postDataJSON()});return route.fulfill({status:204});}
         throw new Error(`Unexpected GitHub request: ${request.method()} ${p}`);
@@ -137,7 +142,13 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
           }
           return json({total:results.length,page,has_more:page*size<results.length,results:results.slice((page-1)*size,page*size)});
         }
-        if (p==='/subscriptions') return json({course_ids:['1'],courses:[courses[0]]});
+        if (p==='/subscriptions/auto-check') {
+          const payload=request.postDataJSON();
+          if (payload.paused) autoCheckPauses[payload.course_id]='synthetic-pause';
+          else delete autoCheckPauses[payload.course_id];
+          return json({course_ids:['1'],paused_course_ids:Object.keys(autoCheckPauses),courses:[{...courses[0],pause_scan_pending:true,pending_count:1}]});
+        }
+        if (p==='/subscriptions') return json({course_ids:['1'],paused_course_ids:Object.keys(autoCheckPauses),courses:[{...courses[0],pause_scan_pending:true,pending_count:1}]});
         if (p==='/subscription-catalog') {
           const q = `%${(url.searchParams.get('q') || '').trim()}%`, term = url.searchParams.get('term') || '';
           const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
@@ -318,6 +329,23 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.locator('#search').fill('');
       await page.waitForFunction(()=>document.querySelector('#search-results').textContent==='输入关键词后开始搜索。');
       await page.locator('.desktop-nav [data-view="subscriptions"]').click();
+      await page.locator('#subscription-list').getByRole('button',{name:'暂停现代思想史的自动检查',exact:true}).click();
+      await page.waitForFunction(()=>pausedCourseIds.has('1'));
+      assert.match(await page.locator('#subscription-list').innerText(), /下次核对并补齐/);
+      assert.equal(await page.locator('#subscription-check-status').innerText(),'0 门自动检查 · 1 门已暂停');
+      assert.equal((await page.evaluate(()=>subscribedCourseIds)).includes('1'),true);
+      await page.setViewportSize({width:390,height:844});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      await page.screenshot({path:`/tmp/icourse-${mode}-paused-mobile.png`,fullPage:true});
+      await page.setViewportSize({width:1280,height:900});
+      // A default subscription run skips paused courses; explicit IDs still work.
+      await page.locator('.desktop-nav [data-view="run"]').click();
+      await page.locator('#run-button').click();
+      await page.waitForFunction(()=>!rerunSelectedCourseIds.has('1'));
+      await page.locator('.desktop-nav [data-view="subscriptions"]').click();
+      await page.locator('#subscription-list').getByRole('button',{name:'恢复现代思想史的自动检查',exact:true}).click();
+      await page.waitForFunction(()=>!pausedCourseIds.has('1'));
+      assert.equal(await page.locator('#subscription-check-status').innerText(),'1 门自动检查 · 0 门已暂停');
       await page.locator('#subscription-query').fill('目录课程');
       await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 207 门课程 · 第 1–20 条');
       // Removing the only row on the last subscribed page returns to the preceding page.
@@ -331,7 +359,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       assert.equal(await page.locator('#subscription-list .subscription-row').count(),20);
       await page.locator('#subscription-pagination').getByRole('button',{name:'下一页'}).click();
       assert.equal(await page.locator('#subscription-list .subscription-row').count(),1);
-      await page.locator('#subscription-list .subscription-action').click();
+      await page.locator('#subscription-list .subscription-action.remove').click();
       assert.equal(await page.locator('#subscription-list .subscription-row').count(),20);
       assert.equal(await page.locator('#subscription-pagination input').inputValue(),'1');
       await page.evaluate(()=>{

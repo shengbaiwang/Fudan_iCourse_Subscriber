@@ -208,6 +208,22 @@ class Database:
             ).fetchall()
         return {row["sub_id"] for row in rows}
 
+    def get_course(self, course_id: str) -> dict | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM courses WHERE course_id = ?", (course_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_exhausted_sub_ids(self, course_id: str, max_errors: int = 3) -> set[str]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT sub_id FROM lectures WHERE course_id = ? "
+                "AND processed_at IS NULL AND error_count >= ?",
+                (course_id, max_errors),
+            ).fetchall()
+        return {row["sub_id"] for row in rows}
+
     def get_unprocessed_lectures(self, course_id: str | None = None,
                                   max_errors: int = 3) -> list[dict]:
         """Return lectures that need (re-)processing.

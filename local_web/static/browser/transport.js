@@ -135,7 +135,31 @@
   function subscriptions() {
     const saved = readPreference('subscriptions', null);
     const courseIds = saved === null ? ids((db.getMeta('subscribed_course_ids') || db.getMeta('course_ids') || '').split(',')) : saved;
-    return {course_ids: courseIds, courses: db.getCoursesByIds(courseIds), source: saved === null ? 'data-snapshot' : 'browser-save'};
+    const pauses = readPreference('auto-check-pauses', null) ?? parsePauses(db.getMeta('auto_check_pauses'));
+    const scans = parsePauses(db.getMeta('auto_check_pause_scans'));
+    const progress = new Map(query(`SELECT course_id, COUNT(*) total_count,
+      SUM(TRIM(COALESCE(summary,'')) != '') summary_count,
+      SUM(processed_at IS NULL AND COALESCE(error_count,0) < 3) pending_count,
+      SUM(processed_at IS NULL AND COALESCE(error_count,0) >= 3) blocked_count
+      FROM lectures GROUP BY course_id`).map(row => [String(row.course_id), row]));
+    const courses = db.getCoursesByIds(courseIds).map(course => ({...course, ...progress.get(String(course.course_id)),
+      auto_check_paused: Object.hasOwn(pauses, String(course.course_id)),
+      pause_scan_pending: Object.hasOwn(pauses, String(course.course_id)) && scans[course.course_id] !== pauses[course.course_id]}));
+    return {course_ids: courseIds, courses, paused_course_ids:courseIds.filter(id => Object.hasOwn(pauses,id)),
+      source: saved === null ? 'data-snapshot' : 'browser-save'};
+  }
+  function parsePauses(raw) {
+    const values = raw?.trim() ? JSON.parse(raw) : {};
+    if (!values || Array.isArray(values) || typeof values !== 'object' || Object.keys(values).length > 500
+        || Object.entries(values).some(([id,token]) => !id || id.length > 100 || /[,\s]/.test(id)
+          || typeof token !== 'string' || !token || token.length > 128)) throw new Error('自动检查设置无效');
+    return values;
+  }
+  async function fetchPauses() {
+    const variable = await gh('/actions/variables/COURSE_AUTO_CHECK_JSON', {}, true);
+    const pauses = parsePauses(variable?.value);
+    savePreference('auto-check-pauses', pauses);
+    return pauses;
   }
   async function secretNames() {
     const names = new Set();
@@ -448,12 +472,27 @@
       });
       return {results, total: result.total, page: result.page, has_more: result.hasMore};
     }
+    if (route === '/subscriptions/auto-check' && method === 'PUT') {
+      const id = String(payload.course_id || '').trim();
+      if (!subscriptions().course_ids.includes(id)) throw new Error('课程已不在订阅中，请刷新后重试');
+      if (typeof payload.paused !== 'boolean') throw new Error('自动检查选项无效');
+      const pauses = await fetchPauses();
+      if (payload.paused) {
+        if (!Object.hasOwn(pauses,id)) Object.defineProperty(pauses,id,{value:window.crypto.randomUUID().replaceAll('-',''),enumerable:true,configurable:true});
+      } else delete pauses[id];
+      await setVariable('COURSE_AUTO_CHECK_JSON', JSON.stringify(pauses));
+      savePreference('auto-check-pauses', pauses);
+      return subscriptions();
+    }
     if (route === '/subscriptions') {
       if (method === 'PUT') {
         const courseIds = ids(payload.course_ids);
         if (courseIds.some(id => id.length > 100 || id.includes(','))) throw new Error('课程 ID 格式不正确');
         await setSecret('COURSE_IDS', courseIds.join(','));
         savePreference('subscriptions', courseIds);
+      }
+      try { await fetchPauses(); } catch (error) {
+        if (readPreference('auto-check-pauses', null) === null && !db.getMeta('auto_check_pauses')) throw error;
       }
       return subscriptions();
     }

@@ -13,10 +13,12 @@ Anything more interesting belongs in one of ``src/*`` modules.
 """
 
 import datetime
+import json
 import time
 import traceback
 
 from src.runtime import config
+from src.runtime.auto_check import PAUSE_SCANS_META, parse_auto_check_pauses
 from src.data.database import Database
 from src.api.icourse import ICourseClient
 from src.pipeline.lecture_runner import LectureRunner
@@ -74,8 +76,20 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
     process this run.  Done up-front so the prefetch loop can see across
     course boundaries when picking the "next" lecture."""
     out: list[tuple[str, str, dict]] = []
+    pause_scans = parse_auto_check_pauses(db.read_meta(PAUSE_SCANS_META))
+    pause_scans = {cid: token for cid, token in pause_scans.items() if cid in config.AUTO_CHECK_PAUSES}
     for course_id in config.COURSE_IDS:
         try:
+            pause_token = config.AUTO_CHECK_PAUSES.get(course_id)
+            if pause_token and pause_scans.get(course_id) == pause_token:
+                course = db.get_course(course_id) or {}
+                title = course.get("title") or course_id
+                pending = ordered_lectures(db.get_unprocessed_lectures(course_id), config.LECTURE_ORDER)
+                blocked = db.get_exhausted_sub_ids(course_id)
+                reporter.info(f"[Auto check] {title}: 已暂停新课次检查，待补齐 {len(pending)} 节"
+                              + (f"，{len(blocked)} 节达到重试上限" if blocked else ""))
+                out.extend((course_id, title, lecture) for lecture in pending)
+                continue
             _check_session(client)
             detail = client.get_course_detail(course_id)
             course_title = detail["title"]
@@ -114,10 +128,12 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
             lectures = deduped
 
             known_processed = db.get_processed_sub_ids(course_id)
+            exhausted = db.get_exhausted_sub_ids(course_id)
             new_lectures = [
                 lec for lec in lectures
                 if lec.get("has_playback")
                 and str(lec["sub_id"]) not in known_processed
+                and str(lec["sub_id"]) not in exhausted
             ]
             unprocessed = db.get_unprocessed_lectures(course_id)
             new_ids = {str(lec["sub_id"]) for lec in new_lectures}
@@ -129,9 +145,6 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
             new_lectures.extend(retry_only)
             new_lectures = ordered_lectures(new_lectures, config.LECTURE_ORDER)
             reporter.course_new_count(len(new_lectures))
-            if not new_lectures:
-                continue
-
             for lecture in new_lectures:
                 sub_id = str(lecture["sub_id"])
                 db.insert_lecture(
@@ -140,6 +153,16 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
                     lecture.get("date", ""),
                 )
                 out.append((course_id, course_title, lecture))
+            awaiting_playback = [lec for lec in lectures
+                                 if not lec.get("has_playback")
+                                 and str(lec["sub_id"]) not in known_processed | exhausted]
+            if pause_token and not awaiting_playback:
+                # Persist only after all discovered playback rows are saved;
+                # a failed discovery remains eligible for the final scan.
+                pause_scans[course_id] = pause_token
+                db.write_meta(PAUSE_SCANS_META, json.dumps(pause_scans))
+            elif pause_token:
+                reporter.info(f"[Auto check] {course_title}: {len(awaiting_playback)} 节录播尚未发布，继续核对直到可补齐。")
         except Exception:
             emit("course_failed", course_id=course_id)
             reporter.course_enumeration_error(course_id)
@@ -264,17 +287,23 @@ def run():
     corrected = db.sync_dates_from_sub()
     if corrected:
         print(f"  [Date] Synced {corrected} lecture date(s) from sub_title", flush=True)
-    transcriber = Transcriber()
-    summarizer = Summarizer() if config.COURSE_IDS else None
-
-    vpn = login_with_retry()
-    client = ICourseClient(vpn)
-
     # Refresh the semester catalog: run on the 5th and 25th of each month,
     # or immediately if the database has no catalog data yet.
     has_catalog = db.has_all_courses()
     today = datetime.datetime.now().day
-    if not has_catalog or today in (5, 25):
+    needs_catalog = not has_catalog or today in (5, 25)
+    scans = parse_auto_check_pauses(db.read_meta(PAUSE_SCANS_META))
+    if config.COURSE_IDS and not needs_catalog and all(
+        cid in config.AUTO_CHECK_PAUSES and scans.get(cid) == config.AUTO_CHECK_PAUSES[cid]
+        and not db.get_unprocessed_lectures(cid) for cid in config.COURSE_IDS
+    ):
+        reporter.info("订阅课程均已暂停且没有可自动补齐的课次，跳过平台登录与检查。")
+        reporter.run_footer()
+        return
+
+    vpn = login_with_retry()
+    client = ICourseClient(vpn)
+    if needs_catalog:
         _crawl_semester_catalog(client, db, reporter)
     else:
         reporter.info("Skipping catalog crawl (has data, not the 5th or 25th).")
@@ -285,10 +314,15 @@ def run():
         reporter.run_footer()
         return
 
+    all_lectures = _enumerate_lectures(client, db, reporter)
+    if not all_lectures:
+        reporter.info("没有待处理课次，本次检查完成。")
+        reporter.run_footer()
+        return
+    transcriber = Transcriber()
+    summarizer = Summarizer()
     scheduler = Scheduler(reporter=reporter)
-
     try:
-        all_lectures = _enumerate_lectures(client, db, reporter)
         _drive_lectures(
             client, db, scheduler, transcriber, summarizer, reporter,
             all_lectures,

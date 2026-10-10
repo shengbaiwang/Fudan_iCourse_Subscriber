@@ -161,6 +161,7 @@ jobs:
           UISPsw: ${{ secrets.UISPSW }}
           COURSE_IDS: ${{ secrets.COURSE_IDS }}
           SUBSCRIBED_COURSE_IDS: ${{ secrets.COURSE_IDS }}
+          COURSE_AUTO_CHECK_JSON: ${{ vars.COURSE_AUTO_CHECK_JSON }}
           LECTURE_ORDER: ${{ vars.LECTURE_ORDER || 'api' }}
           CRAWL_TERM: ${{ secrets.CRAWL_TERM }}
           # The short-lived launcher selects only validated model-secret
@@ -177,6 +178,7 @@ jobs:
           UISPSW: ${{ secrets.UISPSW }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SUBSCRIBED_COURSE_IDS: ${{ secrets.COURSE_IDS }}
+          COURSE_AUTO_CHECK_JSON: ${{ vars.COURSE_AUTO_CHECK_JSON }}
         run: |
           if [ -f data/icourse.db ]; then
             python scripts/publish_progress.py data/icourse.db

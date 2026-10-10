@@ -1,6 +1,12 @@
 import json
 import os
 
+from src.runtime.auto_check import parse_auto_check_pauses
+
+# Only the scheduled Check workflow supplies this variable. Single Run
+# deliberately discovers the selected courses regardless of their pauses.
+AUTO_CHECK_PAUSES = parse_auto_check_pauses(os.environ.get("COURSE_AUTO_CHECK_JSON"))
+
 from src.runtime.model_config import (
     normalize_base_url,
     runtime_providers,

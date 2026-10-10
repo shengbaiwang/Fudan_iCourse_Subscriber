@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 import ipaddress
 import threading
 import webbrowser
+import json
+import uuid
 from pathlib import Path
 from typing import Any, Literal
 
@@ -25,6 +27,7 @@ from .provider_models import ModelDirectoryError, fetch_provider_models
 from .talk_cloud import TalkCloudSync
 from .workflow_approvals import WorkflowApprovals
 from .runs import LocalRuns, LocalRunBusy
+from src.runtime.auto_check import PAUSE_VARIABLE, parse_auto_check_pauses
 from .api_keychain import LocalAPIKeychain
 from .talks import (
     MAX_AUDIO_BYTES,
@@ -116,6 +119,11 @@ class ObsidianSyncRequest(BaseModel):
 
 class SubscriptionRequest(BaseModel):
     course_ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+class AutoCheckRequest(BaseModel):
+    course_id: str = Field(min_length=1, max_length=100)
+    paused: bool
 
 
 class CourseZoneRequest(BaseModel):
@@ -658,12 +666,45 @@ def create_app(
         source = "local-save" if course_ids else "data-snapshot"
         if not course_ids and db.db_path.is_file():
             course_ids = await run_in_threadpool(db.subscription_ids)
+        pauses = runtime.auto_check_pauses
+        try:
+            pauses = parse_auto_check_pauses(await run_in_threadpool(client().repository_variable, PAUSE_VARIABLE))
+            await run_in_threadpool(runtime.save_auto_check_pauses, pauses)
+        except GitHubAPIError:
+            # Keep offline reading usable; writes below require a fresh read.
+            if pauses is None:
+                pauses = await run_in_threadpool(db.auto_check_pauses) if db.db_path.is_file() else {}
         courses = (
             await run_in_threadpool(db.subscription_courses, course_ids)
             if db.db_path.is_file()
             else []
         )
-        return {"course_ids": course_ids, "courses": courses, "source": source}
+        progress = await run_in_threadpool(db.subscription_check_status, pauses) if db.db_path.is_file() else {}
+        for course in courses:
+            cid = str(course["course_id"])
+            course.update(progress.get(cid, {}))
+            course["auto_check_paused"] = cid in pauses
+        return {"course_ids": course_ids, "courses": courses, "source": source,
+                "paused_course_ids": [cid for cid in course_ids if cid in pauses]}
+
+    @app.put("/api/local/subscriptions/auto-check")
+    async def save_auto_check(payload: AutoCheckRequest) -> dict[str, Any]:
+        cid = normalized_subscription_ids([payload.course_id])[0]
+        current = await subscriptions()
+        if cid not in current["course_ids"]:
+            raise HTTPException(status_code=409, detail="课程已不在订阅中，请刷新后重试")
+        try:
+            gh = client()
+            pauses = parse_auto_check_pauses(await run_in_threadpool(gh.repository_variable, PAUSE_VARIABLE))
+            if payload.paused:
+                pauses.setdefault(cid, uuid.uuid4().hex)
+            else:
+                pauses.pop(cid, None)
+            await run_in_threadpool(gh.upsert_repository_variable, PAUSE_VARIABLE, json.dumps(pauses))
+            await run_in_threadpool(runtime.save_auto_check_pauses, pauses)
+        except GitHubAPIError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return await subscriptions()
 
     @app.get("/api/local/subscription-catalog")
     async def subscription_catalog(q: str = "", term: str = "", limit: int = 20, page: int = 1):
@@ -687,12 +728,7 @@ def create_app(
             await run_in_threadpool(runtime.save_subscription_ids, course_ids)
         except GitHubAPIError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        courses = (
-            await run_in_threadpool(db.subscription_courses, course_ids)
-            if db.db_path.is_file()
-            else []
-        )
-        return {"course_ids": course_ids, "courses": courses, "source": "local-save"}
+        return await subscriptions()
 
     @app.get("/api/local/courses/{course_id}/lectures")
     async def lectures(course_id: str):

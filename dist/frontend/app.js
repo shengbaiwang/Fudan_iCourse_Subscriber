@@ -24,6 +24,8 @@ let detailTab = "summary";
 let courseRows = [];
 let searchTimer = null;
 let subscribedCourseIds = [];
+let pausedCourseIds = new Set();
+let autoCheckSaving = false;
 let subscriptionCourses = [];
 let subscriptionTerms = [];
 let subscriptionTimer = null;
@@ -2138,16 +2140,32 @@ function renderSubscriptions() {
   current.replaceChildren();
   catalog.replaceChildren();
   $("#subscription-count").textContent = String(subscribedCourseIds.length);
+  $("#subscription-check-status").textContent = `${subscribedCourseIds.length - pausedCourseIds.size} 门自动检查 · ${pausedCourseIds.size} 门已暂停`;
   current.classList.toggle("empty", !subscriptionCourses.length);
   if (!subscriptionCourses.length) current.textContent = "尚未订阅课程。";
   subscriptionPage = Math.max(1, Math.min(subscriptionPage, Math.ceil(subscriptionCourses.length / RESULTS_PAGE_SIZE)));
   orderedSubscriptionCourses().slice((subscriptionPage - 1) * RESULTS_PAGE_SIZE, subscriptionPage * RESULTS_PAGE_SIZE).forEach((course) => {
-    current.append(renderSubscriptionCourse(course, () => {
+    const row = renderSubscriptionCourse(course, () => {
       subscribedCourseIds = subscribedCourseIds.filter((id) => String(id) !== String(course.course_id));
       subscriptionCourses = subscriptionCourses.filter((item) => String(item.course_id) !== String(course.course_id));
+      pausedCourseIds.delete(String(course.course_id));
       renderSubscriptions();
       queueSubscriptionSave();
-    }, "移除"));
+    }, "移除");
+    const paused = pausedCourseIds.has(String(course.course_id));
+    const status = document.createElement("span");
+    status.className = `meta subscription-check-state${paused ? " paused" : ""}`;
+    status.textContent = paused
+      ? course.pause_scan_pending ? "已暂停 · 下次核对并补齐已有课次"
+        : `已暂停${course.pending_count ? ` · 待补齐 ${course.pending_count} 节` : " · 已停止每日检查"}${course.blocked_count ? ` · ${course.blocked_count} 节达到重试上限` : ""}`
+      : `自动检查${course.pending_count ? ` · 待处理 ${course.pending_count} 节` : ""}`;
+    if (course.total_count) status.textContent += ` · ${course.summary_count || 0}/${course.total_count} 篇笔记`;
+    row.firstElementChild.append(status);
+    const toggle = createButton(paused ? "恢复自动检查" : "暂停自动检查", () => toggleAutoCheck(course), "subscription-action");
+    toggle.disabled = autoCheckSaving || subscriptionSaving;
+    toggle.setAttribute("aria-label", `${paused ? "恢复" : "暂停"}${course.title || course.course_id}的自动检查`);
+    row.append(toggle);
+    current.append(row);
   });
   renderPagination($("#subscription-pagination"), subscriptionPage, subscriptionCourses.length, false, (page) => {
     subscriptionPage = page;
@@ -2189,6 +2207,10 @@ function renderSubscriptions() {
     }));
     catalog.append(catalogItem);
   });
+  if (autoCheckSaving) {
+    current.querySelectorAll("button").forEach(button => { button.disabled = true; });
+    catalog.querySelectorAll("button").forEach(button => { button.disabled = true; });
+  }
 }
 
 async function loadSubscriptionCatalog(page = 1) {
@@ -2234,10 +2256,30 @@ async function loadSubscriptionCatalog(page = 1) {
 
 async function loadSubscriptions() {
   const state = await api("/api/local/subscriptions");
-  subscribedCourseIds = (state.course_ids || []).map(String);
-  subscriptionCourses = state.courses || [];
+  applySubscriptionState(state);
   subscriptionPage = 1;
   await loadSubscriptionCatalog();
+}
+
+function applySubscriptionState(state) {
+  subscribedCourseIds = (state.course_ids || []).map(String);
+  subscriptionCourses = state.courses || [];
+  pausedCourseIds = new Set((state.paused_course_ids || []).map(String));
+}
+
+async function toggleAutoCheck(course) {
+  if (autoCheckSaving || subscriptionSaving) return;
+  const id = String(course.course_id), paused = !pausedCourseIds.has(id);
+  autoCheckSaving = true;
+  renderSubscriptions();
+  try {
+    const state = await api("/api/local/subscriptions/auto-check", {method:"PUT", body:JSON.stringify({course_id:id, paused})});
+    applySubscriptionState(state);
+    if (paused) rerunSelectedCourseIds.delete(id);
+    message(paused ? "已暂停自动检查；下次核对并继续补齐已有课次，资料保留。" : "已恢复自动检查。");
+    renderRerunView();
+  } catch (error) { message(error.message, true); }
+  finally { autoCheckSaving = false; renderSubscriptions(); }
 }
 
 let subscriptionSaving = false;
@@ -2259,8 +2301,7 @@ async function saveSubscriptions() {
         method: "PUT",
         body: JSON.stringify({course_ids: subscribedCourseIds}),
       });
-      subscribedCourseIds = (state.course_ids || []).map(String);
-      subscriptionCourses = state.courses || [];
+      applySubscriptionState(state);
       renderSubscriptions();
       message(`已保存 ${subscribedCourseIds.length} 门课程的订阅`);
     }
@@ -3227,7 +3268,10 @@ $("#header-sync-button").onclick = syncDatabase;
 $("#run-button").onclick = async () => {
   try {
     await loadSubscriptions();
-    subscribedCourseIds.forEach(id => rerunSelectedCourseIds.add(String(id)));
+    subscribedCourseIds.forEach(id => {
+      if (!pausedCourseIds.has(String(id))) rerunSelectedCourseIds.add(String(id));
+      else rerunSelectedCourseIds.delete(String(id));
+    });
     $("#run-kind").value = "process";
     updateRunSettings();
   } catch (error) { message(error.message, true); }

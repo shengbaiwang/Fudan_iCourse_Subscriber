@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .keychain import CredentialStore, MacOSKeychainStore
 from src.runtime.model_config import validate_model_config
+from src.runtime.auto_check import parse_auto_check_pauses
 
 
 APP_DIR_NAME = "fudan-icourse-subscriber"
@@ -212,12 +213,25 @@ class SubscriptionSettingsStore:
         except (OSError, ValueError, TypeError):
             return []
 
-    def save(self, course_ids: list[str]) -> None:
+    def load_auto_check_pauses(self) -> dict[str, str] | None:
+        try:
+            raw = json.loads(self.path.read_text("utf-8"))
+            if "auto_check_pauses" not in raw:
+                return None
+            return parse_auto_check_pauses(json.dumps(raw["auto_check_pauses"]))
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def save(self, course_ids: list[str], auto_check_pauses: dict[str, str] | None = None) -> None:
         values = _normalize_course_ids(course_ids)
+        pauses = self.load_auto_check_pauses() if auto_check_pauses is None else auto_check_pauses
+        document = {"course_ids": values}
+        if pauses is not None:
+            document["auto_check_pauses"] = pauses
         self.directory.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(".tmp")
         temp.write_text(
-            json.dumps({"course_ids": values}, ensure_ascii=False, indent=2) + "\n",
+            json.dumps(document, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
         try:
@@ -421,6 +435,7 @@ class RuntimeState:
         self.settings = self.store.load()
         self.obsidian_settings = self.obsidian_store.load()
         self.subscription_ids = self.subscription_store.load()
+        self.auto_check_pauses = self.subscription_store.load_auto_check_pauses()
         organization = self.course_zone_store.load_state()
         self.course_zones = organization["zones"]
         self.course_sections = organization["sections"]
@@ -485,6 +500,11 @@ class RuntimeState:
         with self.lock:
             self.subscription_ids = values
             self.subscription_store.save(values)
+
+    def save_auto_check_pauses(self, pauses: dict[str, str]) -> None:
+        with self.lock:
+            self.auto_check_pauses = pauses
+            self.subscription_store.save(self.subscription_ids, pauses)
 
     def course_organization(self) -> dict:
         with self.lock:

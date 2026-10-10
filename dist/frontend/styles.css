@@ -361,6 +361,8 @@ mark.user-highlight:hover { background:var(--hl-hover); }
 .course-card-footer, .detail-actions { gap: 8px; flex-wrap: wrap; }
 .subscription-row > div { min-width: 0; flex: 1; }
 .subscription-row > button { flex-shrink: 0; }
+.subscription-check-state { display:block; margin-top:5px; }
+.subscription-check-state.paused { color:var(--muted); }
 .data-actions-lectures .check-option { white-space: normal; }
 @media(max-width:700px) { .view-heading.compact { flex-wrap: wrap; } .summary-version-grid.compare { grid-template-columns: minmax(0, 1fr); } .subscription-row { flex-wrap: wrap; } }
 

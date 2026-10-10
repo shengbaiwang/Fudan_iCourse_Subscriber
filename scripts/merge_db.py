@@ -6,12 +6,14 @@ For each lecture row, fields only progress forward (null -> non-null).
 """
 
 import os
+import json
 import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data.departments import normalize_catalog_departments
+from src.runtime.auto_check import PAUSE_VARIABLE, PAUSE_SCANS_META, parse_auto_check_pauses
 from src.data.schema import (
     LECTURES_MIGRATION_COLUMNS,
     PPT_PAGES_MIGRATION_COLUMNS,
@@ -90,6 +92,19 @@ def merge(local_path: str, remote_path: str):
 
     try:
         with conn:
+            # Final pause discoveries must survive every encrypted checkpoint.
+            if (PAUSE_VARIABLE in os.environ
+                    and conn.execute("SELECT 1 FROM local.sqlite_master WHERE type='table' AND name='meta'").fetchone()):
+                expected = parse_auto_check_pauses(os.environ[PAUSE_VARIABLE])
+                local_row = conn.execute("SELECT value FROM local.meta WHERE key=?", (PAUSE_SCANS_META,)).fetchone()
+                remote_row = conn.execute("SELECT value FROM main.meta WHERE key=?", (PAUSE_SCANS_META,)).fetchone()
+                scans = parse_auto_check_pauses(remote_row[0] if remote_row else None)
+                local_scans = parse_auto_check_pauses(local_row[0] if local_row else None)
+                # Union successful discoveries from concurrent daily runs.
+                # Manual runs never rewind a newer daily pause checkpoint.
+                scans.update({cid: token for cid, token in local_scans.items() if expected.get(cid) == token})
+                scans = {cid: token for cid, token in scans.items() if cid in expected}
+                conn.execute("INSERT OR REPLACE INTO main.meta VALUES (?, ?)", (PAUSE_SCANS_META, json.dumps(scans)))
             # 1) Courses: upsert
             conn.execute("""
                 INSERT OR REPLACE INTO main.courses (course_id, title, teacher)

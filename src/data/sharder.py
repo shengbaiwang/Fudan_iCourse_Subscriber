@@ -153,6 +153,14 @@ def _get_subscribed_set(conn: sqlite3.Connection) -> set[str]:
     "user unsubscribed everything" signal and is persisted as such.
     """
     env_value = os.environ.get("SUBSCRIBED_COURSE_IDS")
+    pauses = os.environ.get("COURSE_AUTO_CHECK_JSON")
+    if pauses is not None:
+        from src.runtime.auto_check import parse_auto_check_pauses
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                ("auto_check_pauses", json.dumps(parse_auto_check_pauses(pauses))),
+            )
     if env_value is not None:
         with conn:
             conn.execute(

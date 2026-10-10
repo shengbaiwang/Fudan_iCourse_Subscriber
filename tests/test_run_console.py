@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from local_web.database import DatabaseManager
 from local_web.github_client import BlobEntry, DataManifest, GitHubAPIError
 from local_web.runs import LocalRuns, LocalRunBusy
-from local_web.server import RunPreferencesRequest, RunRequest, create_app
+from local_web.server import AutoCheckRequest, RunPreferencesRequest, RunRequest, create_app
 from local_web.state import RuntimeCredentials, RuntimeState, SettingsStore
 from local_web.talks import TalkStore
 from scripts.publish_progress import publish_database, snapshot_database
@@ -105,6 +105,34 @@ class RunEndpointsTest(unittest.TestCase):
         with self.assertRaises(HTTPException) as exc:
             self.call("/api/local/run-preferences", "PUT", RunPreferencesRequest(course_ids=["2"]))
         self.assertEqual(exc.exception.status_code, 409)
+
+    def test_pause_resume_and_reorder_preserve_notes_and_subscriptions(self):
+        path = "/api/local/subscriptions/auto-check"
+        paused = self.call(path, "PUT", AutoCheckRequest(course_id="1", paused=True))
+        self.assertEqual(paused["course_ids"], ["1", "2"])
+        self.assertEqual(paused["paused_course_ids"], ["1"])
+        self.assertTrue(paused["courses"][0]["pause_scan_pending"])
+        self.assertEqual(paused["courses"][0]["pending_count"], 1)
+        first_token = json.loads(self.gh.variables["COURSE_AUTO_CHECK_JSON"])["1"]
+        self.assertEqual(self.db.lecture("10")["summary"], "old")
+        self.assertNotIn("COURSE_IDS", self.gh.secrets)
+        self.call("/api/local/run-preferences", "PUT", RunPreferencesRequest(course_ids=["2", "1"]))
+        self.assertEqual(self.state.subscription_store.load_auto_check_pauses(), {"1": first_token})
+        resumed = self.call(path, "PUT", AutoCheckRequest(course_id="1", paused=False))
+        self.assertEqual(resumed["paused_course_ids"], [])
+        self.call(path, "PUT", AutoCheckRequest(course_id="1", paused=True))
+        self.assertNotEqual(json.loads(self.gh.variables["COURSE_AUTO_CHECK_JSON"])["1"], first_token)
+
+    def test_pause_rejects_unsubscribed_course_and_failed_remote_save(self):
+        path = "/api/local/subscriptions/auto-check"
+        with self.assertRaises(HTTPException) as exc:
+            self.call(path, "PUT", AutoCheckRequest(course_id="missing", paused=True))
+        self.assertEqual(exc.exception.status_code, 409)
+        with patch.object(self.gh, "upsert_repository_variable", side_effect=GitHubAPIError(403, "synthetic")):
+            with self.assertRaises(HTTPException) as exc:
+                self.call(path, "PUT", AutoCheckRequest(course_id="1", paused=True))
+        self.assertEqual(exc.exception.status_code, 502)
+        self.assertEqual(self.state.auto_check_pauses, {})
 
     def test_local_key_and_order_are_sent_privately_to_worker(self):
         runs = self.app.state.local_runs
