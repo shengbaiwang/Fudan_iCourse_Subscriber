@@ -229,9 +229,10 @@
             <button type="button" class="search-domain active" data-domain="ocr">OCR</button>
           </div>
         </div>
-        <p id="search-meta" class="search-meta hidden"></p>
+        <p id="search-meta" class="search-meta hidden" role="status" aria-live="polite"></p>
         <div id="search-results" class="search-results empty">输入关键词后开始搜索。</div>
-        <button id="search-more" class="hidden" type="button">加载更多</button>
+        <nav id="search-pagination" class="pagination hidden" aria-label="搜索结果翻页"></nav>
+        <button id="search-retry" class="hidden" type="button">重试</button>
       </section>
 
       <section id="view-subscriptions" class="view-pane content-wide hidden">
@@ -253,13 +254,15 @@
               </div>
             </div>
             <div id="subscription-list" class="subscription-list empty">尚未订阅课程。</div>
+            <nav id="subscription-pagination" class="pagination hidden" aria-label="已订阅课程翻页"></nav>
           </section>
           <section class="subscription-panel">
             <div class="section-title"><h2>课程目录</h2></div>
             <div id="subscription-catalog" class="subscription-list empty">正在读取本地课程目录。</div>
             <div class="subscription-catalog-footer">
               <p id="subscription-catalog-status" class="meta" role="status" aria-live="polite"></p>
-              <button id="subscription-catalog-more" type="button" class="hidden">加载更多课程</button>
+              <nav id="subscription-catalog-pagination" class="pagination hidden" aria-label="课程目录翻页"></nav>
+              <button id="subscription-catalog-retry" type="button" class="hidden">重试</button>
             </div>
           </section>
         </div>

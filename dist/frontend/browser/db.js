@@ -266,11 +266,11 @@ function _getPptPages(subId) {
   `, [subId]);
 }
 
-function _searchSummaries(query, courseIds, page = 1, pageSize = 50, domains = {}) {
+function _searchSummaries(query, courseIds, page = 1, pageSize = 20, domains = {}) {
   const terms = String(query || '').trim().split(/\s+/).filter(Boolean);
   const active = ['title', 'summary', 'transcript', 'ocr'].filter(name => domains[name] !== false);
   page = Math.max(1, Number(page) || 1);
-  pageSize = Math.max(1, Math.min(100, Number(pageSize) || 50));
+  pageSize = Math.max(1, Math.min(100, Number(pageSize) || 20));
   const empty = {results: [], total: 0, page, hasMore: false};
   if (!terms.length || !active.length) return empty;
   const hasTitle = _queryAll("PRAGMA table_info(lectures)").some(row => row.name === 'ai_title');

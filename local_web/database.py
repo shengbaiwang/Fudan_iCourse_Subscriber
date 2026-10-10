@@ -487,7 +487,7 @@ class DatabaseManager:
         course_id: str = "",
         domains: list[str] | None = None,
         page: int = 1,
-        page_size: int = 50,
+        page_size: int = 20,
     ) -> dict[str, Any]:
         """Full-text search over titles, summaries, transcripts and PPT OCR.
 
@@ -504,7 +504,7 @@ class DatabaseManager:
         if not active:
             return empty
         page = max(1, int(page or 1))
-        page_size = max(1, min(int(page_size or 50), 100))
+        page_size = max(1, min(int(page_size or 20), 100))
 
         with closing(self._connect()) as db:
             # ai_title is a newer column; a library saved by an older build
@@ -670,7 +670,7 @@ class DatabaseManager:
             return [str(row[0]) for row in rows]
 
     def subscription_catalog(
-        self, query: str = "", term: str = "", limit: int = 100, page: int = 1
+        self, query: str = "", term: str = "", limit: int = 20, page: int = 1
     ) -> dict[str, Any]:
         """Page through every match without loading the full catalog into JS."""
         page = max(1, page)

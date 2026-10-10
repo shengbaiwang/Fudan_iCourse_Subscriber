@@ -64,6 +64,26 @@ class SharedConsoleTest(unittest.TestCase):
             finally:
                 manager.close()
 
+    def test_search_defaults_to_twenty_results_per_page(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = DatabaseManager(Path(directory))
+            try:
+                with closing(sqlite3.connect(manager.db_path)) as db:
+                    db.executescript(SCHEMA_SQL)
+                    db.execute("INSERT INTO courses VALUES ('1', '课程', '教师')")
+                    db.executemany(
+                        "INSERT INTO lectures (sub_id, course_id, summary) VALUES (?, '1', '分页关键词')",
+                        [(f'lecture-{i:03d}',) for i in range(45)],
+                    )
+                    db.commit()
+                pages = [manager.search('分页关键词', page=page) for page in (1, 2, 3)]
+                self.assertEqual([len(p['results']) for p in pages], [20, 20, 5])
+                self.assertEqual([p['total'] for p in pages], [45, 45, 45])
+                self.assertEqual([p['has_more'] for p in pages], [True, True, False])
+                self.assertEqual(len({r['sub_id'] for p in pages for r in p['results']}), 45)
+            finally:
+                manager.close()
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -264,15 +264,15 @@ class DatabaseQueryTest(unittest.TestCase):
                         + [("field-id", "2026-秋", "另一课程", "独特教师", "独特学院")],
                     )
                     db.commit()
-                pages = [manager.subscription_catalog("目录课程", page=i) for i in (1, 2, 3)]
-                self.assertEqual([len(p["courses"]) for p in pages], [100, 100, 7])
-                self.assertEqual([p["total"] for p in pages], [207, 207, 207])
-                self.assertEqual([p["has_more"] for p in pages], [True, True, False])
+                pages = [manager.subscription_catalog("目录课程", page=i) for i in range(1, 12)]
+                self.assertEqual([len(p["courses"]) for p in pages], [20] * 10 + [7])
+                self.assertEqual([p["total"] for p in pages], [207] * 11)
+                self.assertEqual([p["has_more"] for p in pages], [True] * 10 + [False])
                 found = [r["course_id"] for p in pages for r in p["courses"]]
                 self.assertEqual(len(set(found)), 207)
                 self.assertEqual(set(found), {f"catalog-{i:03d}" for i in range(207)})
-                self.assertEqual(manager.subscription_catalog("目录课程", page=4)["courses"], [])
-                filtered = manager.subscription_catalog("目录课程", "2026-秋", page=3)
+                self.assertEqual(manager.subscription_catalog("目录课程", page=12)["courses"], [])
+                filtered = manager.subscription_catalog("目录课程", "2026-秋", page=11)
                 self.assertEqual(filtered["total"], 205)
                 self.assertEqual(len(filtered["courses"]), 5)
                 self.assertFalse(filtered["has_more"])
@@ -294,7 +294,7 @@ class DatabaseQueryTest(unittest.TestCase):
                 )
                 endpoint = next(route.endpoint for route in app.routes
                                 if getattr(route, "path", None) == "/api/local/subscription-catalog")
-                response = asyncio.run(endpoint(q="目录课程", term="2026-秋", page=3))
+                response = asyncio.run(endpoint(q="目录课程", term="2026-秋", page=11))
                 self.assertEqual(response["terms"], ["2026-秋", "2026-春"])
                 self.assertEqual(response["total"], 205)
                 self.assertEqual(len(response["courses"]), 5)

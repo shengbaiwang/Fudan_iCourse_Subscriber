@@ -436,7 +436,7 @@
       const selected = (url.searchParams.get('domains') || 'title,summary,transcript,ocr').split(',');
       const domains = Object.fromEntries(['title', 'summary', 'transcript', 'ocr'].map(name => [name, selected.includes(name)]));
       const result = db.searchSummaries(q, ids((url.searchParams.get('course_id') || '').split(',')),
-        Number(url.searchParams.get('page') || 1), Number(url.searchParams.get('page_size') || 50), domains);
+        Number(url.searchParams.get('page') || 1), Number(url.searchParams.get('page_size') || 20), domains);
       const results = result.results.map(row => {
         const value = String(row.hit_field === 'ocr' ? row.ppt_text || '' : row.hit_field === 'title' ? row.ai_title || row.sub_title || '' : row[row.hit_field] || '');
         const plain = plainMarkdown(value);
@@ -462,7 +462,7 @@
       const term = url.searchParams.get('term') || '';
       const page = Math.max(1, Number.parseInt(url.searchParams.get('page'), 10) || 1);
       const requestedLimit = Number.parseInt(url.searchParams.get('limit'), 10);
-      const pageSize = Math.max(1, Math.min(Number.isFinite(requestedLimit) ? requestedLimit : 100, 200));
+      const pageSize = Math.max(1, Math.min(Number.isFinite(requestedLimit) ? requestedLimit : 20, 200));
       const filters = {query: q, terms: term ? [term] : []};
       const total = db.countAllCourses(filters);
       return {terms: db.getAllCoursesTerms(),

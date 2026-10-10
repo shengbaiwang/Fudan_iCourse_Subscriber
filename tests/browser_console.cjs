@@ -32,6 +32,9 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   database.run("INSERT INTO meta VALUES ('subscribed_course_ids','1')");
   database.run("INSERT INTO lectures(sub_id,course_id,sub_title,summary,transcript,processed_at,summary_model) VALUES ('10','1','2026-03-09第11-12节', '# 导论\n\n**理论**与实践。<script>window.pwned=1</script>','专属转录关键词','2026-09-08','test/model-a'), ('11','1','2026-03-09第6-8节','第二篇笔记','第二份转录','2026-09-07','test/model-b')");
   database.run("INSERT INTO lectures(sub_id,course_id,sub_title,error_stage) VALUES ('12','1','2026-03-10第1-2节','no_video')");
+  const searchInsert = database.prepare("INSERT INTO lectures(sub_id,course_id,sub_title,summary) VALUES (?, '2', ?, ?)");
+  for (let i = 0; i < 45; i++) searchInsert.run([`search-${String(i).padStart(3,'0')}`, `分页笔记 ${i}`, `分页关键词 ${i}`]);
+  searchInsert.free();
   database.run("INSERT INTO summary_versions VALUES ('10','test/model-a','# 导论\n\n理论与实践','2026-09-08'), ('10','test/model-b','# 另一个版本\n\n观点比较','2026-09-07'), ('10','test/model-a','# 历史版本\n\n第一次输出','2026-09-06')");
   database.run("INSERT INTO ppt_pages(sub_id,page_num,created_sec,text,ocr_status) VALUES ('10',1,62,'专属 OCR 关键词','done')");
   const bytes = Buffer.from(database.export());
@@ -124,12 +127,21 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         if (p==='/courses/1/lectures') return json(lectures);
         if (p==='/lectures/10') return json(lecture);
         if (p==='/model-providers') return json({source:'github-variable',providers:[provider]});
-        if (p==='/search') return json({total:1,page:1,has_more:false,results:[{sub_id:'10',course_id:'1',course_title:'现代思想史',sub_title:lecture.sub_title,hit_field:'ocr',snippet:'专属 OCR 关键词'}]});
+        if (p==='/search') {
+          const q = url.searchParams.get('q'), domains = url.searchParams.get('domains').split(',');
+          const page = Number(url.searchParams.get('page') || 1), size = Number(url.searchParams.get('page_size') || 20);
+          let results = [];
+          if (q==='关键词' && domains.includes('ocr')) results=[{sub_id:'10',course_id:'1',course_title:'现代思想史',sub_title:lecture.sub_title,hit_field:'ocr',snippet:'专属 OCR 关键词'}];
+          if (q==='分页关键词' && domains.includes('summary') && url.searchParams.get('course_id')!=='1') {
+            results=rows("SELECT sub_id,course_id,sub_title,summary snippet,'summary' hit_field FROM lectures WHERE course_id='2' ORDER BY sub_id DESC");
+          }
+          return json({total:results.length,page,has_more:page*size<results.length,results:results.slice((page-1)*size,page*size)});
+        }
         if (p==='/subscriptions') return json({course_ids:['1'],courses:[courses[0]]});
         if (p==='/subscription-catalog') {
           const q = `%${(url.searchParams.get('q') || '').trim()}%`, term = url.searchParams.get('term') || '';
           const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
-          const size = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 100, 200));
+          const size = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 20, 200));
           const where = '(title LIKE ? OR teacher LIKE ? OR dept LIKE ? OR course_id LIKE ?)' + (term ? ' AND term = ?' : '');
           const params = [q,q,q,q,...(term ? [term] : [])];
           const total = rows(`SELECT COUNT(*) n FROM all_courses WHERE ${where}`,params)[0].n;
@@ -224,17 +236,111 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.locator('.search-card').click();
       await page.locator('#detail-content .ppt').waitFor();
       assert.match(await page.locator('#detail-content').innerText(),/专属 OCR/);
+      await page.locator('.desktop-nav [data-view="search"]').click();
+      await page.locator('[data-domain="summary"]').click();
+      await page.locator('#search').fill('分页关键词');
+      await page.waitForFunction(()=>document.querySelector('#search-meta').textContent==='共 45 条结果 · 第 1–20 条');
+      assert.equal(await page.locator('.search-card').count(),20);
+      const firstSearchPage = await page.locator('.search-card h2').allTextContents();
+      assert.equal(await page.locator('#search-pagination').getByRole('button',{name:'上一页'}).isDisabled(),true);
+      await page.locator('#search-pagination').getByRole('button',{name:'下一页'}).click();
+      await page.waitForFunction(()=>document.querySelector('#search-meta').textContent==='共 45 条结果 · 第 21–40 条');
+      assert.equal(await page.locator('.search-card').count(),20);
+      assert.equal((await page.locator('.search-card h2').allTextContents()).some(title=>firstSearchPage.includes(title)),false);
+      await page.locator('#search-pagination').getByRole('button',{name:'上一页'}).click();
+      await page.waitForFunction(()=>document.querySelector('#search-pagination input')?.value==='1' && document.querySelector('#search-results').getAttribute('aria-busy')==='false');
+      assert.deepEqual(await page.locator('.search-card h2').allTextContents(),firstSearchPage);
+      await page.locator('#search-pagination input').fill('3');
+      await page.locator('#search-pagination input').press('Enter');
+      await page.waitForFunction(()=>document.querySelector('#search-meta').textContent==='共 45 条结果 · 第 41–45 条');
+      assert.equal(await page.locator('.search-card').count(),5);
+      assert.equal(await page.locator('#search-pagination').getByRole('button',{name:'下一页'}).isDisabled(),true);
+      await page.locator('#search-pagination input').fill('0');
+      await page.locator('#search-pagination input').press('Enter');
+      assert.equal(await page.locator('#search-pagination input').inputValue(),'3');
+      await page.locator('#search-course').selectOption('1');
+      await page.waitForFunction(()=>document.querySelector('#search-results').textContent==='没有找到匹配内容。');
+      assert.equal(await page.locator('#search-pagination').isVisible(),false);
+      await page.locator('#search-course').selectOption('2');
+      await page.waitForFunction(()=>document.querySelector('#search-meta').textContent==='共 45 条结果 · 第 1–20 条');
+      // A failed page keeps the current results, and retry requests the failed page.
+      await page.evaluate(()=>{
+        window.originalSearchApi = api;
+        api = async (path,options) => {
+          if (path.startsWith('/api/local/search') && new URL(path,location.href).searchParams.get('page')==='2') throw new Error('合成搜索请求失败');
+          return window.originalSearchApi(path,options);
+        };
+      });
+      await page.locator('#search-pagination').getByRole('button',{name:'下一页'}).click();
+      await page.locator('#search-retry').waitFor();
+      assert.equal(await page.locator('.search-card').count(),20);
+      assert.equal(await page.locator('#search-pagination input').inputValue(),'1');
+      await page.evaluate(()=>{api=window.originalSearchApi;});
+      await page.locator('#search-retry').click();
+      await page.waitForFunction(()=>document.querySelector('#search-meta').textContent==='共 45 条结果 · 第 21–40 条');
+      // Clearing the query invalidates a pending page before the debounce runs.
+      await page.evaluate(()=>{
+        api = async (path,options) => {
+          if (path.startsWith('/api/local/search')) {
+            const result = await window.originalSearchApi(path,options);
+            await new Promise(resolve=>{window.releaseSearchPage=resolve;});
+            return result;
+          }
+          return window.originalSearchApi(path,options);
+        };
+      });
+      await page.locator('#search-pagination').getByRole('button',{name:'下一页'}).click();
+      await page.waitForFunction(()=>Boolean(window.releaseSearchPage));
+      await page.locator('#search').fill('');
+      await page.evaluate(async()=>{window.releaseSearchPage(); await new Promise(resolve=>setTimeout(resolve,0)); api=window.originalSearchApi;});
+      assert.equal(await page.locator('.search-card').count(),0);
+      assert.equal(await page.locator('#search-pagination').isVisible(),false);
+      await page.locator('#search').fill('分页关键词');
+      await page.waitForFunction(()=>document.querySelector('#search-meta').textContent==='共 45 条结果 · 第 1–20 条');
+      await page.setViewportSize({width:390,height:844});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      await page.screenshot({path:`/tmp/icourse-${mode}-search-mobile.png`,fullPage:true});
+      await page.setViewportSize({width:1280,height:900});
+      await page.locator('#search').fill('');
+      await page.waitForFunction(()=>document.querySelector('#search-results').textContent==='输入关键词后开始搜索。');
       await page.locator('.desktop-nav [data-view="subscriptions"]').click();
       await page.locator('#subscription-query').fill('目录课程');
-      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='已显示 100 / 207 门课程');
-      assert.equal(await page.locator('#subscription-catalog .subscription-row').count(),100);
-      await page.locator('#subscription-catalog-more').click();
-      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='已显示 200 / 207 门课程');
-      await page.locator('#subscription-catalog-more').click();
-      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='已显示 207 / 207 门课程');
-      assert.equal(await page.locator('#subscription-catalog .subscription-row').count(),207);
-      assert.equal(await page.evaluate(()=>new Set(catalogRows.map(row=>row.course_id)).size),207);
-      assert.equal(await page.locator('#subscription-catalog-more').isVisible(),false);
+      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 207 门课程 · 第 1–20 条');
+      // Removing the only row on the last subscribed page returns to the preceding page.
+      await page.evaluate(()=>{
+        window.originalSubscriptions = {ids:subscribedCourseIds,courses:subscriptionCourses,save:queueSubscriptionSave};
+        subscriptionCourses = Array.from({length:21},(_,i)=>({course_id:`subscribed-${i}`,title:`已订阅课程 ${i}`}));
+        subscribedCourseIds = subscriptionCourses.map(row=>row.course_id);
+        queueSubscriptionSave = () => {};
+        renderSubscriptions();
+      });
+      assert.equal(await page.locator('#subscription-list .subscription-row').count(),20);
+      await page.locator('#subscription-pagination').getByRole('button',{name:'下一页'}).click();
+      assert.equal(await page.locator('#subscription-list .subscription-row').count(),1);
+      await page.locator('#subscription-list .subscription-action').click();
+      assert.equal(await page.locator('#subscription-list .subscription-row').count(),20);
+      assert.equal(await page.locator('#subscription-pagination input').inputValue(),'1');
+      await page.evaluate(()=>{
+        subscribedCourseIds=window.originalSubscriptions.ids;
+        subscriptionCourses=window.originalSubscriptions.courses;
+        queueSubscriptionSave=window.originalSubscriptions.save;
+        renderSubscriptions();
+      });
+      assert.equal(await page.locator('#subscription-catalog .subscription-row').count(),20);
+      const firstCatalogPage = await page.evaluate(()=>catalogRows.map(row=>row.course_id));
+      assert.equal(await page.locator('#subscription-catalog-pagination').getByRole('button',{name:'上一页'}).isDisabled(),true);
+      await page.locator('#subscription-catalog-pagination').getByRole('button',{name:'下一页'}).click();
+      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 207 门课程 · 第 21–40 条');
+      assert.equal(await page.locator('#subscription-catalog .subscription-row').count(),20);
+      assert.equal((await page.evaluate(()=>catalogRows.map(row=>row.course_id))).some(id=>firstCatalogPage.includes(id)),false);
+      await page.locator('#subscription-catalog-pagination').getByRole('button',{name:'上一页'}).click();
+      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 207 门课程 · 第 1–20 条');
+      assert.deepEqual(await page.evaluate(()=>catalogRows.map(row=>row.course_id)),firstCatalogPage);
+      await page.locator('#subscription-catalog-pagination input').fill('11');
+      await page.locator('#subscription-catalog-pagination input').press('Enter');
+      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 207 门课程 · 第 201–207 条');
+      assert.equal(await page.locator('#subscription-catalog .subscription-row').count(),7);
+      assert.equal(await page.locator('#subscription-catalog-pagination').getByRole('button',{name:'下一页'}).isDisabled(),true);
       await page.locator('#subscription-catalog .subscription-row').last().getByRole('button',{name:'单次运行',exact:true}).click();
       assert.equal(await page.locator('#single-run-ids').inputValue(),'catalog-206');
       await page.locator('#view-run:not(.hidden)').waitFor();
@@ -277,17 +383,17 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.setViewportSize({width:1280,height:900});
       await page.locator('.desktop-nav [data-view="subscriptions"]').click();
       await page.locator('#subscription-term').selectOption('2026-春');
-      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='已显示 2 / 2 门课程');
+      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 2 门课程 · 第 1–2 条');
       await page.locator('#subscription-term').selectOption('2026-秋');
-      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='已显示 100 / 205 门课程');
+      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 205 门课程 · 第 1–20 条');
       for (const q of ['独特教师','独特学院','field-id']) {
         await page.locator('#subscription-query').fill(q);
-        await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='已显示 1 / 1 门课程');
+        await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 1 门课程 · 第 1–1 条');
         assert.equal(await page.evaluate(()=>catalogRows[0].course_id),'field-id');
       }
       await page.locator('#subscription-query').fill('不存在的课程');
       await page.waitForFunction(()=>document.querySelector('#subscription-catalog').textContent==='没有匹配的课程。');
-      assert.equal(await page.locator('#subscription-catalog-status').innerText(),'已显示 0 / 0 门课程');
+      assert.equal(await page.locator('#subscription-catalog-status').innerText(),'共 0 门课程');
 
       // A response from the previous query must not replace a newer result.
       await page.evaluate(()=>{
@@ -304,10 +410,10 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.locator('#subscription-query').fill('目录课程');
       await page.waitForFunction(()=>Boolean(window.releaseCatalogSearch));
       await page.locator('#subscription-query').fill('field-id');
-      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='已显示 1 / 1 门课程');
+      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 1 门课程 · 第 1–1 条');
       await page.evaluate(async()=>{window.releaseCatalogSearch(); await new Promise(resolve=>setTimeout(resolve,0)); api=window.catalogOriginalApi;});
       assert.equal(await page.evaluate(()=>catalogRows[0].course_id),'field-id');
-      assert.equal(await page.locator('#subscription-catalog-status').innerText(),'已显示 1 / 1 门课程');
+      assert.equal(await page.locator('#subscription-catalog-status').innerText(),'共 1 门课程 · 第 1–1 条');
 
       // An initial failure offers retry, which starts at page one.
       await page.evaluate(()=>{
@@ -317,10 +423,10 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         };
       });
       await page.locator('#subscription-query').fill('目录课程');
-      await page.locator('#subscription-catalog-more').getByText('重试',{exact:true}).waitFor();
+      await page.locator('#subscription-catalog-retry').getByText('重试',{exact:true}).waitFor();
       await page.evaluate(()=>{api=window.catalogOriginalApi;});
-      await page.locator('#subscription-catalog-more').click();
-      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='已显示 100 / 205 门课程');
+      await page.locator('#subscription-catalog-retry').click();
+      await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 205 门课程 · 第 1–20 条');
       await page.setViewportSize({width:390,height:844});
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
       await page.screenshot({path:`/tmp/icourse-${mode}-subscriptions-mobile.png`,fullPage:true});

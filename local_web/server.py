@@ -666,7 +666,7 @@ def create_app(
         return {"course_ids": course_ids, "courses": courses, "source": source}
 
     @app.get("/api/local/subscription-catalog")
-    async def subscription_catalog(q: str = "", term: str = "", limit: int = 100, page: int = 1):
+    async def subscription_catalog(q: str = "", term: str = "", limit: int = 20, page: int = 1):
         local_db = require_db()
         return {
             "terms": await run_in_threadpool(local_db.subscription_terms),
@@ -1204,7 +1204,7 @@ def create_app(
         course_id: str = "",
         domains: str = "",
         page: int = 1,
-        page_size: int = 50,
+        page_size: int = 20,
     ):
         domain_list = [d.strip() for d in domains.split(",") if d.strip()] or None
         return await run_in_threadpool(

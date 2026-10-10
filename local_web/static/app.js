@@ -28,12 +28,13 @@ let subscriptionCourses = [];
 let subscriptionTerms = [];
 let subscriptionTimer = null;
 let catalogRows = [];
-const CATALOG_PAGE_SIZE = 100;
-let catalogPage = 0;
+const RESULTS_PAGE_SIZE = 20;
+let subscriptionPage = 1;
+let catalogPage = 1;
 let catalogTotal = 0;
-let catalogHasMore = false;
 let catalogLoading = false;
 let catalogError = false;
+let catalogFailedPage = 1;
 let catalogRequest = 0;
 let courseZones = {};
 let lectureNames = {};
@@ -2046,6 +2047,45 @@ $("#rerun-page-submit").onclick = async () => {
   await submitUnifiedRun();
 };
 
+function renderPagination(root, page, total, loading, onChange) {
+  root.replaceChildren();
+  root.classList.toggle("hidden", !total);
+  if (!total) return;
+  const pages = Math.ceil(total / RESULTS_PAGE_SIZE);
+  const previous = createButton("上一页", () => onChange(page - 1));
+  previous.disabled = loading || page <= 1;
+  const label = document.createElement("label");
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = "1";
+  input.max = String(pages);
+  input.value = String(page);
+  input.disabled = loading;
+  input.setAttribute("aria-label", "跳转页码");
+  const jump = () => {
+    const target = Number(input.value);
+    if (input.value && Number.isInteger(target) && target >= 1 && target <= pages) {
+      if (target !== page) onChange(target);
+    } else {
+      input.value = String(page);
+    }
+  };
+  input.onchange = jump;
+  input.onkeydown = (event) => {
+    if (event.key === "Enter") { event.preventDefault(); jump(); }
+  };
+  label.append("第", input, ` / ${pages} 页`);
+  const next = createButton("下一页", () => onChange(page + 1));
+  next.disabled = loading || page >= pages;
+  root.append(previous, label, next);
+}
+
+function resultRange(page, count, total, unit) {
+  if (!total) return `共 0 ${unit}`;
+  const start = (page - 1) * RESULTS_PAGE_SIZE + 1;
+  return `共 ${total} ${unit} · 第 ${start}–${start + count - 1} 条`;
+}
+
 function renderSubscriptionCourse(course, action, label) {
   const row = document.createElement("div");
   row.className = "subscription-row";
@@ -2095,7 +2135,8 @@ function renderSubscriptions() {
   $("#subscription-count").textContent = String(subscribedCourseIds.length);
   current.classList.toggle("empty", !subscriptionCourses.length);
   if (!subscriptionCourses.length) current.textContent = "尚未订阅课程。";
-  orderedSubscriptionCourses().forEach((course) => {
+  subscriptionPage = Math.max(1, Math.min(subscriptionPage, Math.ceil(subscriptionCourses.length / RESULTS_PAGE_SIZE)));
+  orderedSubscriptionCourses().slice((subscriptionPage - 1) * RESULTS_PAGE_SIZE, subscriptionPage * RESULTS_PAGE_SIZE).forEach((course) => {
     current.append(renderSubscriptionCourse(course, () => {
       subscribedCourseIds = subscribedCourseIds.filter((id) => String(id) !== String(course.course_id));
       subscriptionCourses = subscriptionCourses.filter((item) => String(item.course_id) !== String(course.course_id));
@@ -2103,16 +2144,18 @@ function renderSubscriptions() {
       queueSubscriptionSave();
     }, "移除"));
   });
+  renderPagination($("#subscription-pagination"), subscriptionPage, subscriptionCourses.length, false, (page) => {
+    subscriptionPage = page;
+    renderSubscriptions();
+  });
   catalog.classList.toggle("empty", !catalogRows.length);
   if (!catalogRows.length) catalog.textContent = catalogLoading ? "正在搜索课程…"
     : catalogError ? "课程目录加载失败，请重试。" : "没有匹配的课程。";
   catalog.setAttribute("aria-busy", String(catalogLoading));
-  $("#subscription-catalog-status").textContent = catalogLoading && !catalogRows.length
-    ? "正在搜索课程…" : `已显示 ${catalogRows.length} / ${catalogTotal} 门课程`;
-  const more = $("#subscription-catalog-more");
-  more.classList.toggle("hidden", !catalogHasMore && !catalogError);
-  more.disabled = catalogLoading;
-  more.textContent = catalogLoading ? "加载中…" : catalogError ? "重试" : "加载更多课程";
+  $("#subscription-catalog-status").textContent = catalogLoading ? "正在搜索课程…"
+    : catalogError ? "课程目录加载失败，请重试。" : resultRange(catalogPage, catalogRows.length, catalogTotal, "门课程");
+  renderPagination($("#subscription-catalog-pagination"), catalogPage, catalogTotal, catalogLoading, loadSubscriptionCatalog);
+  $("#subscription-catalog-retry").classList.toggle("hidden", !catalogError);
   catalogRows.forEach((course) => {
     const subscribed = subscribedCourseIds.includes(String(course.course_id));
     const catalogItem = renderSubscriptionCourse(course, () => {
@@ -2143,29 +2186,27 @@ function renderSubscriptions() {
   });
 }
 
-async function loadSubscriptionCatalog(append = false) {
-  if (append && (catalogLoading || !catalogHasMore)) return;
+async function loadSubscriptionCatalog(page = 1) {
   clearTimeout(subscriptionTimer);
   const request = ++catalogRequest;
   const query = $("#subscription-query").value.trim();
   const term = $("#subscription-term").value;
-  const page = append ? catalogPage + 1 : 1;
-  if (!append) {
+  if (page === 1) {
     catalogRows = [];
-    catalogPage = 0;
+    catalogPage = 1;
     catalogTotal = 0;
-    catalogHasMore = false;
   }
   catalogLoading = true;
   catalogError = false;
   renderSubscriptions();
   try {
-    const result = await api(`/api/local/subscription-catalog?q=${encodeURIComponent(query)}&term=${encodeURIComponent(term)}&page=${page}&limit=${CATALOG_PAGE_SIZE}`);
+    const result = await api(`/api/local/subscription-catalog?q=${encodeURIComponent(query)}&term=${encodeURIComponent(term)}&page=${page}&limit=${RESULTS_PAGE_SIZE}`);
     if (request !== catalogRequest) return;
-    catalogRows = append ? [...catalogRows, ...(result.courses || [])] : result.courses || [];
+    const lastPage = Math.max(1, Math.ceil(result.total / RESULTS_PAGE_SIZE));
+    if (page > lastPage) return await loadSubscriptionCatalog(lastPage);
+    catalogRows = result.courses || [];
     catalogPage = result.page || page;
     catalogTotal = result.total ?? catalogRows.length;
-    catalogHasMore = Boolean(result.has_more);
     const select = $("#subscription-term");
     if (JSON.stringify(subscriptionTerms) !== JSON.stringify(result.terms || [])) {
       subscriptionTerms = result.terms || [];
@@ -2176,6 +2217,7 @@ async function loadSubscriptionCatalog(append = false) {
   } catch (error) {
     if (request !== catalogRequest) return;
     catalogError = true;
+    catalogFailedPage = page;
     message(error.message, true);
   } finally {
     if (request === catalogRequest) {
@@ -2189,6 +2231,7 @@ async function loadSubscriptions() {
   const state = await api("/api/local/subscriptions");
   subscribedCourseIds = (state.course_ids || []).map(String);
   subscriptionCourses = state.courses || [];
+  subscriptionPage = 1;
   await loadSubscriptionCatalog();
 }
 
@@ -3272,6 +3315,7 @@ $("#subscription-sort").value = subscriptionSort;
 $("#subscription-sort").onchange = () => {
   subscriptionSort = $("#subscription-sort").value;
   localStorage.setItem(SUBSCRIPTION_SORT_KEY, subscriptionSort);
+  subscriptionPage = 1;
   renderSubscriptions();
 };
 
@@ -3283,6 +3327,7 @@ renderSubscriptionSortDir();
 $("#subscription-sort-dir").onclick = () => {
   subscriptionSortDir = subscriptionSortDir === "asc" ? "desc" : "asc";
   localStorage.setItem(SUBSCRIPTION_SORT_DIR_KEY, subscriptionSortDir);
+  subscriptionPage = 1;
   renderSubscriptionSortDir();
   renderSubscriptions();
 };
@@ -3292,15 +3337,14 @@ $("#subscription-query").oninput = () => {
   // Invalidate in-flight pages immediately, before the debounce starts a new search.
   ++catalogRequest;
   catalogRows = [];
-  catalogPage = 0;
+  catalogPage = 1;
   catalogTotal = 0;
-  catalogHasMore = false;
   catalogError = false;
   catalogLoading = true;
   renderSubscriptions();
   subscriptionTimer = setTimeout(() => loadSubscriptionCatalog().catch((error) => message(error.message, true)), 240);
 };
-$("#subscription-catalog-more").onclick = () => loadSubscriptionCatalog(catalogPage > 0);
+$("#subscription-catalog-retry").onclick = () => loadSubscriptionCatalog(catalogFailedPage);
 $("#settings-obsidian-button").onclick = () => $("#obsidian-button").click();
 $("#settings-rerun-button").onclick = async () => {
   $("#run-kind").value = "rerun";
@@ -3318,7 +3362,9 @@ const SEARCH_DOMAIN_LABELS = { title: "标题", summary: "摘要", transcript: "
 const searchActiveDomains = new Set(Object.keys(SEARCH_DOMAIN_LABELS));
 let searchPage = 1;
 let searchRequestId = 0;
-let searchHasMore = false;
+let searchTotal = 0;
+let searchLoading = false;
+let searchFailedPage = 1;
 
 function searchTerms() {
   return $("#search").value.trim().split(/\s+/).filter(Boolean);
@@ -3330,9 +3376,15 @@ function resetSearchResults(messageText) {
   root.className = "search-results empty";
   root.textContent = messageText;
   $("#search-meta").classList.add("hidden");
-  $("#search-more").classList.add("hidden");
+  $("#search-pagination").classList.add("hidden");
+  $("#search-retry").classList.add("hidden");
   searchPage = 1;
-  searchHasMore = false;
+  searchTotal = 0;
+}
+
+function renderSearchPagination() {
+  renderPagination($("#search-pagination"), searchPage, searchTotal, searchLoading, runSearch);
+  $("#search-results").setAttribute("aria-busy", String(searchLoading));
 }
 
 // 片段与关键词都先转义 HTML 再插 <mark>，正则特殊字符需二次转义。
@@ -3371,15 +3423,24 @@ function renderSearchResultItem(item, terms) {
   return button;
 }
 
-async function runSearch(page) {
+async function runSearch(page = 1) {
+  clearTimeout(searchTimer);
   const requestId = ++searchRequestId;
   const query = $("#search").value.trim();
   if (!query) {
+    searchLoading = false;
     resetSearchResults("输入关键词后开始搜索。");
+    renderSearchPagination();
     return;
   }
+  if (page === 1) resetSearchResults("正在搜索…");
+  searchLoading = true;
+  $("#search-meta").textContent = "正在搜索…";
+  $("#search-meta").classList.remove("hidden");
+  $("#search-retry").classList.add("hidden");
+  renderSearchPagination();
   const terms = searchTerms();
-  const params = new URLSearchParams({ q: query, page: String(page), page_size: "50" });
+  const params = new URLSearchParams({ q: query, page: String(page), page_size: String(RESULTS_PAGE_SIZE) });
   const courseId = $("#search-course").value;
   if (courseId) params.set("course_id", courseId);
   params.set("domains", [...searchActiveDomains].join(","));
@@ -3390,18 +3451,29 @@ async function runSearch(page) {
       resetSearchResults("没有找到匹配内容。");
       return;
     }
+    const lastPage = Math.ceil(result.total / RESULTS_PAGE_SIZE);
+    if (page > lastPage) return await runSearch(lastPage);
     const root = $("#search-results");
-    if (page <= 1) root.replaceChildren();
+    root.replaceChildren();
     root.classList.remove("empty");
     result.results.forEach((item) => root.append(renderSearchResultItem(item, terms)));
-    searchPage = result.page;
-    searchHasMore = result.has_more;
+    searchPage = result.page || page;
+    searchTotal = result.total;
     const meta = $("#search-meta");
-    meta.textContent = `共 ${result.total} 条结果`;
+    meta.textContent = resultRange(searchPage, result.results.length, searchTotal, "条结果");
     meta.classList.remove("hidden");
-    $("#search-more").classList.toggle("hidden", !searchHasMore);
   } catch (error) {
+    if (requestId !== searchRequestId) return;
+    searchFailedPage = page;
+    $("#search-meta").textContent = "搜索失败，请重试。";
+    if (!searchTotal) $("#search-results").textContent = "搜索失败，请重试。";
+    $("#search-retry").classList.remove("hidden");
     message(error.message, true);
+  } finally {
+    if (requestId === searchRequestId) {
+      searchLoading = false;
+      renderSearchPagination();
+    }
   }
 }
 
@@ -3419,6 +3491,9 @@ function syncSearchCourseOptions() {
 $("#search").oninput = () => {
   clearTimeout(searchTimer);
   searchRequestId += 1;
+  searchLoading = Boolean($("#search").value.trim());
+  resetSearchResults(searchLoading ? "正在搜索…" : "输入关键词后开始搜索。");
+  renderSearchPagination();
   searchTimer = setTimeout(() => runSearch(1), 300);
 };
 $("#search-course").onchange = () => runSearch(1);
@@ -3433,9 +3508,7 @@ document.querySelectorAll(".search-domain").forEach((button) => {
     runSearch(1);
   };
 });
-$("#search-more").onclick = () => {
-  if (searchHasMore) runSearch(searchPage + 1);
-};
+$("#search-retry").onclick = () => runSearch(searchFailedPage);
 
 /* ── 讲座：本机粘贴转写 → 云端模型生成笔记 ──
    独立于课程库（课程库是 data 分支的只读镜像）；转写文本只在本机
