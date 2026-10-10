@@ -115,7 +115,7 @@ def run(payload):
         runner=local_course, summary_worker=None)
     runner._summarizer = summarizer
     try:
-        lectures = main._enumerate_lectures(client, db, reporter)
+        lectures = main._enumerate_lectures(client, db, reporter, force_video_recheck=True)
         main._drive_lectures(client, db, scheduler, runner._transcriber, summarizer, reporter, lectures, runner=runner)
     finally:
         scheduler.shutdown()

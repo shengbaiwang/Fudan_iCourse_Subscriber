@@ -32,6 +32,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   database.run("INSERT INTO meta VALUES ('subscribed_course_ids','1')");
   database.run("INSERT INTO lectures(sub_id,course_id,sub_title,summary,transcript,processed_at,summary_model) VALUES ('10','1','2026-03-09第11-12节', '# 导论\n\n**理论**与实践。<script>window.pwned=1</script>','专属转录关键词','2026-09-08','test/model-a'), ('11','1','2026-03-09第6-8节','第二篇笔记','第二份转录','2026-09-07','test/model-b')");
   database.run("INSERT INTO lectures(sub_id,course_id,sub_title,error_stage) VALUES ('12','1','2026-03-10第1-2节','no_video')");
+  database.run("UPDATE lectures SET error_msg='no playable video URL', error_count=78, retry_after=2000000000 WHERE sub_id='12'");
   const searchInsert = database.prepare("INSERT INTO lectures(sub_id,course_id,sub_title,summary) VALUES (?, '2', ?, ?)");
   for (let i = 0; i < 45; i++) searchInsert.run([`search-${String(i).padStart(3,'0')}`, `分页笔记 ${i}`, `分页关键词 ${i}`]);
   searchInsert.free();
@@ -260,6 +261,10 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.locator('.lecture-open').first().waitFor();
       assert.match(await page.locator('.lecture-open').first().innerText(), /第6-8节/);
       assert.equal(await page.getByText('暂无录播',{exact:true}).count(),1);
+      assert.equal(await page.getByText('no playable video URL',{exact:true}).count(),0);
+      assert.equal(await page.getByText(/尚未取得录播地址.*下次复查/).count(),1);
+      assert.equal(await page.evaluate(() => lectureStateLabel({error_stage:'video_access'})), '录播无权限');
+      assert.equal(await page.evaluate(() => lectureStateLabel({error_stage:'video'})), '录播准备待重试');
       await page.locator('.lecture-open').filter({hasText:'第11-12节'}).click();
       await page.locator('.summary-version-choice').first().waitFor();
       // Three stored reruns plus the distinct active summary must all remain selectable.

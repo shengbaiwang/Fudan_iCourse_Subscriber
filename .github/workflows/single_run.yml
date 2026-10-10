@@ -189,6 +189,7 @@ jobs:
           TITLE_COURSE_IDS: ${{ inputs.course_ids }}
           LECTURE_ORDER: ${{ inputs.lecture_order || 'api' }}
           USE_OFFICIAL_TRANSCRIPT: ${{ inputs.use_official_transcript && '1' || '' }}
+          VIDEO_RECHECK_NOW: '1'
           RESUMMARIZE_SUB_IDS: ${{ inputs.resummarize_sub_ids }}
           BACKFILL_TITLES: ${{ inputs.backfill_titles }}
           SUMMARY_PROVIDER: ${{ inputs.summary_provider }}

@@ -44,6 +44,7 @@ from src.ai import bucketer
 from src.ai.title import build_title_material, split_generated_title
 from src.pipeline.ppt_pipeline import PPTPipeline
 from src.ai.transcriber import IncompleteAudioError, NoAudioStreamError
+from src.api.icourse import VideoAccessError, VideoLookupError, VideoNotReadyError
 from src.runtime import config
 
 if TYPE_CHECKING:
@@ -297,21 +298,45 @@ class LectureRunner:
         downloader.schedule(self._client, course_id, sub_id)
         try:
             handle = downloader.get(sub_id, timeout=120)
+        except VideoAccessError as e:
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
+            self._reporter.info(f"    [ACCESS] {e}")
+            self._db.update_error(sub_id, "video_access", str(e))
+            return None, None
+        except VideoNotReadyError as e:
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
+            self._reporter.info(f"    [WAIT] {e}")
+            self._db.update_error(sub_id, "no_video", str(e))
+            return None, None
+        except VideoLookupError as e:
+            self._reporter.info(f"    [RETRY] {e}")
+            self._db.update_error(sub_id, "video", str(e))
+            return None, None
         except TimeoutError as e:
             self._reporter.info(f"    [SKIP] {e}")
-            self._db.update_error(sub_id, "transcribe", str(e))
+            self._db.update_error(sub_id, "video", "录播准备超时，稍后自动重试")
+            return None, None
+        except Exception as e:
+            # Spawning FFmpeg/reading metadata can fail before an audio handle
+            # exists. Do not turn that failure into a false no_video result.
+            message = f"录播准备失败，稍后自动重试（{type(e).__name__}）"
+            self._reporter.info(f"    [RETRY] {message}")
+            self._db.update_error(sub_id, "video", message)
             return None, None
         if handle is None:
-            # AudioDownloader returns None when get_video_url() returned
-            # None — i.e. the lecture has no playable video.  Record an
-            # error so the lecture is retried (the video may appear later)
-            # but abandoned after max_errors instead of every day forever.
-            # The "no_video" stage is a contract with the frontend, which
-            # renders it as a gray "无视频" hint instead of a red failure.
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
+            # Compatibility with downloaders that return None for a genuinely
+            # missing recording. Availability checks use a bounded cooldown.
             self._reporter.lecture_skip_no_video(
                 existing.get("sub_title", sub_id) if existing else sub_id
             )
-            self._db.update_error(sub_id, "no_video", "no playable video URL")
+            self._db.update_error(sub_id, "no_video", "平台尚未提供可播放的录播地址；将定期自动复查")
             return None, None
 
         try:
@@ -345,6 +370,32 @@ class LectureRunner:
 
         self._db.update_transcript(sub_id, transcript)
         return transcript, segments
+
+    def _official_video_fallback(self, sub_id: str) -> tuple[Optional[str], Optional[list]]:
+        """Use the separately available official text when video is unavailable.
+
+        ASR remains preferred by default. This recovery path requires a PPT
+        duration hint and useful text. Interior gaps use the same 20-minute
+        tolerance as the normal official-transcript path (class breaks are
+        common); head/tail truncation is limited to 5 minutes.
+        """
+        try:
+            segments = self._client.get_transcript_segments(sub_id)
+            duration = self._db.get_max_ppt_created_sec(sub_id)
+            text = " ".join(s["text"] for s in (segments or []))
+            if (not duration or len(text.strip()) < 200
+                    or not self._official_transcript_usable(
+                        segments, duration_hint_s=duration)
+                    or segments[0]["start_ms"] > 5 * 60_000
+                    or duration * 1000 - max(s["end_ms"] for s in segments) > 5 * 60_000):
+                return None, None
+            self._db.update_transcript(sub_id, text)
+            self._reporter.info(f"    录播不可用，采用完整性校验通过的官方转录（{len(text)} 字）")
+            self._release_audio(sub_id)
+            return text, segments
+        except Exception as e:
+            self._reporter.info(f"    官方转录补齐未成功（{type(e).__name__}），保留待复查状态")
+            return None, None
 
     def _summarize(self, sub_id: str, course_title: str, transcript: str,
                    transcript_segments: list[dict] | None) -> Optional[str]:

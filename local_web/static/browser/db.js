@@ -164,8 +164,8 @@ async function _attachShard(shardBytes) {
 
 function _deriveState(row) {
   // "no_video" is a soft error stage the backend records when the lecture
-  // has no playable video yet (it retries a few runs in case the recording
-  // appears later).  Render it as a gray informational badge, not a red
+  // has no playable video yet (availability checks continue with cooldowns
+  // until it appears). Render it as a gray informational badge, not a red
   // failure.
   if (row.error_stage === "no_video") return "novideo";
   if (row.error_stage) return "failed";
@@ -234,6 +234,7 @@ function _getLectures(courseId) {
   const rows = _queryAll(`
     SELECT sub_id, sub_title, date, summary, processed_at,
            ${_queryAll("PRAGMA table_info(lectures)").some(row => row.name === "ai_title") ? "ai_title" : "NULL AS ai_title"},
+           ${_queryAll("PRAGMA table_info(lectures)").some(row => row.name === "retry_after") ? "retry_after" : "NULL AS retry_after"},
            error_stage, error_msg, summary_model, transcript
     FROM lectures WHERE course_id = ?
   `, [courseId]);

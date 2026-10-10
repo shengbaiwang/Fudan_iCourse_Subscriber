@@ -6,17 +6,76 @@ and video downloads through WebVPN.
 """
 
 import hashlib
+import json
 import os
 import re
 import time
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from src.runtime import config
 from src.api.webvpn import WebVPNSession, get_vpn_url
 
 
 _DATE_FROM_SUB_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+
+
+class VideoLookupError(RuntimeError):
+    """Video metadata could not be read reliably; retry rather than no_video."""
+
+
+class VideoNotReadyError(RuntimeError):
+    """Valid platform responses, but the recording is not available yet."""
+
+
+class VideoAccessError(RuntimeError):
+    """The platform explicitly denies this account access to the recording."""
+
+
+def _video_mapping(value) -> dict:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _video_candidates(value):
+    """Read only video fields, including list/JSON variants; skip timestamps."""
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate.startswith(("{", "[")):
+            try:
+                yield from _video_candidates(json.loads(candidate))
+            except ValueError:
+                pass
+        else:
+            if candidate.startswith("//"):
+                candidate = "https:" + candidate
+            parsed = urlparse(candidate)
+            if (parsed.scheme in ("http", "https") and parsed.hostname
+                    and parsed.path.lower().endswith((".mp4", ".m3u8"))):
+                yield candidate
+    elif isinstance(value, dict):
+        # Prefer the preview URL, preserving the existing source priority.
+        for key in ("preview_url", "url", "playurl"):
+            if key in value:
+                yield from _video_candidates(value[key])
+        for key, item in value.items():
+            if key not in ("now", "preview_url", "url", "playurl"):
+                yield from _video_candidates(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _video_candidates(item)
+
+
+def _video_timestamp(value) -> int | None:
+    try:
+        stamp = int(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return stamp if stamp > 0 else None
 
 
 def _extract_date_from_sub(sub_title: str) -> str | None:
@@ -114,8 +173,11 @@ class ICourseClient:
         t_param = f"{user_id}-{now}-{md5_hash}"
 
         client_uuid = str(uuid.uuid4())
-        sep = "&" if "?" in video_url else "?"
-        return f"{video_url}{sep}clientUUID={client_uuid}&t={t_param}"
+        parsed = urlparse(video_url)
+        query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                 if key not in ("clientUUID", "t")]
+        query.extend((("clientUUID", client_uuid), ("t", t_param)))
+        return urlunparse(parsed._replace(query=urlencode(query)))
 
     def get_course_detail(self, course_id: str) -> dict:
         """Get course details including title, teacher, and lecture list.
@@ -456,6 +518,9 @@ class ICourseClient:
         data = resp.json()
         payload = data.get("data") or {}
 
+        if not isinstance(payload, dict):
+            raise RuntimeError("Invalid sub-info payload")
+
         if data.get("code") != 0 and not payload:
             raise RuntimeError(
                 f"API error for sub-info {sub_id}: {data.get('msg')}"
@@ -464,7 +529,7 @@ class ICourseClient:
         return payload
 
     def get_video_url(self, course_id: str, sub_id: str) -> str | None:
-        """Get a signed MP4 video URL for a specific lecture.
+        """Get a signed video URL for a specific lecture.
 
         Cascades through URL sources, most- to least-preferred:
           1. info.video_list[*].preview_url     — healthy lecture
@@ -472,79 +537,70 @@ class ICourseClient:
           3. info.content.playback.url          — review-gated (no extra call)
           4. get-sub-detail content.playback.url — last resort
 
-        Sources 3 and 4 cover the school's pre-release review gate
-        (sub-info code 7001 "视频未到开放时间"), which scrubs top-level
-        video_list/playurl but leaves the URL in nested fields.  The
-        CDN itself does not enforce the gate, so a signed URL from
-        either source downloads successfully.
+        Some partial responses omit top-level URLs while retaining nested
+        playback metadata. Explicit can_watch=False responses are rejected
+        before extracting or signing any recording URL.
 
-        Returns the signed video URL string, or None if no source yields one.
+        Metadata failures raise VideoLookupError; valid empty sources raise
+        VideoNotReadyError. Neither case should permanently abandon a lecture.
         """
+        failures = []
         try:
             info = self.get_sub_info(course_id, sub_id)
         except Exception as e:
             print(f"    sub-info unavailable for {sub_id} "
                   f"({type(e).__name__}); falling back to sub-detail")
             info = {}
+            failures.append(f"sub-info: {type(e).__name__}")
+
+        if info.get("can_watch") in (False, 0, "0", "false"):
+            reason = ("当前账号未选该课程，平台不允许观看录播"
+                      if info.get("watch_rule") == "not_student"
+                      else "平台限制当前账号观看该录播")
+            raise VideoAccessError(reason + "；需在 iCourse 核实课程观看权限")
 
         # Get server timestamp for signing
-        now = info.get("now")
-        if isinstance(now, str):
-            now = int(now)
+        now = _video_timestamp(info.get("now"))
 
         # Extract base video URL from playurl dict or video_list
-        base_url = None
-
-        # Try video_list first (has preview_url without /0/ prefix)
-        video_list = info.get("video_list", {})
-        if isinstance(video_list, dict):
-            for _, v in video_list.items():
-                if isinstance(v, dict):
-                    preview = v.get("preview_url")
-                    if preview and preview.endswith(".mp4"):
-                        base_url = preview
-                        break
-
-        # Fallback: try playurl dict (has /0/ prefix, may need stripping)
+        base_url = next(_video_candidates(info.get("video_list")), None)
         if not base_url:
-            playurl = info.get("playurl", {})
-            if isinstance(playurl, dict):
-                for k, v in playurl.items():
-                    if k == "now":
-                        continue
-                    if isinstance(v, str) and v.endswith(".mp4"):
-                        base_url = v
-                        break
+            base_url = next(_video_candidates(info.get("playurl")), None)
 
         # Review-gate fallback: nested content.playback.url is preserved
         # even when code == 7001 scrubs the top-level fields above.
         if not base_url:
-            playback = (info.get("content") or {}).get("playback") or {}
-            nested = playback.get("url")
-            if isinstance(nested, str) and nested.endswith(".mp4"):
-                base_url = nested
-                if not now:
-                    content_now = (info.get("content") or {}).get("now")
-                    if isinstance(content_now, (int, str)):
-                        now = int(content_now)
+            content = _video_mapping(info.get("content"))
+            base_url = next(_video_candidates(content.get("playback")), None)
+            now = now or _video_timestamp(content.get("now"))
 
-        # Last resort: hit get-sub-detail (gate-free) directly.
+        # Last resort: consult sub-detail, applying the same access check.
         if not base_url:
             try:
                 detail = self.get_sub_detail(course_id, sub_id)
-                content = detail.get("content", {})
-                playback = content.get("playback", {})
-                if playback and playback.get("url"):
-                    base_url = playback["url"]
-            except Exception:
-                pass
+                if detail.get("can_watch") in (False, 0, "0", "false"):
+                    raise VideoAccessError("平台限制当前账号观看该录播；需在 iCourse 核实课程观看权限")
+                content = _video_mapping(detail.get("content"))
+                base_url = next(_video_candidates(content.get("playback")), None)
+                now = now or _video_timestamp(content.get("now"))
+            except VideoAccessError:
+                raise
+            except Exception as e:
+                failures.append(f"sub-detail: {type(e).__name__}")
 
         if not base_url:
-            print(f"    No video URL found for {sub_id} (tried video_list, "
-                  f"playurl, content.playback, sub_detail)")
-            return None
+            if failures:
+                raise VideoLookupError("录播接口暂时异常，稍后自动重试（" + "; ".join(failures) + "）")
+            content = _video_mapping(info.get("content"))
+            reason = ("平台录播仍在处理中，尚未提供视频地址"
+                      if content.get("process_type") == "processing"
+                      else "平台尚未提供可播放的录播地址")
+            raise VideoNotReadyError(reason + "；将定期自动复查")
 
-        return self.sign_video_url(base_url, now=now)
+        try:
+            return self.sign_video_url(base_url, now=now)
+        except Exception as e:
+            raise VideoLookupError(f"录播签名暂时失败，稍后自动重试（{type(e).__name__}）") from None
 
     def get_stream_params(self, video_url: str) -> tuple[str, str]:
         """Get WebVPN URL and HTTP headers for direct streaming (e.g., ffmpeg).

@@ -116,10 +116,10 @@ def merge(local_path: str, remote_path: str):
                 INSERT OR IGNORE INTO main.lectures
                     (sub_id, course_id, sub_title, date, transcript, summary,
                      processed_at, emailed_at, error_msg, error_count, error_stage,
-                     summary_model, ai_title)
+                     summary_model, ai_title, retry_after)
                 SELECT sub_id, course_id, sub_title, date, transcript, summary,
                        processed_at, emailed_at, error_msg, error_count, error_stage,
-                       summary_model, ai_title
+                       summary_model, ai_title, retry_after
                 FROM local.lectures
             """)
 
@@ -139,6 +139,13 @@ def merge(local_path: str, remote_path: str):
                         THEN COALESCE(NULLIF(l.processed_at, ''), NULLIF(main.lectures.processed_at, ''))
                         ELSE COALESCE(NULLIF(main.lectures.processed_at, ''), NULLIF(l.processed_at, '')) END,
                     emailed_at    = COALESCE(l.emailed_at,    main.lectures.emailed_at),
+                    retry_after = CASE
+                        WHEN COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL
+                        THEN NULL
+                        WHEN l.error_stage IS NOT NULL AND l.error_stage IS NOT main.lectures.error_stage
+                        THEN l.retry_after
+                        ELSE NULLIF(MAX(COALESCE(l.retry_after, 0), COALESCE(main.lectures.retry_after, 0)), 0)
+                    END,
                     error_msg = CASE
                         WHEN COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL
                         THEN NULL
@@ -147,6 +154,8 @@ def merge(local_path: str, remote_path: str):
                     error_count = CASE
                         WHEN COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL
                         THEN 0
+                        WHEN l.error_stage IS NOT NULL AND l.error_stage IS NOT main.lectures.error_stage
+                        THEN COALESCE(l.error_count, 0)
                         ELSE MAX(COALESCE(l.error_count, 0), COALESCE(main.lectures.error_count, 0))
                     END,
                     error_stage = CASE

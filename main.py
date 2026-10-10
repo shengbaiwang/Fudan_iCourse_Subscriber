@@ -71,7 +71,7 @@ def _check_session(client: ICourseClient) -> None:
 
 
 def _enumerate_lectures(client: ICourseClient, db: Database,
-                        reporter: Reporter) -> list[tuple[str, str, dict]]:
+                        reporter: Reporter, *, force_video_recheck: bool = False) -> list[tuple[str, str, dict]]:
     """Sync, fast: list every (course_id, course_title, lecture) we'll
     process this run.  Done up-front so the prefetch loop can see across
     course boundaries when picking the "next" lecture."""
@@ -84,7 +84,7 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
             if pause_token and pause_scans.get(course_id) == pause_token:
                 course = db.get_course(course_id) or {}
                 title = course.get("title") or course_id
-                pending = ordered_lectures(db.get_unprocessed_lectures(course_id), config.LECTURE_ORDER)
+                pending = ordered_lectures(db.get_unprocessed_lectures(course_id, include_deferred=force_video_recheck), config.LECTURE_ORDER)
                 blocked = db.get_exhausted_sub_ids(course_id)
                 reporter.info(f"[Auto check] {title}: 已暂停新课次检查，待补齐 {len(pending)} 节"
                               + (f"，{len(blocked)} 节达到重试上限" if blocked else ""))
@@ -129,13 +129,15 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
 
             known_processed = db.get_processed_sub_ids(course_id)
             exhausted = db.get_exhausted_sub_ids(course_id)
+            deferred = set() if force_video_recheck else db.get_deferred_sub_ids(course_id)
             new_lectures = [
                 lec for lec in lectures
                 if lec.get("has_playback")
                 and str(lec["sub_id"]) not in known_processed
                 and str(lec["sub_id"]) not in exhausted
+                and str(lec["sub_id"]) not in deferred
             ]
-            unprocessed = db.get_unprocessed_lectures(course_id)
+            unprocessed = db.get_unprocessed_lectures(course_id, include_deferred=force_video_recheck)
             new_ids = {str(lec["sub_id"]) for lec in new_lectures}
             retry_only = [
                 {"sub_id": u["sub_id"], "sub_title": u["sub_title"],
@@ -295,7 +297,7 @@ def run():
     scans = parse_auto_check_pauses(db.read_meta(PAUSE_SCANS_META))
     if config.COURSE_IDS and not needs_catalog and all(
         cid in config.AUTO_CHECK_PAUSES and scans.get(cid) == config.AUTO_CHECK_PAUSES[cid]
-        and not db.get_unprocessed_lectures(cid) for cid in config.COURSE_IDS
+        and not db.get_unprocessed_lectures(cid, include_deferred=config.VIDEO_RECHECK_NOW) for cid in config.COURSE_IDS
     ):
         reporter.info("订阅课程均已暂停且没有可自动补齐的课次，跳过平台登录与检查。")
         reporter.run_footer()
@@ -314,7 +316,7 @@ def run():
         reporter.run_footer()
         return
 
-    all_lectures = _enumerate_lectures(client, db, reporter)
+    all_lectures = _enumerate_lectures(client, db, reporter, force_video_recheck=config.VIDEO_RECHECK_NOW)
     if not all_lectures:
         reporter.info("没有待处理课次，本次检查完成。")
         reporter.run_footer()

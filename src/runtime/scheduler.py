@@ -140,6 +140,11 @@ class _PendingSpawn:
     in the meantime and abort instead of resurrecting a zombie entry."""
 
 
+@dataclass
+class _AudioUnavailable:
+    error: Exception | None = None
+
+
 class AudioDownloader:
     """Spawn-and-track concurrent ``ffmpeg`` audio extractions.
 
@@ -159,8 +164,8 @@ class AudioDownloader:
         self._dir = audio_dir
         self.max_concurrent = max_concurrent or config.VIDEO_DOWNLOAD_CONCURRENCY
         self._sem = threading.BoundedSemaphore(self.max_concurrent)
-        # sub_id -> AudioHandle (ready) | _PendingSpawn (spawn in flight)
-        self._active: dict[str, "AudioHandle | _PendingSpawn"] = {}
+        # Keep ready, pending and unavailable results until release().
+        self._active: dict[str, "AudioHandle | _PendingSpawn | _AudioUnavailable"] = {}
         self._lock = threading.Lock()
         self._reporter = reporter
         os.makedirs(self._dir, exist_ok=True)
@@ -194,12 +199,6 @@ class AudioDownloader:
             daemon=True,
         ).start()
 
-    def _pop_if_mine(self, sub_id: str, pending: _PendingSpawn) -> None:
-        """Remove our pending entry — but only if it is still ours."""
-        with self._lock:
-            if self._active.get(sub_id) is pending:
-                self._active.pop(sub_id, None)
-
     def _spawn_when_ready(self, client, course_id: str, sub_id: str,
                           pending: _PendingSpawn):
         try:
@@ -207,7 +206,9 @@ class AudioDownloader:
             try:
                 url = client.get_video_url(course_id, sub_id)
                 if not url:
-                    self._pop_if_mine(sub_id, pending)
+                    with self._lock:
+                        if self._active.get(sub_id) is pending:
+                            self._active[sub_id] = _AudioUnavailable()
                     self._sem.release()
                     return
                 vpn_url, headers = client.get_stream_params(url)
@@ -291,8 +292,10 @@ class AudioDownloader:
                     target=self._monitor, args=(handle,),
                     name=f"audio-monitor-{sub_id}", daemon=True,
                 ).start()
-            except Exception:
-                self._pop_if_mine(sub_id, pending)
+            except Exception as e:
+                with self._lock:
+                    if self._active.get(sub_id) is pending:
+                        self._active[sub_id] = _AudioUnavailable(e)
                 self._sem.release()
                 raise
         except Exception as e:
@@ -306,7 +309,8 @@ class AudioDownloader:
     def get(self, sub_id: str, timeout: float = 120.0) -> AudioHandle | None:
         """Block until ffmpeg has been spawned for sub_id; return its handle.
 
-        Returns None if sub_id was never scheduled (or already released).
+        Returns None if unavailable, never scheduled or already released.
+        Re-raises a background metadata/spawn failure for the caller.
         Raises TimeoutError if the spawn never happens within ``timeout``.
         """
         sub_id = str(sub_id)
@@ -318,6 +322,10 @@ class AudioDownloader:
                     return None
                 if isinstance(entry, AudioHandle):
                     return entry
+                if isinstance(entry, _AudioUnavailable):
+                    if entry.error is not None:
+                        raise entry.error
+                    return None
             if time.time() > deadline:
                 raise TimeoutError(
                     f"audio download for {sub_id} did not start within "
