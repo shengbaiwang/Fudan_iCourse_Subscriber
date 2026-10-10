@@ -49,7 +49,6 @@ from .state import (
     ObsidianSettings,
     RepositorySettings,
     RuntimeState,
-    normalize_course_zone,
 )
 from src.runtime.config import DEFAULT_MODEL_PROVIDERS
 from src.runtime.model_config import config_json, validate_model_config
@@ -128,7 +127,9 @@ class AutoCheckRequest(BaseModel):
 
 class CourseZoneRequest(BaseModel):
     course_id: str = Field(min_length=1, max_length=100)
-    zone: str = Field(min_length=1, max_length=64)
+    zone: str | None = Field(default=None, min_length=1, max_length=64)
+    zones: list[str] | None = Field(default=None, max_length=100)
+    operation: str = "replace"
 
 
 class CourseSectionRequest(BaseModel):
@@ -614,11 +615,12 @@ def create_app(
 
     @app.put("/api/local/course-zones")
     async def save_course_zone(payload: CourseZoneRequest) -> dict:
-        if normalize_course_zone(payload.zone) is None:
+        if (payload.zone is None) == (payload.zones is None):
             raise HTTPException(status_code=400, detail="未知课程分区")
         try:
             await run_in_threadpool(
-                runtime.save_course_zone, payload.course_id, payload.zone
+                runtime.save_course_memberships, payload.course_id,
+                payload.zones if payload.zones is not None else [payload.zone], payload.operation
             )
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

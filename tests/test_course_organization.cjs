@@ -38,14 +38,14 @@ const put = (route, payload) => api(`/api/local/${route}`, {method:'PUT',body:JS
   values.set('icourse:test/library/data:zones', JSON.stringify({'1':'学习区','2':'整理区','3':'archive'}));
   let state = await api('/api/local/course-zones');
   assert.equal(state.default_zone,'unassigned');
-  assert.deepEqual(plain(state.zones), {'1':'study','2':'unassigned','3':'archive'});
+  assert.deepEqual(plain(state.zones), {'1':['study'],'2':[],'3':['archive']});
   assert.deepEqual(plain(state.sections), [{id:'study',name:'学习区'},{id:'reference',name:'资料库'}]);
   values.set(key, JSON.stringify({zones:{'1':'organize','2':'reference'}, sections:[
     {id:'organize',name:'项目'}, {id:'reference',name:'查阅区'}, B],revision:4,default_zone:'organize'}));
   state = await api('/api/local/course-zones');
   assert.equal(state.sections[0].name,'项目');
   assert.equal(state.sections[1].name,'资料库 2');
-  assert.equal(state.zones['1'],'organize');
+  assert.deepEqual(plain(state.zones['1']),['organize']);
   assert.equal(state.default_zone,'unassigned');
   values.delete(key);
   state = await put('course-sections', {sections:[A,C,D,B],revision:0});
@@ -61,8 +61,8 @@ const put = (route, payload) => api(`/api/local/${route}`, {method:'PUT',body:JS
   assert.equal(org.canParent([A,C,D,B],A.id,D.id),false);
   assert.throws(()=>org.reorderSections([A,C,D,B],A.id,D.id));
   state = await put('course-sections', {sections:moved,revision:1});
-  assert.equal(state.zones['1'],C.id);
-  assert.equal(state.zones['2'],A.id);
+  assert.deepEqual(plain(state.zones['1']),[C.id]);
+  assert.deepEqual(plain(state.zones['2']),[A.id]);
   const snapshot = values.get(key);
   for (const sections of [[{...A,parent_id:A.id}], [{...A,parent_id:B.id},{...B,parent_id:A.id}],
     [{...A,parent_id:'unassigned'}], [{...A,name:'待整理'}], [A,{...B,name:'学习'}]]) {
@@ -76,8 +76,33 @@ const put = (route, payload) => api(`/api/local/${route}`, {method:'PUT',body:JS
   assert.equal(values.get(key),snapshot);
   failWrites = false;
   state = await put('course-sections',{sections:moved.filter(s=>s.id!==A.id),revision:2});
-  assert.equal(state.zones['1'],C.id);
-  assert.equal(state.zones['2'],'unassigned');
+  assert.deepEqual(plain(state.zones['1']),[C.id]);
+  assert.deepEqual(plain(state.zones['2']),[]);
+  state = await put('course-zones', {course_id:'1',zones:[B.id],operation:'add'});
+  assert.deepEqual(plain(state.zones['1']),[C.id,B.id]);
+  state = await put('course-zones', {course_id:'1',zone:B.id,operation:'add'});
+  assert.deepEqual(plain(state.zones['1']),[C.id,B.id]);
+  state = await put('course-zones', {course_id:'1',zones:[C.id],operation:'remove'});
+  assert.deepEqual(plain(state.zones['1']),[B.id]);
+  const multiSnapshot = values.get(key);
+  await assert.rejects(put('course-zones',{course_id:'1',zones:[B.id,'archive']}));
+  await assert.rejects(put('course-zones',{course_id:'1',zones:[],zone:'archive'}));
+  await assert.rejects(put('course-zones',{course_id:'1',zones:['unknown']}));
+  failWrites = true;
+  await assert.rejects(put('course-zones',{course_id:'1',zones:[C.id],operation:'add'}),/storage unavailable/);
+  failWrites = false;
+  assert.equal(values.get(key),multiSnapshot);
+  state = await put('course-sections',{sections:[{id:C.id,name:C.name},D],revision:3});
+  assert.deepEqual(plain(state.zones['1']),[]);
+  state = await put('course-zones',{course_id:'1',zones:[C.id,D.id]});
+  state = await put('course-zones',{course_id:'1',zone:'archive',operation:'add'});
+  assert.deepEqual(plain(state.zones['1']),['archive']);
+  state = await put('course-zones',{course_id:'1',zones:[],operation:'add'});
+  assert.deepEqual(plain(state.zones['1']),['archive']);
+  state = await put('course-zones',{course_id:'1',zone:C.id,operation:'add'});
+  assert.deepEqual(plain(state.zones['1']),[C.id]);
+  state = await put('course-zones',{course_id:'1',zones:[]});
+  assert.deepEqual(plain(state.zones['1']),[]);
   const chain = Array.from({length:7},(_,i)=>({id:`section-${i.toString(16).padStart(32,'0')}`,name:`层级 ${i}`,
     ...(i?{parent_id:`section-${(i-1).toString(16).padStart(32,'0')}`}:{})}));
   assert.equal(org.validateSections(chain.slice(0,6)).length,6);

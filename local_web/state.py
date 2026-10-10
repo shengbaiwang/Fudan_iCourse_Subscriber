@@ -37,6 +37,15 @@ def normalize_course_zone(value: object) -> str | None:
     return COURSE_ZONE_ALIASES.get(value)
 
 
+def normalize_course_memberships(value: object, allowed: set | None = None) -> list[str]:
+    """Read legacy single values and current multi-section memberships."""
+    values = value if isinstance(value, list) else [value]
+    zones = list(dict.fromkeys(zone for item in values
+                              if (zone := normalize_course_zone(item))
+                              and zone != "unassigned" and (allowed is None or zone in allowed)))
+    return ["archive"] if "archive" in zones else zones
+
+
 def default_config_dir() -> Path:
     override = os.environ.get("ICOURSE_WEB_CONFIG_DIR", "").strip()
     if override:
@@ -306,7 +315,7 @@ def migrate_course_organization(state: dict) -> dict:
     migrated = validate_course_sections(migrated)
     allowed = {item["id"] for item in migrated} | {"archive", "unassigned"}
     return {"sections": migrated,
-            "zones": {key: value if value in allowed else "unassigned"
+            "zones": {key: normalize_course_memberships(value, allowed)
                       for key, value in state["zones"].items()},
             "default_zone": "unassigned", "revision": state.get("revision", 0)}
 
@@ -318,7 +327,7 @@ class CourseZoneStore:
         self.directory = directory or default_config_dir()
         self.path = self.directory / "course-zones.json"
 
-    def load(self) -> dict[str, str]:
+    def load(self) -> dict[str, list[str]]:
         try:
             raw = json.loads(self.path.read_text("utf-8"))
         except (OSError, ValueError, TypeError):
@@ -328,12 +337,11 @@ class CourseZoneStore:
             raw = raw["zones"]
         if not isinstance(raw, dict):
             return {}
-        zones: dict[str, str] = {}
+        zones: dict[str, list[str]] = {}
         for raw_id, raw_zone in raw.items():
             course_id = str(raw_id).strip()
-            zone = normalize_course_zone(raw_zone)
-            if course_id and len(course_id) <= 100 and zone:
-                zones[course_id] = zone
+            if course_id and len(course_id) <= 100 and (isinstance(raw_zone, list) or normalize_course_zone(raw_zone)):
+                zones[course_id] = normalize_course_memberships(raw_zone)
         return zones
 
     def load_state(self) -> dict:
@@ -359,14 +367,14 @@ class CourseZoneStore:
         os.chmod(temp, 0o600)
         temp.replace(self.path)
 
-    def save(self, zones: dict[str, str]) -> None:
+    def save(self, zones: dict) -> None:
         clean = {
             str(course_id).strip(): normalized_zone
             for course_id, zone in zones.items()
-            for normalized_zone in [normalize_course_zone(zone)]
+            for normalized_zone in [normalize_course_memberships(zone)]
             if str(course_id).strip()
             and len(str(course_id).strip()) <= 100
-            and normalized_zone is not None
+            and (isinstance(zone, list) or normalize_course_zone(zone) is not None)
         }
         self.directory.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(".tmp")
@@ -553,7 +561,7 @@ class RuntimeState:
 
     def course_organization(self) -> dict:
         with self.lock:
-            return {"zones": dict(self.course_zones),
+            return {"zones": {key: list(value) for key, value in self.course_zones.items()},
                     "sections": [dict(item) for item in self.course_sections],
                     "default_zone": self.default_course_zone,
                     "revision": self.course_sections_revision}
@@ -564,7 +572,7 @@ class RuntimeState:
             if revision != self.course_sections_revision:
                 raise ValueError("分区已在其他窗口更新，请关闭后重新打开编辑")
             allowed = {item["id"] for item in sections} | {"archive", "unassigned"}
-            zones = {key: value if value in allowed else "unassigned"
+            zones = {key: normalize_course_memberships(value, allowed)
                      for key, value in self.course_zones.items()}
             default = "unassigned"
             self.course_zone_store.save_state({"zones": zones, "sections": sections,
@@ -574,13 +582,25 @@ class RuntimeState:
             self.course_sections_revision = revision + 1
 
     def save_course_zone(self, course_id: str, zone: str) -> None:
+        self.save_course_memberships(course_id, [zone])
+
+    def save_course_memberships(self, course_id: str, values: list[str], operation: str = "replace") -> None:
         normalized_id = course_id.strip()
-        normalized_zone = normalize_course_zone(zone)
         with self.lock:
             allowed = {item["id"] for item in self.course_sections} | {"archive", "unassigned"}
-            if not normalized_id or len(normalized_id) > 100 or normalized_zone not in allowed:
+            if (not normalized_id or len(normalized_id) > 100 or not isinstance(values, list)
+                    or len(values) > 100 or any(normalize_course_zone(zone) not in allowed for zone in values)
+                    or operation not in {"replace", "add", "remove"}):
                 raise ValueError("课程分区不存在，请刷新后重试")
-            zones = {**self.course_zones, normalized_id: normalized_zone}
+            normalized = list(dict.fromkeys(normalize_course_zone(zone) for zone in values))
+            if len(normalized) > 1 and ({"archive", "unassigned"} & set(normalized)):
+                raise ValueError("待整理和归档不能与其他分区同时使用")
+            current = self.course_zones.get(normalized_id, [])
+            if operation == "add" and not ({"archive", "unassigned"} & set(normalized)):
+                normalized = [zone for zone in current if zone != "archive"] + normalized if normalized else current
+            elif operation == "remove":
+                normalized = [zone for zone in current if zone not in normalized]
+            zones = {**self.course_zones, normalized_id: normalize_course_memberships(normalized)}
             state = {**self.course_organization(), "zones": zones}
             self.course_zone_store.save_state(state)
             self.course_zones = zones

@@ -64,7 +64,7 @@ class SettingsStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = CourseZoneStore(Path(directory))
             store.save({"1001": "study", "1002": "archive", "bad": "unknown"})
-            self.assertEqual(store.load(), {"1001": "study", "1002": "archive"})
+            self.assertEqual(store.load(), {"1001": ["study"], "1002": ["archive"]})
 
     def test_persists_local_lecture_names(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -81,7 +81,7 @@ class SettingsStoreTest(unittest.TestCase):
                 '{"zones":{"1001":"学习区","1002":"archive","bad":"未知"}}',
                 encoding="utf-8",
             )
-            self.assertEqual(store.load(), {"1001": "study", "1002": "archive"})
+            self.assertEqual(store.load(), {"1001": ["study"], "1002": ["archive"]})
             self.assertEqual(normalize_course_zone("归档区"), "archive")
 
     def test_runtime_state_writes_a_course_zone_for_the_next_launch(self):
@@ -101,7 +101,7 @@ class SettingsStoreTest(unittest.TestCase):
             state.save_course_sections([{"id": "reference", "name": "查阅区"}], 0)
             state.save_course_zone("1001", "查阅区")
             restored = CourseZoneStore(path).load()
-            self.assertEqual(restored, {"1001": "reference"})
+            self.assertEqual(restored, {"1001": ["reference"]})
 
     def test_runtime_state_renames_and_resets_a_lecture_name(self):
         class EmptyKeychain:

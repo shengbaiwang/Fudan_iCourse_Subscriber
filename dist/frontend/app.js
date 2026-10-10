@@ -46,6 +46,8 @@ let selectedSummaryVersionKeys = new Set();
 let blindCompare = null;
 let blindRefreshTimer = null;
 const courseZoneRequests = new Map();
+let courseDrag = null;
+let courseRenderPending = false;
 let loadedLibraryIdentity = "";
 const isPages = window.ICOURSE_RUNTIME === "pages";
 const STARRED_KEY = isPages ? "ics_starred" : "icourse-local-starred-courses";
@@ -75,11 +77,11 @@ function loadSidebarCollapsed() {
 let courseFilter = loadCourseFilter();
 let sidebarCollapsed = loadSidebarCollapsed();
 let courseSections = [];
-let defaultCourseZone = "unassigned";
 let courseSectionsRevision = 0;
 let sectionsSaving = false;
 let inlineSectionEdit = null;
 let sectionMenu = null;
+let courseMenu = null;
 let sectionDragId = null;
 let sectionTouchInProgress = false;
 let sidebarRenderPending = false;
@@ -379,8 +381,8 @@ async function refreshStatus() {
     ? `${repo.owner}/${repo.repo}/${repo.branch}:${statusState.database?.commit_sha || "local"}:${statusState.database?.revision || 0}`
     : "";
   // While the background update is running this function polls every 1.2s.
-  // Reloading courses on every poll destroys any open native <select> popup.
-  // Rebuild the library only on first load or when the data commit changes.
+  // Rebuild the library only on first load or when the data commit changes,
+  // so background polling does not interrupt editing or dragging.
   if (statusState.database_ready && loadedLibraryIdentity !== libraryIdentity) {
     await loadCourseZones();
     await loadLectureNames();
@@ -417,8 +419,17 @@ function renderStats(db) {
 }
 
 function courseZone(courseId) {
-  const zone = courseZones[String(courseId)] || defaultCourseZone;
-  return zone === "archive" || Object.hasOwn(courseZoneLabels(), zone) ? zone : "unassigned";
+  const zones = courseMemberships(courseId);
+  return zones.includes("archive") ? "archive" : zones[0] || "unassigned";
+}
+
+function courseMemberships(courseId) {
+  return organization.normalizeMemberships(courseZones[String(courseId)], new Set(["archive", ...courseSections.map(s => s.id)]));
+}
+
+function courseMatchesZones(courseId, zones) {
+  const memberships = courseMemberships(courseId);
+  return memberships.length ? memberships.some(zone => zones.has(zone)) : zones.has("unassigned");
 }
 
 async function loadCourseZones() {
@@ -427,9 +438,12 @@ async function loadCourseZones() {
 }
 
 function applyCourseOrganization(result) {
-  courseZones = result.zones || {};
+  const pendingZones = courseZones;
   courseSections = result.sections || [];
-  defaultCourseZone = "unassigned";
+  const allowed = new Set(["archive", ...courseSections.map(s => s.id)]);
+  courseZones = Object.fromEntries(Object.entries(result.zones || {}).map(([id, values]) =>
+    [id, organization.normalizeMemberships(values, allowed)]));
+  courseZoneRequests.forEach((_, id) => { courseZones[id] = pendingZones[id] || []; });
   courseSectionsRevision = result.revision || 0;
   if (courseFilter.kind === "zone" && courseFilter.value !== "archive"
       && !Object.hasOwn(courseZoneLabels(), courseFilter.value)) {
@@ -447,7 +461,7 @@ function visibleCourseRows() {
   if (f.kind === "star") return rows.filter((c) => starredCourses.has(String(c.course_id)));
   if (f.kind === "zone") {
     const zones = organization.descendantIds(courseSections, f.value);
-    return rows.filter((c) => zones.has(courseZone(c.course_id)));
+    return rows.filter((c) => courseMatchesZones(c.course_id, zones));
   }
   if (f.kind === "term") return rows.filter((c) => window.ICS.normalizeTerm(c.term) === f.value);
   if (f.kind === "dept") return rows.filter((c) => (c.dept || "") === f.value);
@@ -458,12 +472,13 @@ function courseFilterCaption() {
   const f = courseFilter;
   if (f.kind === "star") return "星标";
   if (f.kind === "zone") return f.value === "archive" ? "归档" : courseZoneLabels()[f.value] || "分区";
-  if (f.kind === "term") return window.ICS.normalizeTerm(f.value) || "未知学期";
+  if (f.kind === "term") return window.ICS.formatTerm(f.value) || "未知学期";
   if (f.kind === "dept") return f.value || "未知院系";
   return "全部课程";
 }
 
 function selectCourseFilter(kind, value, keepSidebar = false) {
+  if (courseDrag) return;
   courseFilter = {kind, value: kind === "dept" ? window.ICS.normalizeDepartment(value)
     : kind === "term" ? window.ICS.normalizeTerm(value) : value || ""};
   localStorage.setItem(COURSE_FILTER_KEY, JSON.stringify(courseFilter));
@@ -476,11 +491,13 @@ function selectCourseFilter(kind, value, keepSidebar = false) {
       else button.removeAttribute("aria-current");
     });
   } else renderCourseSidebar();
-  loadCourses({keepSidebar}).catch((error) => message(error.message, true));
+  // Filtering uses the loaded library immediately; polling refreshes its data.
+  // Avoid replacing a course again just as the user begins to drag it.
+  renderCourses({keepSidebar: true});
 }
 
 function renderCourseSidebar(force = false) {
-  if (!force && (inlineSectionEdit || sectionTouchInProgress || sectionMenu)) { sidebarRenderPending = true; return; }
+  if (!force && (inlineSectionEdit || sectionTouchInProgress || sectionMenu || sectionDragId || courseDrag)) { sidebarRenderPending = true; return; }
   sidebarRenderPending = false;
   closeSectionMenu(false);
   if (inlineSectionEdit) inlineSectionEdit.input = null;
@@ -489,7 +506,7 @@ function renderCourseSidebar(force = false) {
   const zoneItems = organization.sectionTree(displaySections).map(({section, depth}) => {
     const zones = organization.descendantIds(courseSections, section.id);
     return {value: section.id, label: section.name, parent: section.parent_id, depth,
-      count: activeRows.filter(c => zones.has(courseZone(c.course_id))).length};
+      count: activeRows.filter(c => courseMatchesZones(c.course_id, zones)).length};
   });
   // Dynamic sections aggregate the already-loaded course rows; items with
   // empty values trail the section as 未知*.
@@ -505,7 +522,7 @@ function renderCourseSidebar(force = false) {
         if (b === "") return -1;
         return field === "term" ? window.ICS.compareTerms(b, a) : a.localeCompare(b, "zh");
       })
-      .map((v) => ({value: v, label: v || unknownLabel, count: counts[v]}));
+      .map((v) => ({value: v, label: (field === "term" ? window.ICS.formatTerm(v) : v) || unknownLabel, count: counts[v]}));
   };
   const sections = [
     {key: "zone", label: "分区", items: zoneItems},
@@ -534,22 +551,8 @@ function renderCourseSidebar(force = false) {
       btn.dataset.filterValue = value;
       if (active) btn.setAttribute("aria-current", "page");
       btn.onclick = () => selectCourseFilter(kind, value);
-      if (kind === "zone") {
-        btn.ondragover = event => {
-          if (!event.dataTransfer.types.includes("application/x-icourse-course")) return;
-          event.preventDefault();
-          event.dataTransfer.dropEffect = "move";
-          btn.classList.add("drop-target");
-        };
-        btn.ondragleave = () => btn.classList.remove("drop-target");
-        btn.ondrop = event => {
-          event.preventDefault();
-          btn.classList.remove("drop-target");
-          const id = event.dataTransfer.getData("application/x-icourse-course");
-          if (id && courseRows.some(c => String(c.course_id) === id)) moveCourseToZone(id, value).catch(error => message(error.message, true));
-        };
-      }
       parent.append(btn);
+      if (kind === "zone" && value !== "unassigned") bindCourseDropTarget(btn, value);
       return btn;
     };
     addItem(nav, "all", "", "全部课程", activeRows.length, false);
@@ -578,7 +581,10 @@ function renderCourseSidebar(force = false) {
       const heading = document.createElement("div");
       heading.className = "sidebar-section-heading";
       heading.append(toggle);
-      if (sec.key === "zone") bindSectionRootDrop(heading);
+      if (sec.key === "zone") {
+        heading.dataset.courseExpand = "zone";
+        bindSectionRootDrop(heading);
+      }
       secEl.append(heading);
       if (!collapsed) {
         const items = document.createElement("div");
@@ -629,13 +635,29 @@ function renderCourseSidebar(force = false) {
       }
       nav.append(secEl);
     });
+    const scrollTop = root.querySelector(".sidebar-nav")?.scrollTop || 0;
     root.replaceChildren(nav);
+    nav.scrollTop = scrollTop;
+    if (courseDrag?.sourceZone) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "course-remove-target";
+      remove.dataset.courseRemove = courseDrag.sourceZone;
+      const label = document.createElement("strong");
+      label.textContent = "移出本分区";
+      const hint = document.createElement("span");
+      hint.textContent = courseZoneLabels()[courseDrag.sourceZone];
+      remove.append(label, hint);
+      remove.setAttribute("aria-label", `移出本分区：${hint.textContent}`);
+      bindCourseDropTarget(remove, courseDrag.sourceZone);
+      root.append(remove);
+    }
   });
   if (inlineSectionEdit) renderInlineSectionName();
 }
 
 async function persistSectionChange(sections) {
-  if (sectionsSaving) throw new Error("正在保存，请稍后再操作");
+  if (sectionsSaving || courseZoneRequests.size) throw new Error("正在保存，请稍后再操作");
   const clean = organization.validateSections(sections);
   sectionsSaving = true;
   try {
@@ -651,10 +673,29 @@ async function persistSectionChange(sections) {
 }
 
 async function changeSections(sections, success) {
+  const before = courseSections.map(section => ({...section}));
   try {
     await persistSectionChange(sections);
+    const revision = courseSectionsRevision;
     await loadCourses();
-    if (success) message(success);
+    message(success || "分区已移动");
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "section-undo";
+    undo.textContent = "撤销";
+    undo.setAttribute("aria-label", "撤销分区移动");
+    undo.onclick = async () => {
+      undo.disabled = true;
+      try {
+        if (courseSectionsRevision !== revision) throw new Error("分区已更新，请重新整理");
+        await persistSectionChange(before);
+        await loadCourses();
+        message("已恢复分区位置");
+      } catch (error) { message(error.message, true); }
+    };
+    $("#message").append(undo);
+    clearTimeout(messageTimer);
+    messageTimer = setTimeout(() => $("#message").classList.add("hidden"), 8000);
   } catch (error) { message(error.message, true); }
 }
 
@@ -771,6 +812,7 @@ function openSectionMenu(id, root, anchor, point, moving = false) {
   if (sectionsSaving || inlineSectionEdit) return;
   const section = courseSections.find(s => s.id === id);
   if (!section) return;
+  closeCourseMenu(false);
   closeSectionMenu(false);
   if (!anchor.isConnected) anchor = root.querySelector(`[data-section-id="${id}"] .sidebar-item`);
   if (!anchor) return;
@@ -842,7 +884,7 @@ async function deleteSection(id) {
   const deleted = courseSections.find(s => s.id === id);
   if (!deleted) return;
   const before = courseSections.map(s => ({...s}));
-  const members = Object.keys(courseZones).filter(courseId => courseZones[courseId] === id);
+  const members = Object.keys(courseZones).filter(courseId => courseMemberships(courseId).includes(id));
   const next = courseSections.filter(s => s.id !== id).map(s => {
     if (s.parent_id !== id) return s;
     const child = {...s};
@@ -867,7 +909,7 @@ async function deleteSection(id) {
         if (courseSectionsRevision !== revision) throw new Error("分类已更新，请刷新后重新整理");
         await persistSectionChange(before);
         for (const courseId of members) {
-          if (courseZone(courseId) === "unassigned") await api("/api/local/course-zones", {method: "PUT", body: JSON.stringify({course_id: courseId, zone: id})});
+          if (courseZone(courseId) !== "archive") await api("/api/local/course-zones", {method: "PUT", body: JSON.stringify({course_id: courseId, zone: id, operation: "add"})});
         }
         await loadCourseZones();
         await loadCourses();
@@ -997,6 +1039,321 @@ function closeCourseDrawer() {
   $("#course-drawer").classList.add("hidden");
 }
 
+const COURSE_DROP_SELECTOR = '.sidebar-item[data-filter-kind="zone"]:not([data-filter-value="unassigned"]), .course-remove-target';
+
+function courseDropTargets() {
+  return [...document.querySelectorAll(COURSE_DROP_SELECTOR)]
+    .filter(node => node.getClientRects().length && !node.closest(".hidden"));
+}
+
+function courseDropFromPoint(x, y) {
+  const hit = document.elementFromPoint(x, y);
+  return hit?.closest(COURSE_DROP_SELECTOR)
+    || hit?.closest(".sidebar-tree-row")?.querySelector('.sidebar-item[data-filter-kind="zone"]') || null;
+}
+
+function clearCourseDropHighlight() {
+  document.querySelectorAll(".drop-target, .drop-member").forEach(node => node.classList.remove("drop-target", "drop-member"));
+}
+
+function queueCourseHoverExpand(key) {
+  const held = courseDrag;
+  if (!held || held.hoverKey === key) return;
+  clearTimeout(held.hoverTimer);
+  held.hoverKey = key;
+  if (!key || !sidebarCollapsed[key]) return;
+  held.hoverTimer = setTimeout(() => {
+    if (courseDrag !== held) return;
+    const root = held.target?.closest("#course-sidebar, #course-drawer-sidebar");
+    const zone = held.target?.dataset.filterValue;
+    sidebarCollapsed = {...sidebarCollapsed, [key]: false};
+    renderCourseSidebar(true);
+    // The old row was replaced. Resolve the destination at the same pointer.
+    if (held.point) highlightCourseDrop(courseDropFromPoint(held.point.x, held.point.y));
+    else {
+      const target = root?.querySelector(`[data-filter-value="${CSS.escape(zone || "")}"]`);
+      target?.focus();
+    }
+  }, 600);
+}
+
+function highlightCourseDrop(target) {
+  const held = courseDrag;
+  if (!held) return;
+  clearCourseDropHighlight();
+  held.target = target;
+  const zone = target?.dataset.courseRemove || target?.dataset.filterValue;
+  const removal = !!target?.dataset.courseRemove;
+  const existing = !removal && zone && courseMemberships(held.id).includes(zone);
+  const row = target?.closest(".sidebar-tree-row") || target;
+  row?.classList.add("drop-target");
+  target?.classList.add("drop-target");
+  if (existing) row?.classList.add("drop-member");
+  const label = zone === "archive" ? "归档" : courseZoneLabels()[zone];
+  const feedback = !zone ? "拖到左侧分区"
+    : removal ? `移出「${label}」`
+    : existing ? `已在此分区 · ${label}`
+    : zone === "archive" ? "移入归档" : `加入「${label}」`;
+  if (held.status.textContent !== feedback) held.status.textContent = feedback;
+  held.ghost.classList.toggle("is-removal", removal);
+  const hit = held.point && document.elementFromPoint(held.point.x, held.point.y);
+  queueCourseHoverExpand(target?.closest(".sidebar-tree-row")
+    ? `section:${target.dataset.filterValue}` : hit?.closest("[data-course-expand]")?.dataset.courseExpand || null);
+}
+
+function beginCourseDrag(handle, card, course, mode) {
+  if (courseDrag || inlineSectionEdit || sectionsSaving || courseZoneRequests.has(String(course.course_id))) return false;
+  closeSectionMenu(false);
+  closeCourseMenu(false);
+  const id = String(course.course_id);
+  const sourceZone = courseFilter.kind === "zone" && courseSections.some(s => s.id === courseFilter.value)
+    && courseMemberships(id).includes(courseFilter.value) ? courseFilter.value : null;
+  const ghost = document.createElement("div");
+  ghost.className = "course-drag-ghost";
+  const title = document.createElement("strong");
+  title.textContent = course.title || id;
+  const meta = createCourseMetadata(course);
+  meta.classList.add("course-drag-meta");
+  const count = document.createElement("span");
+  count.className = "course-meta-id";
+  count.textContent = `笔记 ${course.summary_count}/${course.total_count}`;
+  meta.append(" ", count);
+  const status = document.createElement("span");
+  status.className = "course-drag-status";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  status.textContent = "拖到左侧分区";
+  ghost.append(title, meta, status);
+  document.body.append(ghost);
+  courseDrag = {id, handle, card, mode, sourceZone, ghost, status, collapsed: {...sidebarCollapsed},
+    drawerWasOpen: !$("#course-drawer").classList.contains("hidden")};
+  card.classList.add("dragging");
+  handle.setAttribute("aria-pressed", "true");
+  document.body.classList.add("course-drag-active");
+  document.body.dataset.courseDragMode = mode;
+  renderCourseSidebar(true);
+  return true;
+}
+
+function revealCourseDropSidebar() {
+  if (matchMedia("(max-width:700px)").matches) $("#course-drawer").classList.remove("hidden");
+}
+
+function finishCourseDrag(target, cancelled = false) {
+  const held = courseDrag;
+  if (!held) return;
+  const removal = !!target?.dataset.courseRemove;
+  const zone = removal ? held.sourceZone : target?.dataset.filterValue;
+  cancelAnimationFrame(held.scrollFrame);
+  clearTimeout(held.hoverTimer);
+  held.ghost.remove();
+  held.dragImage?.remove();
+  held.card.classList.remove("dragging");
+  held.handle.removeAttribute("aria-pressed");
+  courseDrag = null;
+  if (held.pointerId != null && held.card.hasPointerCapture(held.pointerId)) held.card.releasePointerCapture(held.pointerId);
+  document.body.classList.remove("course-drag-active");
+  delete document.body.dataset.courseDragMode;
+  clearCourseDropHighlight();
+  sidebarCollapsed = held.collapsed;
+  if (!held.drawerWasOpen) closeCourseDrawer();
+  if (courseRenderPending) renderCourses();
+  else renderCourseSidebar();
+  const restoreFocus = () => {
+    if (held.mode !== "keyboard") return;
+    const handle = document.querySelector(`.course-card[data-course-id="${CSS.escape(held.id)}"] .course-drag-handle`);
+    const root = matchMedia("(max-width:700px)").matches ? $("#course-sidebar-open") : $("#course-sidebar .sidebar-item.active");
+    (handle || root)?.focus();
+  };
+  if (!cancelled && zone && zone !== "unassigned") {
+    saveCourseMemberships(held.id, [zone], removal ? "remove" : zone === "archive" ? "replace" : "add")
+      .then(restoreFocus).catch(error => { message(error.message, true); restoreFocus(); });
+  } else {
+    if (cancelled) message("已取消拖动");
+    restoreFocus();
+  }
+}
+
+function bindCourseDropTarget(button, zone) {
+  // A whole tree row is a drop target, including its disclosure arrow.
+  const surface = button.closest(".sidebar-tree-row") || button;
+  surface.addEventListener("dragover", event => {
+    if (!courseDrag || courseDrag.mode !== "native" || !event.dataTransfer.types.includes("application/x-icourse-course")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = button.dataset.courseRemove || zone === "archive" ? "move" : "copy";
+    courseDrag.point = {x: event.clientX, y: event.clientY};
+    highlightCourseDrop(button);
+  });
+  surface.addEventListener("dragleave", event => {
+    if (courseDrag?.target === button && !surface.contains(event.relatedTarget)) highlightCourseDrop(null);
+  });
+  surface.addEventListener("drop", event => {
+    if (!courseDrag || courseDrag.mode !== "native") return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer.getData("application/x-icourse-course") === courseDrag.id) finishCourseDrag(button);
+  });
+  button.addEventListener("focus", () => {
+    if (courseDrag?.mode !== "keyboard") return;
+    highlightCourseDrop(button);
+    const rect = button.getBoundingClientRect();
+    courseDrag.ghost.style.left = `${Math.min(rect.right + 12, innerWidth - courseDrag.ghost.offsetWidth - 8)}px`;
+    courseDrag.ghost.style.top = `${Math.max(8, Math.min(rect.top, innerHeight - courseDrag.ghost.offsetHeight - 8))}px`;
+  });
+  button.addEventListener("keydown", event => {
+    if (courseDrag?.mode !== "keyboard") return;
+    if (["Enter", " ", "ArrowDown", "ArrowUp", "ArrowRight", "Home", "End", "Escape"].includes(event.key)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (["Enter", " "].includes(event.key)) finishCourseDrag(button);
+      else if (event.key === "Escape") finishCourseDrag(null, true);
+      else if (event.key === "ArrowRight") {
+        const key = `section:${zone}`;
+        if (sidebarCollapsed[key]) {
+          sidebarCollapsed = {...sidebarCollapsed, [key]: false};
+          const root = button.closest("#course-sidebar, #course-drawer-sidebar");
+          renderCourseSidebar(true);
+          root.querySelector(`[data-filter-value="${CSS.escape(zone)}"]`)?.focus();
+        }
+      } else {
+        const targets = courseDropTargets(), current = targets.indexOf(button);
+        const index = event.key === "Home" ? 0 : event.key === "End" ? targets.length - 1
+          : (current + (event.key === "ArrowDown" ? 1 : -1) + targets.length) % targets.length;
+        targets[index]?.focus();
+      }
+    }
+  }, true);
+}
+
+function updateCourseDrop() {
+  const held = courseDrag;
+  if (!held || held.mode === "keyboard" || !held.point) return;
+  const {x, y} = held.point;
+  held.ghost.style.left = `${Math.max(8, Math.min(x + 18, innerWidth - held.ghost.offsetWidth - 8))}px`;
+  // Keep the preview clear of the destination and the finger holding the course.
+  const previewTop = y - held.ghost.offsetHeight - 48;
+  held.ghost.style.top = `${Math.max(8, Math.min(previewTop >= 8 ? previewTop : y + 48, innerHeight - held.ghost.offsetHeight - 8))}px`;
+  highlightCourseDrop(courseDropFromPoint(x, y));
+  const hit = document.elementFromPoint(x, y);
+  const sidebar = hit?.closest("#course-sidebar, #course-drawer-sidebar");
+  const scroller = sidebar?.querySelector(".sidebar-nav");
+  if (scroller && !hit.closest(".course-remove-target")) {
+    const rect = scroller.getBoundingClientRect();
+    const edge = 44;
+    const delta = y < rect.top + edge ? -10 * Math.min(1, (rect.top + edge - y) / edge)
+      : y > rect.bottom - edge ? 10 * Math.min(1, (y - rect.bottom + edge) / edge) : 0;
+    scroller.scrollTop += delta;
+  } else if (!sidebar && y > 0 && y < innerHeight) {
+    // Keep the sidebar anchored while the course list scrolls at viewport edges.
+    window.scrollBy(0, y < 52 ? -10 : y > innerHeight - 52 ? 10 : 0);
+  }
+  held.scrollFrame = requestAnimationFrame(updateCourseDrop);
+}
+
+function bindCourseDrag(handle, card, course) {
+  let press = null, pressTimer = null, suppressClickUntil = 0;
+  const cancelPress = () => { clearTimeout(pressTimer); pressTimer = null; press = null; };
+  const eligible = target => !target.closest("button, input, select, textarea, a")
+    || !!target.closest(".course-open, .course-drag-handle");
+  card.draggable = !handle.disabled;
+  card.ondragstart = event => {
+    cancelPress();
+    if (!eligible(event.target) || !beginCourseDrag(handle, card, course, "native")) { event.preventDefault(); return; }
+    courseDrag.point = {x: event.clientX, y: event.clientY};
+    event.dataTransfer.setData("application/x-icourse-course", String(course.course_id));
+    event.dataTransfer.effectAllowed = "copyMove";
+    // A live HTML preview shows the destination as the pointer moves.
+    const blank = document.createElement("canvas");
+    blank.width = blank.height = 1;
+    blank.style.position = "fixed";
+    blank.style.left = "-10px";
+    document.body.append(blank);
+    courseDrag.dragImage = blank;
+    event.dataTransfer.setDragImage(blank, 0, 0);
+    revealCourseDropSidebar();
+    updateCourseDrop();
+  };
+  card.ondragend = () => { if (courseDrag?.mode === "native") finishCourseDrag(null); };
+  handle.onkeydown = event => {
+    if (![" ", "Enter"].includes(event.key) || courseDrag) return;
+    event.preventDefault();
+    if (!beginCourseDrag(handle, card, course, "keyboard")) return;
+    // Opening the section group keeps keyboard destinations reachable.
+    sidebarCollapsed = {...sidebarCollapsed, zone: false};
+    renderCourseSidebar(true);
+    revealCourseDropSidebar();
+    message("已拿起课程，用方向键选择分区，回车放下，Esc 取消");
+    courseDropTargets()[0]?.focus();
+  };
+  card.addEventListener("click", event => {
+    if (Date.now() < suppressClickUntil || courseDrag) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+  card.oncontextmenu = event => {
+    event.preventDefault();
+    if (press || courseDrag || Date.now() < suppressClickUntil) return;
+    openCourseMenu(course, card.querySelector(".course-more-button"), {x: event.clientX, y: event.clientY});
+  };
+  card.addEventListener("keydown", event => {
+    if (event.key === "ContextMenu" || event.key === "F10" && event.shiftKey) {
+      event.preventDefault();
+      openCourseMenu(course, card.querySelector(".course-more-button"));
+    }
+  });
+  card.onpointerdown = event => {
+    if (event.pointerType === "mouse" || !event.isPrimary || !eligible(event.target) || handle.disabled) return;
+    cancelPress();
+    press = {pointerId: event.pointerId, point: {x: event.clientX, y: event.clientY}};
+    pressTimer = setTimeout(() => {
+      const pending = press;
+      cancelPress();
+      if (!pending || !card.isConnected || !beginCourseDrag(handle, card, course, "touch")) return;
+      suppressClickUntil = Date.now() + 1000;
+      courseDrag.pointerId = pending.pointerId;
+      courseDrag.point = pending.point;
+      card.setPointerCapture(pending.pointerId);
+      revealCourseDropSidebar();
+      updateCourseDrop();
+    }, 450);
+  };
+  card.onpointermove = event => {
+    if (press?.pointerId === event.pointerId
+        && Math.hypot(event.clientX - press.point.x, event.clientY - press.point.y) > 10) cancelPress();
+    if (courseDrag?.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    courseDrag.point = {x: event.clientX, y: event.clientY};
+  };
+  card.addEventListener("touchmove", event => {
+    if (courseDrag?.card === card && courseDrag.mode === "touch") event.preventDefault();
+  }, {passive: false});
+  card.onpointerup = event => {
+    cancelPress();
+    if (courseDrag?.pointerId !== event.pointerId) return;
+    suppressClickUntil = Date.now() + 1000;
+    finishCourseDrag(courseDropFromPoint(event.clientX, event.clientY));
+  };
+  card.onpointercancel = card.onlostpointercapture = event => {
+    cancelPress();
+    if (courseDrag?.pointerId === event.pointerId) finishCourseDrag(null, true);
+  };
+}
+
+document.addEventListener("dragover", event => {
+  if (courseDrag?.mode === "native") courseDrag.point = {x: event.clientX, y: event.clientY};
+});
+
+document.addEventListener("keydown", event => {
+  if (event.key === "Tab" && courseDrag?.mode === "keyboard") finishCourseDrag(null, true);
+  if (event.key === "Escape" && courseDrag) {
+    event.preventDefault();
+    event.stopPropagation();
+    finishCourseDrag(null, true);
+  }
+}, true);
+document.addEventListener("pointerdown", () => {
+  if (courseDrag?.mode === "keyboard") finishCourseDrag(null, true);
+}, true);
+window.addEventListener("blur", () => { if (courseDrag) finishCourseDrag(null, true); });
+
 async function loadLectureNames() {
   const result = await api("/api/local/lecture-names");
   lectureNames = result.names || {};
@@ -1010,50 +1367,52 @@ function lectureDisplayName(lecture) {
   return custom || lecture.auto_title || lecture.sub_title || String(lecture.sub_id);
 }
 
-async function moveCourseToZone(courseId, zone, select) {
+async function saveCourseMemberships(courseId, values, operation = "replace", announce = true) {
   const id = String(courseId);
-  const previous = Object.prototype.hasOwnProperty.call(courseZones, id)
-    ? courseZones[id]
-    : null;
-  if (courseZone(id) === zone) return;
-  const requestId = (courseZoneRequests.get(id) || 0) + 1;
-  courseZoneRequests.set(id, requestId);
-  // Do not redraw the course list here. Replacing a <select> during its
-  // change event makes Safari/Chrome dismiss (or fail to show) the native
-  // picker, which was the source of the intermittent, jerky interaction.
-  courseZones = {...courseZones, [id]: zone};
-  if (select) select.disabled = true;
-  try {
-    await api("/api/local/course-zones", {
-      method: "PUT",
-      body: JSON.stringify({course_id: id, zone}),
-    });
-    // In an unfiltered view the existing card remains correct; when the
-    // list is filtered by zone the card just moved away, so redraw only
-    // after the picker has closed.  Zone counts in the sidebar change in
-    // every view.
-    if (!select || zone === "archive" || previous === "archive" || (courseFilter.kind === "zone" && courseFilter.value !== zone)) {
-      await loadCourses();
-    } else {
-      renderCourseSidebar();
-    }
-  } catch (error) {
-    if (courseZoneRequests.get(id) === requestId) {
-      if (previous === null) {
-        const restored = {...courseZones};
-        delete restored[id];
-        courseZones = restored;
-      } else {
-        courseZones = {...courseZones, [id]: previous};
-      }
-      if (select?.isConnected && select.tagName === "SELECT") select.value = previous || defaultCourseZone;
-    }
-    message(error.message, true);
-  } finally {
-    if (select?.isConnected && courseZoneRequests.get(id) === requestId) {
-      select.disabled = false;
-    }
+  if (courseZoneRequests.has(id) || sectionsSaving) throw new Error("正在保存，请稍后再操作");
+  const previous = courseMemberships(id);
+  const next = organization.updateMemberships(previous, values, operation, new Set(["archive", "unassigned", ...courseSections.map(s => s.id)]));
+  if (JSON.stringify(previous) === JSON.stringify(next)) {
+    if (announce) message(next.length ? "已在此分区" : "课程已在待整理");
+    return;
   }
+  courseZoneRequests.set(id, true);
+  courseZones = {...courseZones, [id]: next};
+  renderCourses();
+  try {
+    const result = await api("/api/local/course-zones", {
+      method: "PUT", body: JSON.stringify({course_id: id, zones: values, operation}),
+    });
+    courseZones = {...courseZones, [id]: organization.normalizeMemberships(result.zones[id])};
+  } catch (error) {
+    courseZones = {...courseZones, [id]: previous};
+    throw error;
+  } finally {
+    courseZoneRequests.delete(id);
+    renderCourses();
+  }
+  if (!announce) return;
+  const saved = courseMemberships(id);
+  const label = values[0] === "archive" ? "已归档"
+    : operation === "remove" ? `已移出「${courseZoneLabels()[values[0]] || "分区"}」${saved.length ? "" : "，已进入待整理"}`
+    : !saved.length ? "已进入待整理" : `已加入「${courseZoneLabels()[values[0]] || "分区"}」，保留其他分区`;
+  message(label);
+  const undo = document.createElement("button");
+  undo.type = "button";
+  undo.className = "section-undo";
+  undo.textContent = "撤销";
+  undo.setAttribute("aria-label", "撤销课程分区修改");
+  undo.onclick = async () => {
+    undo.disabled = true;
+    try {
+      if (JSON.stringify(courseMemberships(id)) !== JSON.stringify(saved)) throw new Error("课程归属已更新，请重新整理");
+      await saveCourseMemberships(id, previous, "replace", false);
+      message("已恢复课程分区");
+    } catch (error) { message(error.message, true); }
+  };
+  $("#message").append(undo);
+  clearTimeout(messageTimer);
+  messageTimer = setTimeout(() => $("#message").classList.add("hidden"), 8000);
 }
 
 async function loadCourses({keepSidebar = false} = {}) {
@@ -1061,6 +1420,107 @@ async function loadCourses({keepSidebar = false} = {}) {
     ...course, dept: window.ICS.normalizeDepartment(course.dept),
   }));
   courseRows.sort((a, b) => Number(starredCourses.has(String(b.course_id))) - Number(starredCourses.has(String(a.course_id))));
+  renderCourses({keepSidebar});
+}
+
+function createCourseMetadata(course, {includeId = false} = {}) {
+  const meta = document.createElement("span");
+  meta.className = "course-meta";
+  [
+    ["teacher", course.teacher],
+    ["department", window.ICS.normalizeDepartment(course.dept)],
+    ["term", window.ICS.formatTerm(course.term)],
+    ["id", includeId && course.course_id ? `课程号 ${course.course_id}` : ""],
+  ].forEach(([kind, value]) => {
+    if (!value) return;
+    const item = document.createElement("span");
+    item.className = `course-meta-${kind}`;
+    item.textContent = String(value);
+    if (meta.childElementCount) meta.append(" ");
+    meta.append(item);
+  });
+  return meta;
+}
+
+function closeCourseMenu(restoreFocus = true) {
+  if (!courseMenu) return;
+  const {node, anchor, id} = courseMenu;
+  courseMenu = null;
+  node.remove();
+  anchor.setAttribute("aria-expanded", "false");
+  if (courseRenderPending && !courseDrag) renderCourses();
+  if (restoreFocus) (anchor.isConnected ? anchor
+    : document.querySelector(`.course-card[data-course-id="${CSS.escape(id)}"] .course-more-button`))?.focus();
+}
+
+function openCourseMenu(course, anchor, point) {
+  if (!course || !anchor || anchor.disabled || courseDrag) return;
+  if (courseMenu?.anchor === anchor && !point) { closeCourseMenu(); return; }
+  closeSectionMenu(false);
+  closeCourseMenu(false);
+  const id = String(course.course_id);
+  if (!anchor.isConnected) anchor = document.querySelector(`.course-card[data-course-id="${CSS.escape(id)}"] .course-more-button`);
+  if (!anchor) return;
+  const menu = document.createElement("div");
+  menu.className = "course-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", `${course.title || id} 的操作`);
+  const item = (label, action, danger = false) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "menuitem");
+    button.textContent = label;
+    if (danger) button.className = "danger";
+    button.onclick = () => {
+      closeCourseMenu(false);
+      Promise.resolve().then(action).catch(error => message(error.message, true));
+    };
+    menu.append(button);
+  };
+  const archived = courseZone(id) === "archive";
+  item(archived ? "移出归档" : "归档", async () => {
+    await saveCourseMemberships(id, [archived ? "unassigned" : "archive"]);
+    if (activeView === "courses") (document.querySelector(`.course-card[data-course-id="${CSS.escape(id)}"] .course-more-button`)
+      || document.querySelector(".course-more-button"))?.focus();
+  });
+  item("导出…", () => openDataActions(course, null, "export"));
+  const separator = document.createElement("div");
+  separator.className = "course-menu-separator";
+  separator.setAttribute("role", "separator");
+  menu.append(separator);
+  item("删除…", () => openDataActions(course, null, "delete"), true);
+  document.body.append(menu);
+  const rect = anchor.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(point?.x ?? rect.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(point?.y ?? rect.bottom + 4, innerHeight - menu.offsetHeight - 8))}px`;
+  courseMenu = {node: menu, anchor, id};
+  anchor.setAttribute("aria-expanded", "true");
+  menu.onkeydown = event => {
+    const buttons = [...menu.querySelectorAll("button")];
+    const current = buttons.indexOf(document.activeElement);
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+        : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    }
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeCourseMenu(); }
+    if (event.key === "Tab") closeCourseMenu(false);
+  };
+  menu.querySelector("button")?.focus();
+}
+
+document.addEventListener("pointerdown", event => {
+  if (courseMenu && !courseMenu.node.contains(event.target) && !courseMenu.anchor.contains(event.target)) closeCourseMenu(false);
+});
+window.addEventListener("resize", () => closeCourseMenu(false));
+document.addEventListener("scroll", event => {
+  if (courseMenu && !courseMenu.node.contains(event.target)) closeCourseMenu(false);
+}, true);
+
+function renderCourses({keepSidebar = false} = {}) {
+  if (courseDrag || courseMenu) { courseRenderPending = true; return; }
+  courseRenderPending = false;
   const list = $("#course-list");
   list.replaceChildren();
   list.classList.remove("empty");
@@ -1077,6 +1537,7 @@ async function loadCourses({keepSidebar = false} = {}) {
     const card = document.createElement("article");
     card.className = "course-card";
     card.dataset.courseId = course.course_id;
+    card.setAttribute("aria-busy", String(courseZoneRequests.has(String(course.course_id))));
     const row = document.createElement("div");
     row.className = "course-row";
     const titleRow = document.createElement("div");
@@ -1085,6 +1546,7 @@ async function loadCourses({keepSidebar = false} = {}) {
     open.type = "button";
     open.className = "course-open";
     open.onclick = () => openCourse(course);
+    open.title = course.title || course.course_id;
     const star = document.createElement("button");
     star.type = "button";
     star.className = `star-button${starredCourses.has(String(course.course_id)) ? " starred" : ""}`;
@@ -1102,60 +1564,49 @@ async function loadCourses({keepSidebar = false} = {}) {
     title.className = "course-title";
     title.textContent = course.title || course.course_id;
     textBlock.append(title);
-    const metaParts = [];
-    if (course.teacher) metaParts.push(String(course.teacher));
-    if (course.dept) metaParts.push(String(course.dept));
-    if (course.term) metaParts.push(window.ICS.normalizeTerm(course.term));
-    const updated = relativeTime(course.last_updated);
-    if (updated) metaParts.push(`${updated}更新`);
-    if (metaParts.length) {
-      const meta = document.createElement("p");
-      meta.className = "course-meta";
-      meta.textContent = metaParts.join(" · ");
-      textBlock.append(meta);
-    }
+    const meta = createCourseMetadata(course);
+    if (meta.childElementCount) textBlock.append(meta);
     open.append(textBlock);
-    const drag = document.createElement("span");
+    const drag = document.createElement("button");
+    drag.type = "button";
     drag.className = "course-drag-handle";
     drag.textContent = "⠿";
     drag.draggable = true;
-    drag.title = "拖到侧栏分区即可移动，也可使用分区下拉菜单";
-    drag.setAttribute("aria-hidden", "true");
-    drag.ondragstart = event => {
-      event.dataTransfer.setData("application/x-icourse-course", String(course.course_id));
-      event.dataTransfer.effectAllowed = "move";
-      card.classList.add("dragging");
-    };
-    drag.ondragend = () => {
-      card.classList.remove("dragging");
-      document.querySelectorAll(".drop-target").forEach(el => el.classList.remove("drop-target"));
-    };
-    titleRow.append(drag, open, star);
+    drag.title = "拖到分区可添加归属；触屏长按拖动；按空格拿起，方向键选择分区，回车放下，Esc 取消";
+    drag.setAttribute("aria-label", `拖动课程：${course.title || course.course_id}`);
+    drag.setAttribute("aria-describedby", "course-organize-hint");
+    drag.disabled = courseZoneRequests.has(String(course.course_id)) || sectionsSaving;
+    bindCourseDrag(drag, card, course);
+    titleRow.append(drag, open);
+    const updated = document.createElement("span");
+    updated.className = "course-updated";
+    const updatedTime = relativeTime(course.last_updated);
+    if (updatedTime) {
+      updated.textContent = `${updatedTime}更新`;
+      updated.title = `最后更新：${course.last_updated}`;
+    }
     const aside = document.createElement("div");
     aside.className = "course-aside";
     const count = document.createElement("span");
-    count.className = "count-badge";
-    count.textContent = `笔记 ${course.summary_count}/${course.total_count}`;
-    const zoneControl = document.createElement("label");
-    zoneControl.className = "course-zone-select";
-    const select = document.createElement("select");
-    select.setAttribute("aria-label", `${course.title || course.course_id} 的分区`);
-    Object.entries(courseZoneLabels()).forEach(([value, label]) => {
-      select.append(new Option(label, value, false, value === courseZone(course.course_id)));
-    });
-    select.onchange = () => moveCourseToZone(course.course_id, select.value, select);
-    const archived = courseZone(course.course_id) === "archive";
-    const archiveButton = document.createElement("button");
-    archiveButton.type = "button";
-    archiveButton.className = "course-archive-button";
-    archiveButton.textContent = archived ? "移出归档" : "归档";
-    archiveButton.setAttribute("aria-label", `${archived ? "移出归档" : "归档"}：${course.title || course.course_id}`);
-    archiveButton.title = archived ? "移出归档后放入待整理" : "移到独立的归档列表";
-    archiveButton.onclick = () => moveCourseToZone(course.course_id, archived ? "unassigned" : "archive", archiveButton);
-    if (!archived) zoneControl.append(select);
-    aside.append(count, zoneControl, archiveButton, createButton("导出 / 删除", () => openDataActions(course).catch(error => message(error.message, true))));
-    row.append(titleRow, aside);
+    const summaries = Number(course.summary_count) || 0, total = Number(course.total_count) || 0;
+    count.className = `course-note-count${summaries < total ? " is-incomplete" : ""}`;
+    count.textContent = `笔记 ${summaries}/${total}`;
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "course-more-button";
+    more.textContent = "⋯";
+    more.title = "更多操作";
+    more.setAttribute("aria-label", `更多操作：${course.title || course.course_id}`);
+    more.setAttribute("aria-haspopup", "menu");
+    more.setAttribute("aria-expanded", "false");
+    more.disabled = drag.disabled;
+    more.onclick = () => openCourseMenu(course, more);
+    aside.append(count, star, more);
+    row.append(titleRow, updated, aside);
     card.append(row);
+    card.addEventListener("click", event => {
+      if (!event.target.closest("button, input, a") && window.getSelection()?.isCollapsed !== false) openCourse(course);
+    });
     list.append(card);
   });
   syncSearchCourseOptions();
@@ -1165,7 +1616,7 @@ async function openCourse(course) {
   currentCourse = course;
   courseLectures = await api(`/api/local/courses/${encodeURIComponent(course.course_id)}/lectures`);
   $("#course-title").textContent = course.title || course.course_id;
-  $("#course-teacher").textContent = text(course.teacher);
+  $("#course-teacher").replaceChildren(createCourseMetadata(course));
   courseLectures.sort(compareLectures);
   renderLectureList();
   showView("lectures");
@@ -2355,7 +2806,12 @@ function renderRerunView() {
     const title = document.createElement("span");
     title.className = "rerun-course-title";
     title.textContent = course.title || cid;
-    label.append(checkbox, title);
+    title.title = title.textContent;
+    const identity = document.createElement("span");
+    identity.className = "course-identity";
+    const details = createCourseMetadata(course);
+    identity.append(title, details);
+    label.append(checkbox, identity);
     const meta = document.createElement("span");
     meta.className = "rerun-course-meta";
     meta.textContent = `笔记 ${course.summary_count ?? 0}/${course.total_count ?? 0}`;
@@ -2458,9 +2914,8 @@ function renderSubscriptionCourse(course, action, label) {
   const content = document.createElement("div");
   const title = document.createElement("strong");
   title.textContent = course.title || course.course_id;
-  const meta = document.createElement("span");
-  meta.className = "meta";
-  meta.textContent = [course.teacher, course.dept, window.ICS.normalizeTerm(course.term), course.course_id].filter(Boolean).join(" · ");
+  const meta = createCourseMetadata(course, {includeId: true});
+  meta.classList.add("meta");
   content.append(title, meta);
   const button = createButton(label, action, `subscription-action ${label === "移除" ? "remove" : "add"}`);
   button.setAttribute("aria-label", `${label}${course.title || course.course_id}`);
@@ -2599,7 +3054,7 @@ async function loadSubscriptionCatalog(page = 1) {
     if (JSON.stringify(subscriptionTerms) !== JSON.stringify(terms)) {
       subscriptionTerms = terms;
       select.replaceChildren(new Option("全部学期", ""));
-      subscriptionTerms.forEach((item) => select.append(new Option(item, item)));
+      subscriptionTerms.forEach((item) => select.append(new Option(window.ICS.formatTerm(item), item)));
       select.value = subscriptionTerms.includes(term) ? term : "";
     }
   } catch (error) {
@@ -2719,6 +3174,7 @@ function showView(view, options = {}) {
   activeView = view;
   if (!options.preserveDrawer) {
     closeSectionMenu(false);
+    closeCourseMenu(false);
     closeCourseDrawer();
   }
   const paneIds = {
@@ -4516,10 +4972,15 @@ setInterval(async () => {
 window.addEventListener("icourse-render-ready", () => { if (currentLecture) renderDetail(); });
 // Shared workflow actions, available through either transport.
 let dataActionCourse = null;
-async function openDataActions(course, subId = null) {
+async function openDataActions(course, subId = null, action = "all") {
   const lectures = await api(`/api/local/courses/${encodeURIComponent(course.course_id)}/lectures`);
   dataActionCourse = course;
-  $("#data-actions-title").textContent = course.title || course.course_id;
+  $("#data-actions-dialog").dataset.action = action;
+  $("#data-actions-title").textContent = `${action === "export" ? "导出 · " : action === "delete" ? "删除 · " : ""}${course.title || course.course_id}`;
+  $("#data-actions-description").textContent = action === "delete"
+    ? "删除会清除远端对应资料；运行完成后检查更新。"
+    : action === "export" ? "选择整门课程或指定课次，导出为 PDF、Markdown 或 HTML。"
+      : "选择整门课程或指定课次导出或删除。删除会清除远端对应资料；运行完成后检查更新。";
   const root = $("#data-actions-lectures");
   root.replaceChildren();
   lectures.sort(compareLectures).forEach(lecture => {
@@ -4559,7 +5020,7 @@ async function submitDataAction(deleting) {
 }
 $("#data-export-button").onclick = () => submitDataAction(false);
 $("#data-delete-button").onclick = () => submitDataAction(true);
-$("#course-data-actions").onclick = () => openDataActions(currentCourse).catch(error => message(error.message, true));
+$("#course-data-actions").onclick = () => openCourseMenu(currentCourse, $("#course-data-actions"));
 $("#detail-data-actions").onclick = () => openDataActions(currentCourse, currentLecture.sub_id).catch(error => message(error.message, true));
 $("#detail-blind-compare").onclick = () => openBlindCompare();
 $("#talk-blind-compare").onclick = () => openBlindCompare();
@@ -4636,12 +5097,16 @@ function renderRunQueue() {
     number.textContent = String(index + 1).padStart(2, "0");
     const label = document.createElement("span");
     label.className = "run-queue-label";
-    label.textContent = runCourses().find(course => String(course.course_id) === id)?.title || id;
+    const course = runCourses().find(course => String(course.course_id) === id);
+    const title = document.createElement("strong");
+    title.textContent = course?.title || id;
+    const meta = createCourseMetadata(course || {});
+    label.append(title, meta);
     const actions = document.createElement("div");
     actions.className = "run-queue-actions";
     [-1, 1].forEach(offset => {
       const button = createButton(offset < 0 ? "↑" : "↓", () => moveRunPriority(id, offset));
-      button.setAttribute("aria-label", `${offset < 0 ? "上移" : "下移"}${label.textContent}`);
+      button.setAttribute("aria-label", `${offset < 0 ? "上移" : "下移"}${title.textContent}`);
       button.disabled = index + offset < 0 || index + offset >= selected.length;
       actions.append(button);
     });

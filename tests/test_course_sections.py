@@ -36,6 +36,58 @@ def test_new_library_has_no_presets(tmp_path):
     assert state.course_organization() == {"zones": {}, "sections": [], "default_zone": "unassigned", "revision": 0}
 
 
+def test_multiple_memberships_survive_reload_remove_and_section_deletion(tmp_path):
+    state = runtime(tmp_path)
+    state.save_course_sections([A, B], 0)
+    state.save_course_memberships('1', [A['id']], 'add')
+    state.save_course_memberships('1', [B['id']], 'add')
+    state.save_course_memberships('1', [A['id']], 'add')
+    assert runtime(tmp_path).course_zones['1'] == [A['id'], B['id']]
+    state.save_course_memberships('1', [A['id']], 'remove')
+    assert runtime(tmp_path).course_zones['1'] == [B['id']]
+    state.save_course_memberships('1', [A['id']], 'add')
+    state.save_course_sections([B], 1)
+    assert runtime(tmp_path).course_zones['1'] == [B['id']]
+    state.save_course_sections([], 2)
+    assert runtime(tmp_path).course_zones['1'] == []
+
+
+def test_membership_migration_filters_deleted_ids_and_duplicates(tmp_path):
+    document = {'zones': {'1': [A['id'], B['id'], A['id'], 'unknown'], '2': 'study',
+                          '3': [], '4': ['archive']}, 'sections': [A], 'revision': 2}
+    (tmp_path / 'course-zones.json').write_text(json.dumps(document))
+    assert runtime(tmp_path).course_zones == {'1': [A['id']], '2': [], '3': [], '4': ['archive']}
+
+
+def test_invalid_memberships_and_failed_add_do_not_mutate(tmp_path):
+    state = runtime(tmp_path)
+    state.save_course_sections([A, B], 0)
+    state.save_course_memberships('1', [A['id']])
+    before = state.course_organization()
+    for values, operation in [([B['id'], 'archive'], 'add'), (['unassigned', B['id']], 'replace'),
+                              (['unknown'], 'add'), ([B['id']], 'unknown')]:
+        with pytest.raises(ValueError):
+            state.save_course_memberships('1', values, operation)
+    with patch.object(state.course_zone_store, 'save_state', side_effect=OSError('disk full')):
+        with pytest.raises(OSError):
+            state.save_course_memberships('1', [B['id']], 'add')
+    assert state.course_organization() == runtime(tmp_path).course_organization() == before
+
+
+def test_archive_and_inbox_are_exclusive_memberships(tmp_path):
+    state = runtime(tmp_path)
+    state.save_course_sections([A, B], 0)
+    state.save_course_memberships('1', [A['id'], B['id']])
+    state.save_course_memberships('1', ['archive'], 'add')
+    assert state.course_zones['1'] == ['archive']
+    state.save_course_memberships('1', [], 'add')
+    assert state.course_zones['1'] == ['archive']
+    state.save_course_memberships('1', [B['id']], 'add')
+    assert state.course_zones['1'] == [B['id']]
+    state.save_course_memberships('1', ['unassigned'])
+    assert state.course_zones['1'] == []
+
+
 DEPARTMENT_CASES = [
     (None, ""), ("", ""), (" \t　", ""),
     ("016 哲学学院", "哲学学院"), ("哲学学院", "哲学学院"),
@@ -132,11 +184,11 @@ def test_legacy_migration_and_delete_all_preserves_archive(tmp_path, wrapped):
     (tmp_path / 'course-zones.json').write_text(json.dumps({"zones": legacy} if wrapped else legacy))
     state = runtime(tmp_path)
     assert state.default_course_zone == 'unassigned'
-    assert state.course_zones == {'1': 'study', '2': 'archive', '3': 'unassigned'}
+    assert state.course_zones == {'1': ['study'], '2': ['archive'], '3': []}
     assert state.course_sections == [{'id': 'study', 'name': '学习区'}, {'id': 'reference', 'name': '资料库'}]
     state.save_course_sections([], 0)
     restored = runtime(tmp_path)
-    assert restored.course_zones == {'1': 'unassigned', '2': 'archive', '3': 'unassigned'}
+    assert restored.course_zones == {'1': [], '2': ['archive'], '3': []}
     assert restored.course_sections == []
     assert restored.default_course_zone == 'unassigned'
     assert restored.course_sections_revision == 1
@@ -149,11 +201,11 @@ def test_rename_reorder_persist_and_reject_deleted_destination(tmp_path):
     state.save_course_sections([B, {**A, 'name': '研究专题'}], 1)
     restored = runtime(tmp_path)
     assert [s['name'] for s in restored.course_sections] == ['写作材料', '研究专题']
-    assert restored.course_zones['1'] == A['id']
+    assert restored.course_zones['1'] == [A['id']]
     restored.save_course_sections([B], 2)
     with pytest.raises(ValueError):
         restored.save_course_zone('1', A['id'])
-    assert runtime(tmp_path).course_zones['1'] == 'unassigned'
+    assert runtime(tmp_path).course_zones['1'] == []
 
 
 def test_existing_organization_migrates_without_losing_custom_sections(tmp_path):
@@ -164,14 +216,14 @@ def test_existing_organization_migrates_without_losing_custom_sections(tmp_path)
     state = runtime(tmp_path)
     assert state.default_course_zone == 'unassigned'
     assert state.course_sections_revision == 7
-    assert state.course_zones == {**old['zones'], '1': 'unassigned'}
+    assert state.course_zones == {'1': [], '2': ['reference'], '3': [A['id']], '4': ['archive']}
     assert state.course_sections == [{'id': 'reference', 'name': '资料库'}, A]
     state.save_course_zone('5', 'unassigned')
     assert runtime(tmp_path).course_organization() == state.course_organization()
     # A user-renamed organize section remains an ordinary category.
     old['sections'][0]['name'] = '研究项目'
     (tmp_path / 'course-zones.json').write_text(json.dumps(old))
-    assert runtime(tmp_path).course_zones['1'] == 'organize'
+    assert runtime(tmp_path).course_zones['1'] == ['organize']
     assert runtime(tmp_path).course_sections[0]['name'] == '研究项目'
 
 
@@ -181,7 +233,7 @@ def test_reference_rename_preserves_existing_library_category(tmp_path):
     (tmp_path / 'course-zones.json').write_text(json.dumps(document))
     state = runtime(tmp_path)
     assert [s['name'] for s in state.course_sections] == ['资料库 2', '资料库']
-    assert state.course_zones == document['zones']
+    assert state.course_zones == {key: [value] for key, value in document['zones'].items()}
 
 
 def test_nested_sections_keep_membership_when_moved_and_parent_deleted(tmp_path):
@@ -193,10 +245,10 @@ def test_nested_sections_keep_membership_when_moved_and_parent_deleted(tmp_path)
     state.save_course_sections([A, B, {**child, 'parent_id': B['id']}], 1)
     restored = runtime(tmp_path)
     assert restored.course_sections[-1]['parent_id'] == B['id']
-    assert restored.course_zones == {'1': A['id'], '2': child['id']}
+    assert restored.course_zones == {'1': [A['id']], '2': [child['id']]}
     # The UI promotes children when a parent is removed; direct members go to the inbox.
     state.save_course_sections([B, {**child, 'parent_id': B['id']}], 2)
-    assert runtime(tmp_path).course_zones == {'1': 'unassigned', '2': child['id']}
+    assert runtime(tmp_path).course_zones == {'1': [], '2': [child['id']]}
 
 
 def test_same_name_allowed_in_different_parents():
@@ -270,9 +322,18 @@ def test_api_create_move_archive_restore_and_delete(tmp_path):
         nested = {**B, 'parent_id': A['id']}
         response = await sections(CourseSectionsRequest(sections=[A, nested], revision=0))
         assert response['sections'] == [A, nested]
+        await move(CourseZoneRequest(course_id='1', zones=[A['id']], operation='add'))
+        response = await move(CourseZoneRequest(course_id='1', zone=B['id'], operation='add'))
+        assert response['zones']['1'] == [A['id'], B['id']]
+        response = await move(CourseZoneRequest(course_id='1', zones=[A['id']], operation='remove'))
+        assert response['zones']['1'] == [B['id']]
+        for payload in [CourseZoneRequest(course_id='1'), CourseZoneRequest(course_id='1', zones=[], zone='archive'),
+                        CourseZoneRequest(course_id='1', zones=['archive', B['id']])]:
+            with pytest.raises(HTTPException):
+                await move(payload)
         for zone in [A['id'], B['id'], 'archive', 'unassigned']:
             response = await move(CourseZoneRequest(course_id='1', zone=zone))
-            assert response['zones']['1'] == zone
+            assert response['zones']['1'] == ([] if zone == 'unassigned' else [zone])
         with pytest.raises(HTTPException) as error:
             await move(CourseZoneRequest(course_id='1', zone='study'))
         assert error.value.status_code == 400

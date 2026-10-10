@@ -130,13 +130,13 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         if(p==='/runs/local-job/cancel') {localJobs[0].status='cancelled';return json(localJobs[0]);}
         if (p==='/courses') return json(courses);
         if (p==='/lecture-names') {if(request.method()==='PUT') {const body=request.postDataJSON();names[body.sub_id]=body.name;} return json({names});}
-        if (p==='/course-zones') {if(request.method()==='PUT') {const body=request.postDataJSON();zones[body.course_id]=body.zone;} return json({zones,sections,revision:sectionsRevision,default_zone:"unassigned"});}
+        if (p==='/course-zones') {if(request.method()==='PUT') {const body=request.postDataJSON();zones[body.course_id]=organization.updateMemberships(zones[body.course_id],body.zones??[body.zone],body.operation||'replace',new Set(['archive','unassigned',...sections.map(s=>s.id)]));} return json({zones,sections,revision:sectionsRevision,default_zone:"unassigned"});}
         if (p==='/course-sections' && request.method()==='PUT') {
           const body = request.postDataJSON();
           if (body.revision !== sectionsRevision) return route.fulfill({status:400,json:{detail:'分区已在其他窗口更新'}});
           sections = organization.validateSections(body.sections);
           const allowed = new Set(['archive','unassigned',...sections.map(s=>s.id)]);
-          zones = Object.fromEntries(Object.entries(zones).map(([id,zone])=>[id,allowed.has(zone)?zone:'unassigned']));
+          zones = Object.fromEntries(Object.entries(zones).map(([id,zone])=>[id,organization.normalizeMemberships(zone,allowed)]));
           sectionsRevision++;
           return json({zones,sections,revision:sectionsRevision,default_zone:'unassigned'});
         }
@@ -208,6 +208,63 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       }
       await page.locator('#course-sidebar [data-filter-kind="all"]').click();
       await page.waitForFunction(()=>document.querySelector('#course-filter-caption').textContent.startsWith('全部课程'));
+      // Compact rows retain course identity in both transports, and actions stay
+      // out of the reading path until the menu is opened.
+      const compactCourse = page.locator('.course-card[data-course-id="1"]');
+      assert.match(await compactCourse.locator('.course-meta').innerText(), /陈老师.*历史学系.*2026 秋/s);
+      assert.equal(await compactCourse.locator('.course-archive-button,.count-badge').count(),0);
+      assert.equal(await compactCourse.locator('.course-note-count.is-incomplete').count(),1);
+      assert.equal(await page.locator('.course-card[data-course-id="2"] .course-note-count.is-incomplete').count(),0);
+      assert.ok((await compactCourse.boundingBox()).height <= 76);
+      await compactCourse.locator('.course-more-button').click();
+      assert.equal(await page.locator('#view-courses').isVisible(),true);
+      await page.locator('.course-context-menu').getByRole('menuitem',{name:'导出…',exact:true}).click();
+      await page.locator('#data-actions-dialog').waitFor();
+      assert.equal(await page.locator('#data-export-button').isVisible(),true);
+      assert.equal(await page.locator('#data-delete-button').isVisible(),false);
+      await page.locator('#data-actions-dialog .dialog-close').click();
+      await compactCourse.click({button:'right'});
+      await page.locator('.course-context-menu').getByRole('menuitem',{name:'删除…',exact:true}).click();
+      await page.locator('#data-actions-dialog').waitFor();
+      assert.equal(await page.locator('#data-delete-button').isVisible(),true);
+      assert.equal(await page.locator('#data-export-button').isVisible(),false);
+      assert.equal(await page.locator('#data-export-type').isVisible(),false);
+      await page.locator('#data-actions-dialog .dialog-close').click();
+      await compactCourse.locator('.course-more-button').focus();
+      await page.keyboard.press('Shift+F10');
+      await page.locator('.course-context-menu').waitFor();
+      await page.keyboard.press('End');
+      assert.equal(await page.locator('.course-context-menu button.danger').evaluate(node=>node===document.activeElement),true);
+      // A background refresh must not destroy a menu under the keyboard.
+      await page.evaluate(()=>renderCourses());
+      assert.equal(await page.locator('.course-context-menu').count(),1);
+      await page.keyboard.press('Escape');
+      assert.equal(await compactCourse.locator('.course-more-button').evaluate(node=>node===document.activeElement),true);
+      await compactCourse.locator('.course-more-button').click();
+      await page.locator('.course-context-menu').getByRole('menuitem',{name:'归档',exact:true}).click();
+      await page.waitForFunction(()=>courseZone('1')==='archive'&&!courseZoneRequests.size);
+      assert.equal(await page.locator('.course-card').count(),1);
+      await page.locator('#course-sidebar [data-filter-value="archive"]').click();
+      await compactCourse.locator('.course-more-button').click();
+      await page.locator('.course-context-menu').getByRole('menuitem',{name:'移出归档',exact:true}).waitFor();
+      await page.keyboard.press('Escape');
+      await page.locator('#message .section-undo').click();
+      await page.waitForFunction(()=>courseZone('1')!=='archive'&&!courseZoneRequests.size);
+      await page.locator('#course-sidebar [data-filter-kind="all"]').click();
+      await page.evaluate(()=>{
+        window.compactOriginalCourses=courseRows;
+        courseRows=courseRows.map((course,index)=>index?course:{...course,teacher:'一位姓名很长的教师及联合授课教师',dept:'包含较长完整名称的历史与文化研究学院'});
+        renderCourses({keepSidebar:true});
+      });
+      await page.setViewportSize({width:320,height:844});
+      const longMetadata = compactCourse.locator('.course-meta');
+      assert.match(await longMetadata.innerText(),/一位姓名很长的教师及联合授课教师.*包含较长完整名称的历史与文化研究学院/s);
+      assert.equal(await longMetadata.evaluate(node=>node.scrollWidth<=node.clientWidth&&node.scrollHeight<=node.clientHeight),true);
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      await page.screenshot({path:`/tmp/icourse-${mode}-compact-mobile.png`,fullPage:true});
+      await page.setViewportSize({width:1280,height:900});
+      await page.evaluate(()=>{courseRows=window.compactOriginalCourses;delete window.compactOriginalCourses;renderCourses();});
+      await page.screenshot({path:`/tmp/icourse-${mode}-compact-desktop.png`,fullPage:true});
       // Raw API labels, saved filters and future years share one display format.
       await page.evaluate(async () => {
         window.termTestApi = window.ICOURSE_API;
@@ -232,25 +289,28 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       assert.equal(await termItem.locator('.sidebar-count').textContent(), '2');
       assert.equal(await termItem.getAttribute('aria-current'), 'page');
       assert.equal(await page.locator('.course-card').count(), 2);
-      assert.match(await page.locator('.course-meta').first().innerText(), /2025–2026 秋季/);
+      assert.match(await page.locator('.course-meta').first().innerText(), /2025 秋/);
+      assert.equal(await page.evaluate(() => courseFilterCaption()), '2025 秋');
       assert.deepEqual(await page.locator('#course-sidebar [data-filter-kind="term"] .sidebar-label').allTextContents(), [
-        '2030–2031 秋季','2025–2026 暑期','2025–2026 春季','2025–2026 秋季',
-        '2024–2025 春季','2024–2025 秋季','2023–2024 春季',
+        '2030 秋','2026 暑','2026 春','2025 秋',
+        '2025 春','2024 秋','2024 春',
       ]);
       assert.equal(await termItem.locator('.sidebar-label').evaluate(node => node.scrollWidth <= node.clientWidth), true);
       await page.locator('#course-sidebar [data-filter-value="2030–2031 秋季"]').click();
       await page.waitForFunction(() => document.querySelectorAll('.course-card').length === 1);
       await page.evaluate(async () => { await loadSubscriptionCatalog(); });
       assert.equal(await page.locator('#subscription-term option[value="2025–2026 秋季"]').count(), 1);
+      assert.equal(await page.locator('#subscription-term option[value="2025–2026 秋季"]').textContent(), '2025 秋');
       await page.locator('#subscription-term').evaluate(node => { node.value = '2025–2026 秋季'; });
       await page.evaluate(async () => { await loadSubscriptionCatalog(); });
       assert.equal(await page.locator('#subscription-catalog .subscription-row').count(), 2);
-      assert.match(await page.locator('#subscription-catalog .meta').first().innerText(), /2025–2026 秋季/);
+      assert.match(await page.locator('#subscription-catalog .meta').first().innerText(), /2025 秋/);
       await page.screenshot({path:`/tmp/icourse-${mode}-terms-desktop.png`,fullPage:true});
       await page.setViewportSize({width:390,height:844});
       await page.locator('#course-sidebar-open').click();
       await page.waitForFunction(() => Math.abs(document.querySelector('.course-drawer-panel').getBoundingClientRect().left) < 0.1);
       const mobileTerm = page.locator('#course-drawer-sidebar [data-filter-value="2030–2031 秋季"] .sidebar-label');
+      assert.equal(await mobileTerm.textContent(), '2030 秋');
       assert.equal(await mobileTerm.evaluate(node => node.scrollWidth <= node.clientWidth), true);
       await page.screenshot({path:`/tmp/icourse-${mode}-terms-mobile.png`,fullPage:true});
       await page.locator('#course-drawer-backdrop').click({position:{x:380,y:20}});
@@ -329,21 +389,182 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.evaluate(()=>{window.ICOURSE_API=window.sectionTestOriginalApi;delete window.sectionTestApi;delete window.sectionTestOriginalApi;});
       await sidebar.locator('[data-filter-kind="all"]').click();
       await page.waitForFunction(()=>document.querySelectorAll('.course-card').length===2);
-      await page.locator('.course-card').filter({hasText:'现代思想史'}).locator('select').selectOption(childId);
-      await page.waitForFunction(id=>courseZones['1']===id,childId);
+      await page.locator('.course-card').filter({hasText:'现代思想史'}).locator('.course-drag-handle').dragTo(sidebar.locator(`[data-section-id="${childId}"] .sidebar-item`));
+      await page.waitForFunction(id=>courseZones['1']?.includes(id)&&!courseZoneRequests.size,childId);
       assert.equal(await studyRow.locator('.sidebar-count').textContent(),'1');
       const grip = page.locator('.course-card').filter({hasText:'科学与社会'}).locator('.course-drag-handle');
       await grip.dragTo(libraryRow.locator('.sidebar-item'));
-      await page.waitForFunction(id=>courseZones['2']===id,libraryId);
+      await page.waitForFunction(id=>courseZones['2']?.includes(id)&&!courseZoneRequests.size,libraryId);
+      assert.equal(await page.locator('.course-zone-select, .course-card select').count(),0);
+      const firstCourse = page.locator('.course-card[data-course-id="1"]');
+      const firstGrip = firstCourse.locator('.course-drag-handle');
+      const startDesktopDrag = async (source = firstGrip) => {
+        const box = await source.boundingBox();
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(box.x + box.width / 2 + 18, box.y + box.height / 2 + 8, {steps:4});
+        await page.waitForFunction(()=>courseDrag?.mode==='native');
+      };
+      const removeFromSection = async id => {
+        await sidebar.locator(`[data-filter-value="${id}"]`).click();
+        await firstGrip.waitFor();
+        assert.equal(await sidebar.locator('.course-remove-target').count(),0);
+        await startDesktopDrag();
+        const remove = sidebar.locator('.course-remove-target');
+        const box = await remove.boundingBox();
+        const sidebarBox = await sidebar.boundingBox();
+        assert.ok(Math.abs(box.y + box.height - sidebarBox.y - sidebarBox.height)<1);
+        await page.mouse.move(box.x + box.width/2, box.y + box.height/2,{steps:8});
+        await page.mouse.move(box.x + box.width/2+1, box.y + box.height/2);
+        await page.waitForFunction(()=>courseDrag?.target?.classList.contains('course-remove-target'));
+        await page.mouse.up();
+        await page.waitForFunction(id=>!courseZones['1'].includes(id)&&!courseZoneRequests.size,id);
+        assert.equal(await page.locator('.course-remove-target').count(),0);
+      };
+      // The entire course can be dragged; no membership editors are on the card.
+      await firstCourse.dragTo(libraryRow.locator('.sidebar-item'));
+      await page.waitForFunction(id=>courseZones['1']?.includes(id)&&!courseZoneRequests.size,libraryId);
+      assert.deepEqual(await page.evaluate(()=>courseZones['1']),[childId,libraryId]);
+      assert.equal(await firstCourse.locator('.course-section-tag,select').count(),0);
+      await startDesktopDrag();
+      const libraryBox = await libraryRow.boundingBox();
+      // Hit the disclosure/spacer area: the whole row highlights.
+      await page.mouse.move(libraryBox.x+8,libraryBox.y+libraryBox.height/2,{steps:8});
+      await page.mouse.move(libraryBox.x+9,libraryBox.y+libraryBox.height/2);
+      await page.waitForFunction(id=>courseDrag?.target?.dataset.filterValue===id && document.querySelector('.course-drag-status').textContent.includes('已在此分区'),libraryId);
+      assert.equal(await libraryRow.evaluate(node=>node.classList.contains('drop-target')),true);
+      await page.mouse.up();
+      await page.getByText('已在此分区',{exact:true}).waitFor();
+      assert.deepEqual(await page.evaluate(()=>courseZones['1']),[childId,libraryId]);
+      // The parent count is a union, even when a course belongs to parent and child.
+      await firstGrip.dragTo(studyRow.locator('.sidebar-item'));
+      await page.waitForFunction(()=>courseZones['1']?.includes('study')&&!courseZoneRequests.size);
+      assert.equal(await studyRow.locator('.sidebar-count').textContent(),'1');
+      await removeFromSection('study');
+      assert.deepEqual(await page.evaluate(()=>courseZones['1']),[childId,libraryId]);
+      await removeFromSection(libraryId);
+      assert.deepEqual(await page.evaluate(()=>courseZones['1']),[childId]);
+      assert.equal(await firstCourse.count(),0);
+      await page.getByRole('button',{name:'撤销课程分区修改',exact:true}).click();
+      await page.waitForFunction(id=>courseZones['1'].includes(id)&&!courseZoneRequests.size,libraryId);
+      await removeFromSection(libraryId);
+      await removeFromSection(childId);
+      assert.deepEqual(await page.evaluate(()=>courseZones['1']),[]);
+      assert.equal(await sidebar.locator('[data-filter-value="unassigned"] .sidebar-count').textContent(),'1');
+      await page.getByRole('button',{name:'撤销课程分区修改',exact:true}).click();
+      await page.waitForFunction(()=>courseZones['1'].length===1&&!courseZoneRequests.size);
+      await sidebar.locator('[data-filter-kind="all"]').click();
+      await firstGrip.dragTo(libraryRow.locator('.sidebar-item'));
+      await page.waitForFunction(()=>courseZones['1'].length===2&&!courseZoneRequests.size);
+      // Inbox is automatic: dragging there never clears other memberships.
+      await firstGrip.dragTo(sidebar.locator('[data-filter-value="unassigned"]'));
+      assert.deepEqual(await page.evaluate(()=>courseZones['1']),[childId,libraryId]);
+      // Archive remains exclusive, and undo restores every membership.
+      await firstGrip.dragTo(sidebar.locator('[data-filter-value="archive"]'));
+      await page.waitForFunction(()=>courseZones['1'][0]==='archive'&&!courseZoneRequests.size);
+      assert.equal(await firstCourse.count(),0);
+      await page.getByRole('button',{name:'撤销课程分区修改',exact:true}).click();
+      await page.waitForFunction(()=>courseZones['1'].length===2&&!courseZoneRequests.size);
+      await removeFromSection(libraryId);
+      await sidebar.locator('[data-filter-kind="all"]').click();
+      // Failed saves restore memberships, counts and the filtered list.
+      await page.evaluate(()=>{
+        window.dragOriginalApi=window.ICOURSE_API;
+        window.ICOURSE_API=async(path,options)=>{
+          if(path==='/api/local/course-zones'&&options?.method==='PUT') throw new Error('合成分区保存失败');
+          if(window.dragOriginalApi) return window.dragOriginalApi(path,options);
+          const response=await fetch(path,{...options,headers:{'Content-Type':'application/json'}});
+          return response.json();
+        };
+      });
+      await firstGrip.dragTo(libraryRow.locator('.sidebar-item'));
+      await page.getByText('合成分区保存失败',{exact:true}).waitFor();
+      assert.deepEqual(await page.evaluate(()=>courseZones['1']),[childId]);
+      assert.equal(await libraryRow.locator('.sidebar-count').textContent(),'1');
+      await page.evaluate(()=>{window.ICOURSE_API=window.dragOriginalApi;delete window.dragOriginalApi;});
+      // Space picks up the course; arrows navigate destinations; Escape cancels.
+      await firstGrip.focus();
+      await page.keyboard.press('Space');
+      await page.keyboard.press('Escape');
+      assert.deepEqual(await page.evaluate(()=>courseZones['1']),[childId]);
+      await firstGrip.focus();
+      await page.keyboard.press('Space');
+      await page.keyboard.press('Tab');
+      assert.equal(await page.evaluate(()=>courseDrag),null);
+      await firstGrip.focus();
+      await page.keyboard.press('Space');
+      await page.keyboard.press('End');
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(id=>courseZones['1'].includes(id)&&!courseZoneRequests.size,libraryId);
+      assert.equal(await firstGrip.evaluate(node=>document.activeElement===node),true);
+      await sidebar.locator(`[data-filter-value="${libraryId}"]`).click();
+      await firstGrip.focus();
+      await page.keyboard.press('Space');
+      await page.keyboard.press('End');
+      assert.equal(await page.evaluate(()=>document.activeElement.classList.contains('course-remove-target')),true);
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(id=>!courseZones['1'].includes(id)&&!courseZoneRequests.size,libraryId);
       await studyRow.locator('.sidebar-item').click();
       await page.waitForFunction(()=>document.querySelectorAll('.course-card').length===1);
+      // A parent's aggregated child course has no direct parent membership to remove.
+      await firstGrip.focus();
+      await page.keyboard.press('Space');
+      assert.equal(await page.locator('.course-remove-target').count(),0);
+      await page.keyboard.press('Escape');
       await sidebar.locator('[aria-label="折叠学习分类"]').click();
       assert.equal(await sidebar.locator(`[data-section-id="${childId}"]`).count(),0);
+      await startDesktopDrag();
+      const parentBox = await studyRow.boundingBox();
+      await page.mouse.move(parentBox.x+parentBox.width/2,parentBox.y+parentBox.height/2,{steps:8});
+      await page.mouse.move(parentBox.x+parentBox.width/2+1,parentBox.y+parentBox.height/2);
+      await sidebar.locator(`[data-section-id="${childId}"]`).waitFor();
+      // Hover reveals children without changing saved collapse preferences.
+      await page.keyboard.press('Escape');
+      await page.mouse.up();
+      assert.equal(await sidebar.locator(`[data-section-id="${childId}"]`).count(),0);
       await sidebar.locator('[aria-label="展开学习分类"]').click();
+      await sidebar.locator('[data-filter-kind="all"]').click();
+      // Hover also expands the collapsed section group, then restores it on cancel.
+      await sidebar.locator('.sidebar-section-toggle').first().click();
+      await startDesktopDrag();
+      const headingBox = await sidebar.locator('.sidebar-section-heading').first().boundingBox();
+      await page.mouse.move(headingBox.x+50,headingBox.y+headingBox.height/2,{steps:8});
+      await page.mouse.move(headingBox.x+51,headingBox.y+headingBox.height/2);
+      await studyRow.waitFor();
+      await page.keyboard.press('Escape');
+      await page.mouse.up();
+      assert.equal(await studyRow.count(),0);
+      await sidebar.locator('.sidebar-section-toggle').first().click();
+      // A long sidebar scrolls continuously at its edge while remaining anchored.
+      await page.evaluate(async()=>{
+        window.scrollTestSections=courseSections.map(s=>({...s}));
+        const extra=Array.from({length:32},(_,i)=>({id:`section-${(100+i).toString(16).padStart(32,'0')}`,name:`滚动分区 ${i+1}`}));
+        const result=await api('/api/local/course-sections',{method:'PUT',body:JSON.stringify({sections:[...courseSections,...extra],revision:courseSectionsRevision})});
+        applyCourseOrganization(result);
+        await loadCourses();
+      });
+      await startDesktopDrag();
+      const navBox = await sidebar.locator('.sidebar-nav').boundingBox();
+      const asideBeforeScroll = await sidebar.boundingBox();
+      await page.mouse.move(navBox.x+70,navBox.y+navBox.height-8,{steps:8});
+      await page.mouse.move(navBox.x+71,navBox.y+navBox.height-8);
+      await page.waitForFunction(()=>document.querySelector('#course-sidebar .sidebar-nav').scrollTop>120);
+      const asideAfterScroll = await sidebar.boundingBox();
+      assert.equal(asideAfterScroll.y,asideBeforeScroll.y);
+      await page.keyboard.press('Escape');
+      await page.mouse.up();
+      await page.evaluate(async()=>{
+        const result=await api('/api/local/course-sections',{method:'PUT',body:JSON.stringify({sections:window.scrollTestSections,revision:courseSectionsRevision})});
+        applyCourseOrganization(result);await loadCourses();delete window.scrollTestSections;
+      });
       // Edge drops reorder; center drops move the complete subtree into a category.
       await libraryRow.locator('.sidebar-item').dragTo(studyRow,{targetPosition:{x:50,y:3}});
       await page.waitForFunction(id=>!sectionsSaving&&courseSections[0].id===id,libraryId);
       assert.equal(await page.evaluate(id=>courseSections.find(s=>s.id===id).parent_id,childId),'study');
+      await page.getByRole('button',{name:'撤销分区移动',exact:true}).click();
+      await page.waitForFunction(()=>!sectionsSaving&&courseSections[0].id==='study');
+      await libraryRow.locator('.sidebar-item').dragTo(studyRow,{targetPosition:{x:50,y:3}});
+      await page.waitForFunction(id=>!sectionsSaving&&courseSections[0].id===id,libraryId);
       await sidebar.locator(`[data-section-id="${childId}"] .sidebar-item`).dragTo(libraryRow.locator('.sidebar-item'));
       await page.waitForFunction(({childId,libraryId})=>!sectionsSaving&&courseSections.find(s=>s.id===childId).parent_id===libraryId,{childId,libraryId});
       await sidebar.locator(`[data-section-id="${childId}"] .sidebar-item`).dragTo(sidebar.locator('.sidebar-section-heading').first());
@@ -359,12 +580,68 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       assert.equal(await libraryRow.locator('.sidebar-count').textContent(),'2');
       await page.screenshot({path:`/tmp/icourse-${mode}-inline-sections-desktop.png`,fullPage:true});
       await page.setViewportSize({width:390,height:844});
+      // A quick swipe scrolls; a long press picks up the course and opens the drawer.
+      const touch = await context.newCDPSession(page);
+      const touchGripBox = await firstGrip.boundingBox();
+      const start = {x:touchGripBox.x+touchGripBox.width/2,y:touchGripBox.y+touchGripBox.height/2};
+      await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[start]});
+      await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      assert.equal(await page.evaluate(()=>courseDrag),null);
+      await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[start]});
+      await page.waitForFunction(()=>courseDrag?.mode==='touch');
+      await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:start.x+14,y:start.y}]});
+      await page.waitForFunction(()=>Math.abs(document.querySelector('.course-drawer-panel').getBoundingClientRect().left)<.1);
+      const touchTarget = page.locator(`#course-drawer-sidebar [data-section-id="${libraryId}"] .sidebar-item`);
+      const targetBox = await touchTarget.boundingBox();
+      const targetPoint = {x:targetBox.x+targetBox.width/2,y:targetBox.y+targetBox.height/2};
+      await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[targetPoint]});
+      await page.waitForFunction(()=>!!document.querySelector('#course-drawer-sidebar .drop-target'));
+      await page.evaluate(async()=>{await refreshStatus();await loadCourses();});
+      assert.equal(await firstGrip.evaluate(node=>node.isConnected),true);
+      await page.screenshot({path:`/tmp/icourse-${mode}-course-touch-drag.png`,fullPage:true});
+      await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      await page.waitForFunction(id=>courseZones['1'].includes(id)&&!courseZoneRequests.size,libraryId);
+      assert.deepEqual(await page.evaluate(()=>courseZones['1']),[childId,libraryId]);
+      assert.equal(await page.locator('#course-drawer').evaluate(node=>node.classList.contains('hidden')),true);
+      // Ordinary content swipes scroll instead of starting a course drag.
+      await page.evaluate(()=>document.querySelector('#course-list').style.minHeight='1800px');
+      const openBox = await firstCourse.locator('.course-open').boundingBox();
+      const swipeStart = {x:openBox.x+openBox.width/2,y:openBox.y+openBox.height/2};
+      await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[swipeStart]});
+      await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:swipeStart.x,y:swipeStart.y-75}]});
+      await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:swipeStart.x,y:swipeStart.y-115}]});
+      await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      assert.equal(await page.evaluate(()=>courseDrag),null);
+      await page.waitForFunction(()=>window.scrollY>0);
+      await page.evaluate(()=>{document.querySelector('#course-list').style.removeProperty('min-height');window.scrollTo(0,0);});
+      // Long-pressing the course content also supports removal on a touch screen.
+      await page.locator('#course-sidebar-open').click();
+      await page.waitForFunction(()=>Math.abs(document.querySelector('.course-drawer-panel').getBoundingClientRect().left)<.1);
+      await touchTarget.click();
+      await page.waitForFunction(()=>document.querySelector('#course-drawer').classList.contains('hidden'));
+      const contentBox = await firstCourse.locator('.course-open').boundingBox();
+      const contentStart = {x:contentBox.x+contentBox.width/2,y:contentBox.y+contentBox.height/2};
+      await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[contentStart]});
+      await page.waitForFunction(()=>courseDrag?.mode==='touch');
+      await page.waitForFunction(()=>Math.abs(document.querySelector('.course-drawer-panel').getBoundingClientRect().left)<.1);
+      const removeBox = await page.locator('#course-drawer-sidebar .course-remove-target').boundingBox();
+      assert.ok(removeBox.y+removeBox.height<=844);
+      await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:removeBox.x+removeBox.width/2,y:removeBox.y+removeBox.height/2}]});
+      await page.waitForFunction(()=>courseDrag?.target?.classList.contains('course-remove-target'));
+      const previewBox = await page.locator('.course-drag-ghost').boundingBox();
+      assert.ok(previewBox.y+previewBox.height<=removeBox.y);
+      await page.screenshot({path:`/tmp/icourse-${mode}-touch-remove.png`,fullPage:true});
+      await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      await page.waitForFunction(id=>!courseZones['1'].includes(id)&&!courseZoneRequests.size,libraryId);
+      assert.deepEqual(await page.evaluate(()=>courseZones['1']),[childId]);
+      assert.equal(await page.locator('.course-remove-target').count(),0);
+      await page.getByRole('button',{name:'撤销课程分区修改',exact:true}).click();
+      await page.waitForFunction(id=>courseZones['1'].includes(id)&&!courseZoneRequests.size,libraryId);
       await page.locator('#course-sidebar-open').click();
       await page.waitForFunction(()=>Math.abs(document.querySelector('.course-drawer-panel').getBoundingClientRect().left)<.1);
       const mobileLibrary = page.locator(`#course-drawer-sidebar [data-section-id="${libraryId}"] .sidebar-item`);
       const mobileBox = await mobileLibrary.boundingBox();
       assert.equal(await page.locator('#course-drawer').evaluate(node=>!node.classList.contains('hidden')),true);
-      const touch = await context.newCDPSession(page);
       await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:mobileBox.x+40,y:mobileBox.y+mobileBox.height/2}]});
       await page.getByRole('menu',{name:'资料库 的操作',exact:true}).waitFor();
       await page.evaluate(async()=>{ await refreshStatus(); await loadCourses(); });
@@ -376,11 +653,12 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.getByRole('menuitem',{name:'删除分区',exact:true}).click();
       await page.waitForFunction(id=>!sectionsSaving&&!courseSections.some(s=>s.id===id),libraryId);
       await page.getByRole('button',{name:'撤销删除分区',exact:true}).waitFor();
-      assert.equal(await page.evaluate(()=>courseZones['2']),'unassigned');
+      assert.deepEqual(await page.evaluate(()=>courseZones['2']),[]);
       assert.equal(await page.evaluate(id=>courseSections.find(s=>s.id===id).parent_id||null,childId),null);
-      assert.equal(await page.evaluate(id=>courseZones['1']===id,childId),true);
+      assert.equal(await page.evaluate(id=>courseZones['1']?.includes(id),childId),true);
       await page.getByRole('button',{name:'撤销删除分区',exact:true}).click();
-      await page.waitForFunction(({childId,libraryId})=>!sectionsSaving&&courseZones['2']===libraryId&&courseSections.find(s=>s.id===childId).parent_id===libraryId,{childId,libraryId});
+      await page.waitForFunction(({childId,libraryId})=>!sectionsSaving&&courseZones['2']?.includes(libraryId)&&courseSections.find(s=>s.id===childId).parent_id===libraryId,{childId,libraryId});
+      assert.deepEqual(await page.evaluate(()=>courseZones['1']),[childId,libraryId]);
       await touch.detach();
       await page.locator('#course-drawer-backdrop').click({position:{x:380,y:20}});
       await page.setViewportSize({width:1280,height:900});
@@ -390,7 +668,8 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         applyCourseOrganization(result);
         await loadCourses();
       });
-      await page.locator('.course-card').filter({hasText:'现代思想史'}).locator('select').selectOption('study');
+      await page.locator('.course-card').filter({hasText:'现代思想史'}).locator('.course-drag-handle').dragTo(sidebar.locator('[data-section-id="study"] .sidebar-item'));
+      await page.waitForFunction(()=>courseZones['1']?.includes('study')&&!courseZoneRequests.size);
       await page.locator('#course-sidebar [data-filter-kind="zone"][data-filter-value="study"]').click();
       await page.waitForFunction(()=>document.querySelectorAll('.course-card').length===1);
       assert.equal(await page.locator('.course-card').count(),1);
@@ -727,7 +1006,9 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await lastPage.screenshot({path:'/tmp/icourse-browser-failure.png',fullPage:true});
       console.error(await lastPage.evaluate(()=>({sections:courseSections,saving:sectionsSaving,
         edit:inlineSectionEdit?{id:inlineSectionEdit.id,name:inlineSectionEdit.name,error:inlineSectionEdit.error}:null,
-        message:document.querySelector('#message').textContent,drag:sectionDragId})));
+        message:document.querySelector('#message').textContent,drag:sectionDragId,
+        courseDrag:courseDrag?{mode:courseDrag.mode,point:courseDrag.point,target:courseDrag.target?.outerHTML,
+          hit:courseDrag.point?document.elementFromPoint(courseDrag.point.x,courseDrag.point.y)?.outerHTML:null}:null})));
     }
     throw error;
   } finally {

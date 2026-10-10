@@ -13,6 +13,18 @@ const vm = require('node:vm');
   for (const name of ['terms.js', 'departments.js', 'browser/schema.js', 'browser/db.js']) {
     vm.runInNewContext(fs.readFileSync(path.join(root, 'local_web/static', name), 'utf8'), context);
   }
+  const {formatTerm} = context.window.ICS;
+  for (const [raw, display] of [
+    ['2025-20261', '2025 秋'], ['2025–2026 秋季', '2025 秋'],
+    ['2025-20262', '2026 春'], ['2025–2026 第二学期', '2026 春'],
+    ['2025-2026暑期', '2026 暑'], ['2030-2031学年暑期学期', '2031 暑'],
+    [' 2030 — 2031 第1学期 ', '2030 秋'], ['2030-2031-2', '2031 春'],
+    ['2026-秋', '2026 秋'], ['2026-春', '2026 春'], ['2026 暑期学期', '2026 暑'],
+    [null, ''], ['', ''], ['未知学期', '未知学期'], ['2030-20321', '2030-20321'],
+  ]) {
+    assert.equal(formatTerm(raw), display);
+    assert.equal(formatTerm(display), display);
+  }
   const api = context.window.ICS.db;
   const legacy = new SQL.Database();
   legacy.exec(context.window.ICS.schema.SCHEMA_SQL);
@@ -48,5 +60,5 @@ const vm = require('node:vm');
   assert.equal(api.getAllCoursesTerms()[0], '2030–2031 秋季');
   assert.equal(api.countAllCourses({terms: ['2030–2031 秋季']}), 1);
   api.close();
-  console.log('Browser term queries passed (legacy, cache, shards, future imports).');
+  console.log('Browser term display and queries passed (calendar years, legacy, cache, shards, future imports).');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -1,4 +1,4 @@
-/* Keep these rules in sync with src/data/terms.py; raw catalog keys stay intact. */
+/* Keep normalization and sorting in sync with src/data/terms.py; raw catalog keys stay intact. */
 window.ICS = window.ICS || {};
 window.ICS.normalizeTerm = (value) => {
   const name = String(value || "").trim();
@@ -9,6 +9,17 @@ window.ICS.normalizeTerm = (value) => {
     "秋季": "秋季", "秋季学期": "秋季", "春季": "春季", "春季学期": "春季",
     "暑期": "暑期", "暑期学期": "暑期"};
   return `${match[1]}–${match[2]} ${labels[match[3]]}`;
+};
+// Display the season's calendar year without changing stored terms or filter values.
+window.ICS.formatTerm = (value) => {
+  const name = window.ICS.normalizeTerm(value);
+  const academic = name.match(/^([0-9]{4})–([0-9]{4}) (秋季|春季|暑期)$/u);
+  if (academic) {
+    const year = academic[3] === "秋季" ? academic[1] : academic[2];
+    return `${year} ${academic[3][0]}`;
+  }
+  const calendar = name.match(/^([0-9]{4})\s*(?:[-–—]\s*)?(秋(?:季(?:学期)?)?|春(?:季(?:学期)?)?|暑(?:期(?:学期)?)?)$/u);
+  return calendar ? `${calendar[1]} ${calendar[2][0]}` : name;
 };
 window.ICS.termSortKey = (value) => {
   const name = window.ICS.normalizeTerm(value);

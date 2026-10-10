@@ -423,13 +423,15 @@
         const sectionIds = new Set(sections.map(s => s.id));
         const allowed = new Set([...sectionIds, 'archive', 'unassigned']);
         state.sections = sections;
-        state.zones = Object.fromEntries(Object.entries(state.zones).map(([id,zone]) => [id, allowed.has(zone) ? zone : 'unassigned']));
+        state.zones = Object.fromEntries(Object.entries(state.zones).map(([id,zone]) => [id, window.ICS.organization.normalizeMemberships(zone, allowed)]));
         state.default_zone = 'unassigned';
         state.revision += 1;
         savePreference('organization', state);
       } else if (method === 'PUT') {
-        if (!['unassigned','archive',...state.sections.map(s => s.id)].includes(payload.zone)) throw new Error('未知课程分区');
-        state.zones[String(payload.course_id)] = payload.zone;
+        const id = String(payload.course_id || '').trim();
+        if (!id || id.length > 100 || (payload.zone == null) === (payload.zones == null)) throw new Error('未知课程分区');
+        const allowed = new Set(['unassigned','archive',...state.sections.map(s => s.id)]);
+        state.zones[id] = window.ICS.organization.updateMemberships(state.zones[id], payload.zones ?? [payload.zone], payload.operation ?? 'replace', allowed);
         savePreference('organization', state);
       }
       return state;

@@ -8,6 +8,21 @@
     const text = String(value || '').trim();
     return /^section-[a-f0-9]{32}$/.test(text) ? text : aliases[text] || null;
   }
+  function normalizeMemberships(value, allowed) {
+    const values = Array.isArray(value) ? value : [value];
+    const zones = [...new Set(values.map(normalizeZone).filter(zone => zone && zone !== 'unassigned' && (!allowed || allowed.has(zone))))];
+    return zones.includes('archive') ? ['archive'] : zones;
+  }
+  function updateMemberships(current, values, operation = 'replace', allowed) {
+    if (!Array.isArray(values) || values.length > 100 || values.some(zone => !allowed.has(normalizeZone(zone)))
+        || !['replace','add','remove'].includes(operation)) throw new Error('课程分区不存在，请刷新后重试');
+    let zones = [...new Set(values.map(normalizeZone))];
+    if (zones.length > 1 && zones.some(zone => ['archive','unassigned'].includes(zone))) throw new Error('待整理和归档不能与其他分区同时使用');
+    if (operation === 'add' && !zones.some(zone => ['archive','unassigned'].includes(zone))) zones = zones.length
+      ? [...normalizeMemberships(current).filter(zone => zone !== 'archive'), ...zones] : normalizeMemberships(current);
+    else if (operation === 'remove') zones = normalizeMemberships(current).filter(zone => !zones.includes(zone));
+    return normalizeMemberships(zones);
+  }
   function validateSections(sections) {
     if (!Array.isArray(sections) || sections.length > 100) throw new Error('最多创建 100 个分区');
     const ids = new Set(), names = new Set();
@@ -53,8 +68,7 @@
     const allowed = new Set(['unassigned', 'archive', ...migrated.map(s => s.id)]);
     return {sections: migrated, default_zone: 'unassigned', revision: state.revision || 0,
       zones: Object.fromEntries(Object.entries(state.zones || {}).map(([id, value]) => {
-        const zone = normalizeZone(value);
-        return [id, allowed.has(zone) ? zone : 'unassigned'];
+        return [id, normalizeMemberships(value, allowed)];
       }))};
   }
   function sectionTree(sections) {
@@ -117,6 +131,6 @@
     return remaining;
   }
   window.ICS = window.ICS || {};
-  window.ICS.organization = {MAX_DEPTH, normalizeZone, validateSections, migrateOrganization,
+  window.ICS.organization = {MAX_DEPTH, normalizeZone, normalizeMemberships, updateMemberships, validateSections, migrateOrganization,
     sectionTree, descendantIds, canParent, reparentSections, reorderSections};
 })();

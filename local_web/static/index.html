@@ -83,6 +83,7 @@
           <aside id="course-sidebar" class="course-sidebar" aria-label="课程分类"></aside>
           <div class="courses-main">
             <p id="course-filter-caption" class="course-filter-caption"></p>
+            <p id="course-organize-hint" class="course-organize-hint">拖到左侧分区添加归属；在分区内拖动，可移出本分区。触屏长按拖动。</p>
             <div id="stats" class="stats"></div>
             <div id="course-list" class="course-list empty">正在打开本地资料库。</div>
           </div>
@@ -92,7 +93,7 @@
       <section id="view-lectures" class="view-pane content-column hidden">
         <div class="view-heading compact">
           <div><h1 id="course-title">课程</h1><p id="course-teacher" class="muted"></p></div>
-          <div class="heading-actions"><button id="course-data-actions" type="button">导出 / 删除</button><button id="course-back-button" type="button">全部课程</button></div>
+          <div class="heading-actions"><button id="course-data-actions" class="course-more-button" type="button" aria-label="课程操作" aria-haspopup="menu" aria-expanded="false" title="更多操作">⋯</button><button id="course-back-button" type="button">全部课程</button></div>
         </div>
         <div id="lecture-list" class="lecture-list"></div>
       </section>
@@ -365,10 +366,10 @@
   <dialog id="data-actions-dialog" class="data-actions-dialog">
     <form method="dialog"><button class="dialog-close" aria-label="关闭">×</button></form>
     <h2 id="data-actions-title">课程资料</h2>
-    <p class="muted">导出由 GitHub Actions 生成并发送至已配置邮箱。删除会清除远端对应资料；运行完成后检查更新。</p>
+    <p id="data-actions-description" class="muted">选择整门课程或指定课次导出或删除。删除会清除远端对应资料；运行完成后检查更新。</p>
     <label class="check-option"><input id="data-actions-all" type="checkbox" checked> 整门课程（取消后选择课次）</label>
     <div id="data-actions-lectures" class="data-actions-lectures"></div>
-    <p class="muted">导出完成后，在自动化页打开运行记录，从 Artifacts 下载 PDF、Markdown 或 HTML 文件；文件保留 7 天。</p>
+    <p class="muted data-export-hint">导出完成后，在运行页打开运行记录，从 Artifacts 下载 PDF、Markdown 或 HTML 文件；文件保留 7 天。</p>
     <div class="heading-actions"><select id="data-export-type" aria-label="导出格式"><option>PDF</option><option>Markdown</option><option>HTML</option></select><button id="data-export-button" class="primary" type="button">导出</button><button id="data-delete-button" class="danger" type="button">删除所选资料</button></div>
   </dialog>
   <script src="runtime-config.js"></script>
