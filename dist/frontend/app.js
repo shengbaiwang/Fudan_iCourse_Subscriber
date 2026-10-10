@@ -59,7 +59,8 @@ function loadCourseFilter() {
   try {
     const f = JSON.parse(localStorage.getItem(COURSE_FILTER_KEY));
     if (f && ["all", "star", "zone", "term", "dept"].includes(f.kind)) {
-      const value = f.kind === "dept" ? window.ICS.normalizeDepartment(f.value) : String(f.value || "");
+      const value = f.kind === "dept" ? window.ICS.normalizeDepartment(f.value)
+        : f.kind === "term" ? window.ICS.normalizeTerm(f.value) : String(f.value || "");
       const filter = {kind: f.kind, value};
       if (value !== f.value) localStorage.setItem(COURSE_FILTER_KEY, JSON.stringify(filter));
       return filter;
@@ -440,7 +441,7 @@ function visibleCourseRows() {
   const rows = courseRows.filter(c => courseZone(c.course_id) !== "archive");
   if (f.kind === "star") return rows.filter((c) => starredCourses.has(String(c.course_id)));
   if (f.kind === "zone") return rows.filter((c) => courseZone(c.course_id) === f.value);
-  if (f.kind === "term") return rows.filter((c) => (c.term || "") === f.value);
+  if (f.kind === "term") return rows.filter((c) => window.ICS.normalizeTerm(c.term) === f.value);
   if (f.kind === "dept") return rows.filter((c) => (c.dept || "") === f.value);
   return rows;
 }
@@ -449,13 +450,14 @@ function courseFilterCaption() {
   const f = courseFilter;
   if (f.kind === "star") return "星标";
   if (f.kind === "zone") return f.value === "archive" ? "归档" : courseZoneLabels()[f.value] || "分区";
-  if (f.kind === "term") return f.value || "未知学期";
+  if (f.kind === "term") return window.ICS.normalizeTerm(f.value) || "未知学期";
   if (f.kind === "dept") return f.value || "未知院系";
   return "全部课程";
 }
 
 function selectCourseFilter(kind, value) {
-  courseFilter = {kind, value: kind === "dept" ? window.ICS.normalizeDepartment(value) : value || ""};
+  courseFilter = {kind, value: kind === "dept" ? window.ICS.normalizeDepartment(value)
+    : kind === "term" ? window.ICS.normalizeTerm(value) : value || ""};
   localStorage.setItem(COURSE_FILTER_KEY, JSON.stringify(courseFilter));
   closeCourseDrawer();
   renderCourseSidebar();
@@ -473,14 +475,14 @@ function renderCourseSidebar() {
   const dynItems = (field, unknownLabel) => {
     const counts = {};
     activeRows.forEach((c) => {
-      const v = c[field] || "";
+      const v = field === "term" ? window.ICS.normalizeTerm(c[field]) : c[field] || "";
       counts[v] = (counts[v] || 0) + 1;
     });
     return Object.keys(counts)
       .sort((a, b) => {
         if (a === "") return 1;  // unknown always last
         if (b === "") return -1;
-        return field === "term" ? b.localeCompare(a) : a.localeCompare(b, "zh");
+        return field === "term" ? window.ICS.compareTerms(b, a) : a.localeCompare(b, "zh");
       })
       .map((v) => ({value: v, label: v || unknownLabel, count: counts[v]}));
   };
@@ -768,7 +770,7 @@ async function loadCourses() {
     const metaParts = [];
     if (course.teacher) metaParts.push(String(course.teacher));
     if (course.dept) metaParts.push(String(course.dept));
-    if (course.term) metaParts.push(String(course.term));
+    if (course.term) metaParts.push(window.ICS.normalizeTerm(course.term));
     const updated = relativeTime(course.last_updated);
     if (updated) metaParts.push(`${updated}更新`);
     if (metaParts.length) {
@@ -2101,7 +2103,7 @@ function renderSubscriptionCourse(course, action, label) {
   title.textContent = course.title || course.course_id;
   const meta = document.createElement("span");
   meta.className = "meta";
-  meta.textContent = [course.teacher, course.dept, course.term, course.course_id].filter(Boolean).join(" · ");
+  meta.textContent = [course.teacher, course.dept, window.ICS.normalizeTerm(course.term), course.course_id].filter(Boolean).join(" · ");
   content.append(title, meta);
   const button = createButton(label, action, `subscription-action ${label === "移除" ? "remove" : "add"}`);
   button.setAttribute("aria-label", `${label}${course.title || course.course_id}`);
@@ -2120,7 +2122,7 @@ function orderedSubscriptionCourses() {
   const ordered = [...subscriptionCourses];
   if (subscriptionSort === "term") {
     ordered.sort((a, b) =>
-      String(a.term || "").localeCompare(String(b.term || ""), "zh")
+      window.ICS.compareTerms(a.term, b.term)
       || String(a.title || a.course_id).localeCompare(String(b.title || b.course_id), "zh")
     );
   } else {
@@ -2235,8 +2237,10 @@ async function loadSubscriptionCatalog(page = 1) {
     catalogPage = result.page || page;
     catalogTotal = result.total ?? catalogRows.length;
     const select = $("#subscription-term");
-    if (JSON.stringify(subscriptionTerms) !== JSON.stringify(result.terms || [])) {
-      subscriptionTerms = result.terms || [];
+    const terms = [...new Set((result.terms || []).map(window.ICS.normalizeTerm))]
+      .sort((a, b) => window.ICS.compareTerms(b, a));
+    if (JSON.stringify(subscriptionTerms) !== JSON.stringify(terms)) {
+      subscriptionTerms = terms;
       select.replaceChildren(new Option("全部学期", ""));
       subscriptionTerms.forEach((item) => select.append(new Option(item, item)));
       select.value = subscriptionTerms.includes(term) ? term : "";

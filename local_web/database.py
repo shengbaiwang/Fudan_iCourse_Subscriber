@@ -13,6 +13,7 @@ from typing import Any
 
 from src.data.crypto_box import decrypt, derive_new_password, encrypt, is_json_obj, is_sqlite
 from src.data.departments import normalize_department
+from src.data.terms import normalize_term, term_sort_key
 from src.data.sharder import reassemble_database
 
 from .github_client import DataManifest, GitHubClient
@@ -281,6 +282,8 @@ class DatabaseManager:
         connection = sqlite3.connect(uri, uri=True, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.create_function("normalize_department", 1, normalize_department, deterministic=True)
+        connection.create_function("normalize_term", 1, normalize_term, deterministic=True)
+        connection.create_function("term_sort_key", 1, term_sort_key, deterministic=True)
         return connection
 
     def stats(self) -> dict[str, Any]:
@@ -309,14 +312,14 @@ class DatabaseManager:
         sql = """
             SELECT c.course_id, c.title, c.teacher,
                    COALESCE((
-                       SELECT ac.term FROM all_courses ac
+                       SELECT normalize_term(ac.term) FROM all_courses ac
                        WHERE ac.course_id = c.course_id
-                       ORDER BY ac.term DESC LIMIT 1
+                       ORDER BY term_sort_key(ac.term) DESC, ac.term DESC LIMIT 1
                    ), '') AS term,
                    COALESCE((
                        SELECT normalize_department(ac.dept) FROM all_courses ac
                        WHERE ac.course_id = c.course_id
-                       ORDER BY ac.term DESC LIMIT 1
+                       ORDER BY term_sort_key(ac.term) DESC, ac.term DESC LIMIT 1
                    ), '') AS dept,
                    COUNT(l.sub_id) AS total_count,
                    SUM(CASE WHEN l.summary IS NOT NULL THEN 1 ELSE 0 END) AS summary_count,
@@ -687,8 +690,8 @@ class DatabaseManager:
         with closing(self._connect()) as db:
             try:
                 rows = db.execute(
-                    "SELECT DISTINCT term FROM all_courses "
-                    "WHERE TRIM(COALESCE(term, '')) != '' ORDER BY term DESC"
+                    "SELECT DISTINCT normalize_term(term) AS term FROM all_courses "
+                    "WHERE TRIM(COALESCE(term, '')) != '' ORDER BY term_sort_key(term) DESC"
                 )
             except sqlite3.OperationalError:
                 return []
@@ -706,14 +709,14 @@ class DatabaseManager:
         ]
         params: list[Any] = [needle, needle, needle, needle]
         if term.strip():
-            clauses.append("term = ?")
-            params.append(term.strip())
+            clauses.append("normalize_term(term) = ?")
+            params.append(normalize_term(term))
         where = ' AND '.join(clauses)
         sql = f"""
-            SELECT course_id, term, title, teacher, normalize_department(dept) AS dept
+            SELECT course_id, normalize_term(term) AS term, title, teacher, normalize_department(dept) AS dept
             FROM all_courses
             WHERE {where}
-            ORDER BY term DESC, title COLLATE NOCASE, course_id
+            ORDER BY term_sort_key(term) DESC, title COLLATE NOCASE, course_id
             LIMIT ? OFFSET ?
         """
         with closing(self._connect()) as db:
@@ -740,12 +743,12 @@ class DatabaseManager:
         sql = f"""
             WITH catalog AS (
                 SELECT course_id, term, title, teacher, dept,
-                       ROW_NUMBER() OVER (PARTITION BY course_id ORDER BY term DESC) AS ranking
+                       ROW_NUMBER() OVER (PARTITION BY course_id ORDER BY term_sort_key(term) DESC, term DESC) AS ranking
                 FROM all_courses
                 WHERE course_id IN ({placeholders})
             )
             SELECT requested.course_id,
-                   COALESCE(catalog.term, '') AS term,
+                   normalize_term(catalog.term) AS term,
                    COALESCE(catalog.title, courses.title, requested.course_id) AS title,
                    COALESCE(catalog.teacher, courses.teacher, '') AS teacher,
                    normalize_department(catalog.dept) AS dept

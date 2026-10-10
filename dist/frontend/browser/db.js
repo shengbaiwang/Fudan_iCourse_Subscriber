@@ -44,6 +44,7 @@ async function _initFromBytes(dbBytes) {
   const SQL = await _ensureSqlJs();
   if (_db) _db.close();
   _db = dbBytes ? new SQL.Database(dbBytes) : new SQL.Database();
+  _registerTermFunctions();
   if (!dbBytes) _db.exec(_schemaSql());
   // Ensure new tables exist when loading a cached DB from an older version
   _db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
@@ -62,10 +63,17 @@ function _normalizeCatalogDepartments() {
   _db.exec("UPDATE all_courses SET dept = normalize_department(dept) WHERE dept IS NOT NULL");
 }
 
+function _registerTermFunctions() {
+  // Format on reads: catalog writes/merges must keep matching raw term keys.
+  _db.create_function("normalize_term", window.ICS.normalizeTerm);
+  _db.create_function("term_sort_key", window.ICS.termSortKey);
+}
+
 async function _initEmpty() {
   const SQL = await _ensureSqlJs();
   if (_db) _db.close();
   _db = new SQL.Database();
+  _registerTermFunctions();
   _db.exec(_schemaSql());
   _db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
 }
@@ -188,12 +196,12 @@ function _getCourses() {
   // fall into the UI's "未知" group.
   return _queryAll(`
     SELECT c.course_id AS course_id, c.title AS title, c.teacher AS teacher,
-           (SELECT ac.term FROM all_courses ac
+           (SELECT normalize_term(ac.term) FROM all_courses ac
              WHERE ac.course_id = c.course_id
-             ORDER BY ac.term DESC LIMIT 1) AS term,
+             ORDER BY term_sort_key(ac.term) DESC, ac.term DESC LIMIT 1) AS term,
            (SELECT ac.dept FROM all_courses ac
              WHERE ac.course_id = c.course_id
-             ORDER BY ac.term DESC LIMIT 1) AS dept,
+             ORDER BY term_sort_key(ac.term) DESC, ac.term DESC LIMIT 1) AS dept,
            COUNT(CASE WHEN l.summary IS NOT NULL THEN 1 END) AS summary_count,
            COUNT(l.sub_id) AS total_count,
            MAX(l.processed_at) AS last_updated
@@ -343,7 +351,7 @@ function _getAllCoursesTerms() {
   var ex = _invalidTermExclusion();
   var where = ex.clauses.length ? "WHERE " + ex.clauses.join(" AND ") : "";
   return _queryAll(
-    "SELECT DISTINCT term FROM all_courses " + where + " ORDER BY term DESC",
+    "SELECT DISTINCT normalize_term(term) AS term FROM all_courses " + where + " ORDER BY term_sort_key(term) DESC",
     ex.params,
   ).map(function (r) { return r.term; });
 }
@@ -360,8 +368,8 @@ function _buildCatalogWhere(filters) {
     params.push(needle, needle, needle, needle);
   }
   if (filters.terms && filters.terms.length) {
-    clauses.push("term IN (" + filters.terms.map(function () { return "?"; }).join(",") + ")");
-    for (var i = 0; i < filters.terms.length; i++) params.push(filters.terms[i]);
+    clauses.push("normalize_term(term) IN (" + filters.terms.map(function () { return "?"; }).join(",") + ")");
+    for (var i = 0; i < filters.terms.length; i++) params.push(window.ICS.normalizeTerm(filters.terms[i]));
   }
   if (filters.depts && filters.depts.length) {
     clauses.push("dept IN (" + filters.depts.map(function () { return "?"; }).join(",") + ")");
@@ -386,8 +394,8 @@ function _searchAllCourses(filters, limit, offset) {
   // Pushes all filtering into sqlite so the JS heap never holds the full
   // 20k-row catalog.
   var w = _buildCatalogWhere(filters || {});
-  var sql = "SELECT course_id, term, title, teacher, dept FROM all_courses "
-          + w.where + " ORDER BY term DESC, title COLLATE NOCASE, course_id LIMIT ? OFFSET ?";
+  var sql = "SELECT course_id, normalize_term(term) AS term, title, teacher, dept FROM all_courses "
+          + w.where + " ORDER BY term_sort_key(term) DESC, title COLLATE NOCASE, course_id LIMIT ? OFFSET ?";
   var p = w.params.slice();
   p.push(limit || 200);
   p.push(offset || 0);
@@ -410,8 +418,8 @@ function _getCoursesByIds(ids) {
   // Pull every term row that matches, then collapse to one per course_id
   // (preferring the most recent term) in JS — keeps the SQL simple.
   var rows = _queryAll(
-    "SELECT course_id, term, title, teacher, dept FROM all_courses "
-    + "WHERE course_id IN (" + placeholders + ") ORDER BY term DESC",
+    "SELECT course_id, normalize_term(term) AS term, title, teacher, dept FROM all_courses "
+    + "WHERE course_id IN (" + placeholders + ") ORDER BY term_sort_key(term) DESC, term DESC",
     ids.map(String),
   );
   var seen = {};
@@ -443,8 +451,8 @@ function _getAllCoursesDepts(termFilter, search) {
   var clauses = ["dept IS NOT NULL", "dept != ''"];
   var params = [];
   if (termFilter && termFilter.length) {
-    clauses.push("term IN (" + termFilter.map(function () { return "?"; }).join(",") + ")");
-    for (var i = 0; i < termFilter.length; i++) params.push(termFilter[i]);
+    clauses.push("normalize_term(term) IN (" + termFilter.map(function () { return "?"; }).join(",") + ")");
+    for (var i = 0; i < termFilter.length; i++) params.push(window.ICS.normalizeTerm(termFilter[i]));
   }
   if (search && search.trim()) {
     clauses.push("LOWER(dept) LIKE ?");

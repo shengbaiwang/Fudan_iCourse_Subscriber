@@ -193,6 +193,63 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         assert.equal(await page.evaluate(() => window.ICS.db.queryAll("SELECT COUNT(*) n FROM all_courses WHERE dept = '014 历史学系'")[0].n), 0);
       }
       await page.locator('#course-sidebar [data-filter-kind="all"]').click();
+      // Raw API labels, saved filters and future years share one display format.
+      await page.evaluate(async () => {
+        window.termTestApi = window.ICOURSE_API;
+        window.termTestFilter = localStorage.getItem(COURSE_FILTER_KEY);
+        const rawTerms = ['2030-20311','2025-2026暑期','2025-20262','2025-20261','2024-20252','2024-20251','2023-2024-2','2025-2026-1'];
+        const rows = rawTerms.map((term, i) => ({course_id:`term-test-${i}`,title:'学期格式测试',teacher:'教师',term,dept:'院系',total_count:0,summary_count:0}));
+        window.ICOURSE_API = async (url, options) => {
+          if (url === '/api/local/courses') return rows;
+          if (url.startsWith('/api/local/subscription-catalog')) {
+            const term = new URL(url, location.href).searchParams.get('term');
+            const courses = rows.filter(row => !term || window.ICS.normalizeTerm(row.term) === term);
+            return {terms:rawTerms.map(window.ICS.normalizeTerm),courses,total:courses.length,page:1};
+          }
+          return window.termTestApi(url, options);
+        };
+        localStorage.setItem(COURSE_FILTER_KEY, JSON.stringify({kind:'term',value:'2025-20261'}));
+        courseFilter = loadCourseFilter();
+        await loadCourses();
+      });
+      const termItem = page.locator('#course-sidebar [data-filter-kind="term"][data-filter-value="2025–2026 第一学期"]');
+      assert.equal(await termItem.count(), 1);
+      assert.equal(await termItem.locator('.sidebar-count').textContent(), '2');
+      assert.equal(await termItem.getAttribute('aria-current'), 'page');
+      assert.equal(await page.locator('.course-card').count(), 2);
+      assert.match(await page.locator('.course-meta').first().innerText(), /2025–2026 第一学期/);
+      assert.deepEqual(await page.locator('#course-sidebar [data-filter-kind="term"] .sidebar-label').allTextContents(), [
+        '2030–2031 第一学期','2025–2026 暑期','2025–2026 第二学期','2025–2026 第一学期',
+        '2024–2025 第二学期','2024–2025 第一学期','2023–2024 第二学期',
+      ]);
+      assert.equal(await termItem.locator('.sidebar-label').evaluate(node => node.scrollWidth <= node.clientWidth), true);
+      await page.locator('#course-sidebar [data-filter-value="2030–2031 第一学期"]').click();
+      await page.waitForFunction(() => document.querySelectorAll('.course-card').length === 1);
+      await page.evaluate(async () => { await loadSubscriptionCatalog(); });
+      assert.equal(await page.locator('#subscription-term option[value="2025–2026 第一学期"]').count(), 1);
+      await page.locator('#subscription-term').evaluate(node => { node.value = '2025–2026 第一学期'; });
+      await page.evaluate(async () => { await loadSubscriptionCatalog(); });
+      assert.equal(await page.locator('#subscription-catalog .subscription-row').count(), 2);
+      assert.match(await page.locator('#subscription-catalog .meta').first().innerText(), /2025–2026 第一学期/);
+      await page.screenshot({path:`/tmp/icourse-${mode}-terms-desktop.png`,fullPage:true});
+      await page.setViewportSize({width:390,height:844});
+      await page.locator('#course-sidebar-open').click();
+      await page.waitForFunction(() => Math.abs(document.querySelector('.course-drawer-panel').getBoundingClientRect().left) < 0.1);
+      const mobileTerm = page.locator('#course-drawer-sidebar [data-filter-value="2030–2031 第一学期"] .sidebar-label');
+      assert.equal(await mobileTerm.evaluate(node => node.scrollWidth <= node.clientWidth), true);
+      await page.screenshot({path:`/tmp/icourse-${mode}-terms-mobile.png`,fullPage:true});
+      await page.locator('#course-drawer-backdrop').click({position:{x:380,y:20}});
+      await page.setViewportSize({width:1280,height:900});
+      await page.evaluate(async () => {
+        window.ICOURSE_API = window.termTestApi;
+        localStorage.setItem(COURSE_FILTER_KEY, window.termTestFilter);
+        courseFilter = loadCourseFilter();
+        document.querySelector('#subscription-term').value = '';
+        await loadCourses();
+        await loadSubscriptionCatalog();
+        delete window.termTestApi;
+        delete window.termTestFilter;
+      });
       assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
       if (mode === 'fork') await page.evaluate(async () => { await api('/api/local/course-sections', {method:'PUT', body:JSON.stringify({sections:[{id:'study',name:'学习区'}],revision:0})}); await loadCourseZones(); await loadCourses(); });
       await page.locator('.course-card').filter({hasText:'现代思想史'}).locator('select').selectOption('study');
