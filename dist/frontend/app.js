@@ -844,7 +844,12 @@ function renderLectureList() {
     }
     if (lecture.error_msg) {
       const error = document.createElement("p");
-      error.textContent = lecture.error_msg;
+      error.textContent = lecture.error_msg === "no playable video URL"
+        ? "尚未取得录播地址；更新后将自动复查，并尝试可用的官方转录"
+        : lecture.error_msg;
+      if (lecture.retry_after) {
+        error.textContent += ` · 下次复查：${new Date(lecture.retry_after * 1000).toLocaleString("zh-CN")}`;
+      }
       left.append(error);
     }
     const state = document.createElement("span");
@@ -919,6 +924,8 @@ function lectureState(lecture) {
 }
 
 function lectureStateLabel(lecture) {
+  if (lecture.error_stage === "video_access") return "录播无权限";
+  if (lecture.error_stage === "video") return "录播准备待重试";
   const state = lectureState(lecture);
   return state === "failed" ? `失败 · ${lecture.error_stage}` : {
     ready: "笔记已生成", novideo: "暂无录播", skipped: "已跳过", processing: "处理中", waiting: "等待处理",

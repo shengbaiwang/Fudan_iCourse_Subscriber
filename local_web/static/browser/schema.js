@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS lectures (
     processed_at TEXT, emailed_at TEXT,
     error_msg TEXT, error_count INTEGER DEFAULT 0,
     error_stage TEXT, summary_model TEXT,
-    ai_title TEXT
+    ai_title TEXT, retry_after INTEGER
 );
 CREATE TABLE IF NOT EXISTS summary_versions (
     sub_id TEXT NOT NULL,

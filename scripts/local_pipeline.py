@@ -7,6 +7,7 @@ import threading
 import time
 
 from src.pipeline.lecture_runner import LectureRunner
+from src.api.icourse import VideoAccessError, VideoLookupError, VideoNotReadyError
 
 
 class StrictPPTClient:
@@ -170,9 +171,34 @@ class LocalLectureRunner(LectureRunner):
             return existing["transcript"], self.local.meta(self._db, sub_id, "segments")
         downloader = self._scheduler.audio_downloader
         downloader.schedule(self._client, course_id, sub_id)
-        handle = downloader.get(sub_id, timeout=7200)
+        try:
+            handle = downloader.get(sub_id, timeout=7200)
+        except (VideoAccessError, VideoNotReadyError) as exc:
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
+            stage = "video_access" if isinstance(exc, VideoAccessError) else "no_video"
+            self._db.update_error(sub_id, stage, str(exc))
+            self.checkpoint()
+            return None, None
+        except (VideoLookupError, TimeoutError) as exc:
+            message = str(exc) if isinstance(exc, VideoLookupError) else "录播准备超时，稍后自动重试"
+            self._db.update_error(sub_id, "video", message)
+            self.checkpoint()
+            return None, None
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            self._db.update_error(sub_id, "video", f"录播准备失败，稍后自动重试（{type(exc).__name__}）")
+            self.checkpoint()
+            return None, None
         if handle is None:
-            raise ValueError("无法建立本机音频任务")
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
+            self._db.update_error(sub_id, "no_video", "平台尚未提供可播放的录播地址；将定期自动复查")
+            self.checkpoint()
+            return None, None
         text, segments = self._transcriber.transcribe_tail(handle.path, handle.process, handle.stderr_chunks)
         media = downloader.verify(sub_id)
         expected, actual = self._transcriber._media_duration or 0, self._transcriber._last_duration
@@ -191,6 +217,18 @@ class LocalLectureRunner(LectureRunner):
         })
         self.checkpoint()
         print(f"[{sub_id}] 字节数与音频时长均通过，转录已保存加密检查点", flush=True)
+        return text, segments
+
+    def _official_video_fallback(self, sub_id):
+        text, segments = super()._official_video_fallback(sub_id)
+        if text is not None:
+            self.local.save_meta(self._db, sub_id, "segments", segments)
+            self.local.save_meta(self._db, sub_id, "audio", {
+                "asr_backend": "official",
+                "transcript_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                "recovery": "video_unavailable",
+            })
+            self.checkpoint()
         return text, segments
 
     def _summarize(self, sub_id, course_title, transcript, transcript_segments):

@@ -139,8 +139,8 @@
     const scans = parsePauses(db.getMeta('auto_check_pause_scans'));
     const progress = new Map(query(`SELECT course_id, COUNT(*) total_count,
       SUM(TRIM(COALESCE(summary,'')) != '') summary_count,
-      SUM(processed_at IS NULL AND COALESCE(error_count,0) < 3) pending_count,
-      SUM(processed_at IS NULL AND COALESCE(error_count,0) >= 3) blocked_count
+      SUM(processed_at IS NULL AND (COALESCE(error_count,0) < 3 OR error_stage IN ('no_video','video','video_access'))) pending_count,
+      SUM(processed_at IS NULL AND COALESCE(error_count,0) >= 3 AND COALESCE(error_stage,'') NOT IN ('no_video','video','video_access')) blocked_count
       FROM lectures GROUP BY course_id`).map(row => [String(row.course_id), row]));
     const courses = db.getCoursesByIds(courseIds).map(course => ({...course, ...progress.get(String(course.course_id)),
       auto_check_paused: Object.hasOwn(pauses, String(course.course_id)),

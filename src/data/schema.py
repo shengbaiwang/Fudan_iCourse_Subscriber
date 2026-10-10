@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS lectures (
     processed_at TEXT, emailed_at TEXT,
     error_msg TEXT, error_count INTEGER DEFAULT 0,
     error_stage TEXT, summary_model TEXT,
-    ai_title TEXT,
+    ai_title TEXT, retry_after INTEGER,
     FOREIGN KEY (course_id) REFERENCES courses(course_id)
 );
 -- A lecture's current summary remains on ``lectures`` for compatibility
@@ -96,6 +96,7 @@ LECTURES_MIGRATION_COLUMNS: list[tuple[str, str]] = [
     # AI-generated note title (src/ai/title.py + Summarizer.generate_title).
     # NULL on older databases — display falls back to local derivation.
     ("ai_title", "TEXT"),
+    ("retry_after", "INTEGER"),
 ]
 
 # Columns added to ``ppt_pages`` after its initial shape shipped.

@@ -81,7 +81,11 @@ def download_media(client, course_id: str, sub_id: str, directory: Path, write_p
                     if not signed_url or time.monotonic() - signed_at >= SIGNATURE_TTL:
                         signed_url = client.get_video_url(course_id, sub_id)
                         if not signed_url:
-                            raise ValueError("无法获取媒体签名")
+                            from src.api.icourse import VideoNotReadyError
+                            raise VideoNotReadyError("平台尚未提供可播放的录播地址；将定期自动复查")
+                        if urlsplit(signed_url).path.lower().endswith(".m3u8"):
+                            from src.api.icourse import VideoLookupError
+                            raise VideoLookupError("平台返回 HLS 录播，本机分块取流暂不支持此格式")
                         signed_at = time.monotonic()
                         state["signature_count"] += 1
                     source = urlsplit(signed_url)
@@ -173,10 +177,13 @@ def download_media(client, course_id: str, sub_id: str, directory: Path, write_p
                     failure = None
                     break
                 except Exception as exc:
+                    from src.api.icourse import VideoAccessError, VideoLookupError, VideoNotReadyError
                     stream.truncate(offset)
                     stream.seek(offset)
                     failure = exc
                     if isinstance(exc, InterruptedError):
+                        raise
+                    if isinstance(exc, (VideoAccessError, VideoLookupError, VideoNotReadyError)):
                         raise
                     if attempt < 2:
                         time.sleep(2 * (attempt + 1))

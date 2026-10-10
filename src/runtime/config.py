@@ -182,6 +182,7 @@ USE_OFFICIAL_TRANSCRIPT = (
     os.environ.get("USE_OFFICIAL_TRANSCRIPT", "").strip().lower()
     in ("1", "true", "yes")
 )
+VIDEO_RECHECK_NOW = os.environ.get("VIDEO_RECHECK_NOW", "").strip().lower() in {"1", "true", "yes"}
 
 # 监控的课程 ID 列表
 COURSE_IDS = [

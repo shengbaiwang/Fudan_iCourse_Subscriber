@@ -3,6 +3,7 @@
 import os
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 
 from src.runtime import config
@@ -219,29 +220,43 @@ class Database:
         with self._lock:
             rows = self.conn.execute(
                 "SELECT sub_id FROM lectures WHERE course_id = ? "
-                "AND processed_at IS NULL AND error_count >= ?",
+                "AND processed_at IS NULL AND error_count >= ? "
+                "AND COALESCE(error_stage, '') NOT IN ('no_video', 'video', 'video_access')",
                 (course_id, max_errors),
             ).fetchall()
         return {row["sub_id"] for row in rows}
 
+    def get_deferred_sub_ids(self, course_id: str) -> set[str]:
+        """Recordings waiting for the next bounded availability check."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT sub_id FROM lectures WHERE course_id = ? "
+                "AND processed_at IS NULL AND retry_after > ?",
+                (course_id, int(time.time())),
+            ).fetchall()
+        return {row["sub_id"] for row in rows}
+
     def get_unprocessed_lectures(self, course_id: str | None = None,
-                                  max_errors: int = 3) -> list[dict]:
+                                  max_errors: int = 3, *, include_deferred: bool = False) -> list[dict]:
         """Return lectures that need (re-)processing.
 
-        Only returns lectures whose ``error_count`` is below *max_errors* —
-        a permanently-failing lecture (e.g. ``get-sub-info`` RuntimeError
-        for a removed recording) is abandoned after that many attempts
-        rather than clogging every workflow run.
+        Processing failures stop after *max_errors*. Missing recordings and
+        video API failures keep retrying with a cooldown, including legacy
+        ``no_video`` rows that already exceeded the old three-attempt limit.
         """
         query = (
             "SELECT * FROM lectures"
             " WHERE processed_at IS NULL"
-            "   AND (error_count IS NULL OR error_count < ?)"
+            "   AND (error_count IS NULL OR error_count < ?"
+            "        OR error_stage IN ('no_video', 'video', 'video_access'))"
         )
         params: tuple = (max_errors,)
+        if not include_deferred:
+            query += " AND (retry_after IS NULL OR retry_after <= ?)"
+            params += (int(time.time()),)
         if course_id:
             query += " AND course_id = ?"
-            params = (max_errors, course_id)
+            params += (course_id,)
         with self._lock:
             rows = self.conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
@@ -263,12 +278,24 @@ class Database:
     def update_error(self, sub_id: str, stage: str, error_msg: str):
         """Record a processing error for a lecture."""
         with self._lock, self.conn:
+            row = self.conn.execute(
+                "SELECT error_count, error_stage FROM lectures WHERE sub_id = ?", (sub_id,),
+            ).fetchone()
+            attempts = (row[0] or 0) + 1 if row and row[1] == stage else 1
+            # Missing recordings may be published much later. Keep checking,
+            # but avoid doing network/OCR work on every manual or daily run.
+            delays = {"no_video": (6 * 3600, 86400, 7 * 86400),
+                      "video": (3600, 4 * 3600, 86400),
+                      "video_access": (7 * 86400,) * 3}
+            retry_after = (int(time.time()) + delays[stage][min(attempts - 1, 2)]
+                           if stage in delays else None)
             self.conn.execute(
                 """UPDATE lectures
                    SET error_stage = ?, error_msg = ?,
-                       error_count = COALESCE(error_count, 0) + 1
+                       error_count = ?,
+                       retry_after = ?
                    WHERE sub_id = ?""",
-                (stage, error_msg, sub_id),
+                (stage, error_msg, attempts, retry_after, sub_id),
             )
 
     def clear_error(self, sub_id: str):
@@ -276,7 +303,8 @@ class Database:
         with self._lock, self.conn:
             self.conn.execute(
                 """UPDATE lectures
-                   SET error_stage = NULL, error_msg = NULL, error_count = 0
+                   SET error_stage = NULL, error_msg = NULL, error_count = 0,
+                       retry_after = NULL
                    WHERE sub_id = ?""",
                 (sub_id,),
             )

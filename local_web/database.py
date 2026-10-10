@@ -353,10 +353,14 @@ class DatabaseManager:
             has_ai_title = db.execute(
                 "SELECT 1 FROM pragma_table_info('lectures') WHERE name = 'ai_title'"
             ).fetchone()
+            has_retry_after = db.execute(
+                "SELECT 1 FROM pragma_table_info('lectures') WHERE name = 'retry_after'"
+            ).fetchone()
             sql = f"""
                 SELECT sub_id, course_id, sub_title, date, processed_at,
                        error_stage, error_msg, summary_model, summary,
                        {"ai_title" if has_ai_title else "NULL AS ai_title"},
+                       {"retry_after" if has_retry_after else "NULL AS retry_after"},
                        CASE WHEN summary IS NOT NULL THEN 1 ELSE 0 END AS has_summary,
                        CASE WHEN TRIM(COALESCE(transcript, '')) != ''
                             THEN 1 ELSE 0 END AS transcript_available
@@ -677,8 +681,8 @@ class DatabaseManager:
             rows = db.execute("""
                 SELECT course_id, COUNT(*) AS total_count,
                     SUM(TRIM(COALESCE(summary, '')) != '') AS summary_count,
-                    SUM(processed_at IS NULL AND COALESCE(error_count, 0) < 3) AS pending_count,
-                    SUM(processed_at IS NULL AND COALESCE(error_count, 0) >= 3) AS blocked_count
+                    SUM(processed_at IS NULL AND (COALESCE(error_count, 0) < 3 OR error_stage IN ('no_video', 'video', 'video_access'))) AS pending_count,
+                    SUM(processed_at IS NULL AND COALESCE(error_count, 0) >= 3 AND COALESCE(error_stage, '') NOT IN ('no_video', 'video', 'video_access')) AS blocked_count
                 FROM lectures GROUP BY course_id
             """).fetchall()
         result = {str(row["course_id"]): dict(row) for row in rows}
