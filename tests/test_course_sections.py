@@ -8,6 +8,13 @@ from fastapi import HTTPException
 from local_web.state import CourseZoneStore, RuntimeState, SettingsStore
 from local_web.server import create_app, CourseSectionsRequest, CourseZoneRequest
 from local_web.database import DatabaseManager
+from src.data.database import Database
+from src.data.departments import normalize_department, normalize_catalog_departments
+from src.data.schema import SCHEMA_SQL
+import sqlite3
+import subprocess
+from scripts.merge_db import merge
+from src.data.sharder import shard_database, reassemble_database
 
 
 class EmptyKeychain:
@@ -27,6 +34,96 @@ B = {"id": "section-" + "b" * 32, "name": "写作材料"}
 def test_new_library_has_no_presets(tmp_path):
     state = runtime(tmp_path)
     assert state.course_organization() == {"zones": {}, "sections": [], "default_zone": "unassigned", "revision": 0}
+
+
+DEPARTMENT_CASES = [
+    (None, ""), ("", ""), (" \t　", ""),
+    ("016 哲学学院", "哲学学院"), ("哲学学院", "哲学学院"),
+    ("016 016 哲学学院", "哲学学院"),
+    (" 014\t历史学系　", "历史学系"), ("068\u00a0经济学院", "经济学院"),
+    ("０６８　经济学院", "经济学院"), ("305 计算与智能创新学院", "计算与智能创新学院"),
+    ("复旦大学", "复旦大学"), ("016", "016"),
+    ("2026 研究中心", "2026 研究中心"), ("016哲学学院", "016哲学学院"),
+    ("中国语言文学系", "中国语言文学系"), ("外国语言文学学院", "外国语言文学学院"),
+]
+
+
+def test_department_rules_match_browser_and_are_idempotent():
+    # One set of cases prevents Python/JS rules drifting apart.
+    source = Path(__file__).resolve().parents[1] / "local_web/static/departments.js"
+    output = subprocess.check_output([
+        "node", "-e",
+        "global.window = {}; require(process.argv[1]); "
+        "console.log(JSON.stringify(JSON.parse(process.argv[2]).map(window.ICS.normalizeDepartment)));",
+        str(source), json.dumps([raw for raw, _ in DEPARTMENT_CASES]),
+    ], text=True)
+    assert json.loads(output) == [expected for _, expected in DEPARTMENT_CASES]
+    for raw, expected in DEPARTMENT_CASES:
+        assert normalize_department(raw) == expected
+        assert normalize_department(expected) == expected
+
+
+def test_old_catalog_repair_and_future_imports(tmp_path):
+    path = tmp_path / "library.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(SCHEMA_SQL)
+        conn.execute("INSERT INTO all_courses VALUES ('1', '2026-春', '课程', '教师', '016 哲学学院', 'original')")
+    db = Database(str(path))
+    try:
+        assert db.list_all_courses()[0]["dept"] == "哲学学院"
+        assert db.list_all_courses()[0]["last_seen_at"] == "original"
+        db.upsert_all_courses_for_term("2026-秋", [
+            {"course_id": "2", "dept": "016 哲学学院"},
+            {"course_id": "3", "dept": "哲学学院"},
+        ])
+        normalize_catalog_departments(db.conn)
+        assert len(db.list_all_courses()) == 3
+        assert {row["dept"] for row in db.list_all_courses()} == {"哲学学院"}
+        assert db.conn.execute("SELECT COUNT(*) FROM all_courses WHERE dept = '哲学学院'").fetchone()[0] == 3
+    finally:
+        db.conn.close()
+
+
+def test_read_only_legacy_library_returns_canonical_departments(tmp_path):
+    manager = DatabaseManager(tmp_path)
+    try:
+        with sqlite3.connect(manager.db_path) as conn:
+            conn.executescript(SCHEMA_SQL)
+            conn.execute("INSERT INTO courses VALUES ('1', '课程', '教师')")
+            conn.execute("INSERT INTO all_courses VALUES ('1', '2026-秋', '课程', '教师', '016 哲学学院', 'original')")
+        assert manager.courses()[0]["dept"] == "哲学学院"
+        assert manager.subscription_courses(["1"])[0]["dept"] == "哲学学院"
+        catalog = manager.subscription_catalog("哲学学院")
+        assert catalog["total"] == 1
+        assert catalog["courses"][0]["dept"] == "哲学学院"
+        # The read-only API must work without rewriting the encrypted cache.
+        with sqlite3.connect(manager.db_path) as conn:
+            assert conn.execute("SELECT dept FROM all_courses").fetchone()[0] == "016 哲学学院"
+    finally:
+        manager.close()
+
+
+def test_merge_and_old_shards_cannot_restore_duplicate_departments(tmp_path):
+    local, remote = tmp_path / "local.db", tmp_path / "remote.db"
+    for path, cid, dept in [(local, "1", "014 历史学系"), (remote, "2", "历史学系")]:
+        with sqlite3.connect(path) as conn:
+            conn.executescript(SCHEMA_SQL)
+            conn.execute("INSERT INTO courses VALUES (?, '课程', '教师')", (cid,))
+            conn.execute("INSERT INTO all_courses VALUES (?, '2026-秋', '课程', '教师', ?, 'original')", (cid, dept))
+    merge(str(local), str(remote))
+    with sqlite3.connect(remote) as conn:
+        assert conn.execute("SELECT DISTINCT dept FROM all_courses").fetchall() == [("历史学系",)]
+        assert conn.execute("SELECT COUNT(*) FROM courses").fetchone()[0] == 2
+        # Simulate a catalog published by an old client.
+        conn.execute("UPDATE all_courses SET dept = '014 历史学系' WHERE course_id = '1'")
+    shard_dir = tmp_path / "sharded"
+    index = shard_database(str(remote), str(shard_dir), "test-password")
+    output = tmp_path / "restored.db"
+    reassemble_database(index, str(shard_dir / "shards"), str(output), "test-password")
+    with sqlite3.connect(output) as conn:
+        assert conn.execute("SELECT DISTINCT dept FROM all_courses").fetchall() == [("历史学系",)]
+        assert conn.execute("SELECT COUNT(*) FROM all_courses").fetchone()[0] == 2
+        assert conn.execute("SELECT DISTINCT last_seen_at FROM all_courses").fetchall() == [("original",)]
 
 
 @pytest.mark.parametrize('wrapped', [False, True])

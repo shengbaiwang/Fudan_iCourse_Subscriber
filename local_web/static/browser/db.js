@@ -52,6 +52,14 @@ async function _initFromBytes(dbBytes) {
     "sub_id TEXT NOT NULL, model TEXT NOT NULL, summary TEXT NOT NULL, " +
     "generated_at TEXT NOT NULL, PRIMARY KEY (sub_id, model, generated_at))"
   );
+  _normalizeCatalogDepartments();
+}
+
+function _normalizeCatalogDepartments() {
+  // Repair legacy/cache/shard data before any DISTINCT, count or filtering.
+  if (!_queryAll("PRAGMA table_info(all_courses)").length) return;
+  _db.create_function("normalize_department", window.ICS.normalizeDepartment);
+  _db.exec("UPDATE all_courses SET dept = normalize_department(dept) WHERE dept IS NOT NULL");
 }
 
 async function _initEmpty() {
@@ -140,6 +148,7 @@ async function _attachShard(shardBytes) {
     _copyRows(shard, _db, "ppt_pages");
     _copyRows(shard, _db, "all_courses");
     if (shardTables["meta"]) _copyRows(shard, _db, "meta");
+    _normalizeCatalogDepartments();
   } finally {
     shard.close();
   }
@@ -356,7 +365,7 @@ function _buildCatalogWhere(filters) {
   }
   if (filters.depts && filters.depts.length) {
     clauses.push("dept IN (" + filters.depts.map(function () { return "?"; }).join(",") + ")");
-    for (var j = 0; j < filters.depts.length; j++) params.push(filters.depts[j]);
+    for (var j = 0; j < filters.depts.length; j++) params.push(window.ICS.normalizeDepartment(filters.depts[j]));
   }
   if (filters.title && filters.title.trim()) {
     clauses.push("title LIKE ?");

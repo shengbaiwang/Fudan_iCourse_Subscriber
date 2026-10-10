@@ -6,6 +6,7 @@ import threading
 from datetime import datetime, timezone
 
 from src.runtime import config
+from src.data.departments import normalize_catalog_departments, normalize_department
 from src.data.schema import (
     LECTURES_MIGRATION_COLUMNS,
     PPT_PAGES_MIGRATION_COLUMNS,
@@ -45,6 +46,7 @@ class Database:
     def _init_tables(self):
         with self._lock, self.conn:
             self.conn.executescript(SCHEMA_SQL)
+            normalize_catalog_departments(self.conn)
 
             existing_lectures = {
                 row[1]
@@ -145,7 +147,7 @@ class Database:
                           dept=excluded.dept,
                           last_seen_at=excluded.last_seen_at""",
                     (str(cid), term,
-                     r.get("title"), r.get("teacher"), r.get("dept"), now),
+                     r.get("title"), r.get("teacher"), normalize_department(r.get("dept")), now),
                 )
                 upserted += 1
         return deleted, upserted

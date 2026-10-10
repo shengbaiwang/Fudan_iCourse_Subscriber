@@ -57,7 +57,10 @@ function loadCourseFilter() {
   try {
     const f = JSON.parse(localStorage.getItem(COURSE_FILTER_KEY));
     if (f && ["all", "star", "zone", "term", "dept"].includes(f.kind)) {
-      return {kind: f.kind, value: String(f.value || "")};
+      const value = f.kind === "dept" ? window.ICS.normalizeDepartment(f.value) : String(f.value || "");
+      const filter = {kind: f.kind, value};
+      if (value !== f.value) localStorage.setItem(COURSE_FILTER_KEY, JSON.stringify(filter));
+      return filter;
     }
   } catch (_) {}
   return {kind: "all", value: ""};
@@ -450,7 +453,7 @@ function courseFilterCaption() {
 }
 
 function selectCourseFilter(kind, value) {
-  courseFilter = {kind, value: value || ""};
+  courseFilter = {kind, value: kind === "dept" ? window.ICS.normalizeDepartment(value) : value || ""};
   localStorage.setItem(COURSE_FILTER_KEY, JSON.stringify(courseFilter));
   closeCourseDrawer();
   renderCourseSidebar();
@@ -716,7 +719,9 @@ async function moveCourseToZone(courseId, zone, select) {
 }
 
 async function loadCourses() {
-  courseRows = await api("/api/local/courses");
+  courseRows = (await api("/api/local/courses")).map(course => ({
+    ...course, dept: window.ICS.normalizeDepartment(course.dept),
+  }));
   courseRows.sort((a, b) => Number(starredCourses.has(String(b.course_id))) - Number(starredCourses.has(String(a.course_id))));
   const list = $("#course-list");
   list.replaceChildren();

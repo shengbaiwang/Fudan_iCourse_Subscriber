@@ -669,7 +669,9 @@ def reassemble_database(
         # version rows are left untouched), so the first selected-model rerun
         # immediately has both versions available for comparison.
         from src.data.schema import backfill_summary_versions
+        from src.data.departments import normalize_catalog_departments
         backfill_summary_versions(target, "main")
+        normalize_catalog_departments(target)
         target.commit()
     finally:
         target.close()

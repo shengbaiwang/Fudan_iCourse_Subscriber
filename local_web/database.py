@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from src.data.crypto_box import decrypt, derive_new_password, encrypt, is_json_obj, is_sqlite
+from src.data.departments import normalize_department
 from src.data.sharder import reassemble_database
 
 from .github_client import DataManifest, GitHubClient
@@ -279,6 +280,7 @@ class DatabaseManager:
         uri = f"file:{self.db_path}?mode=ro"
         connection = sqlite3.connect(uri, uri=True, timeout=10)
         connection.row_factory = sqlite3.Row
+        connection.create_function("normalize_department", 1, normalize_department, deterministic=True)
         return connection
 
     def stats(self) -> dict[str, Any]:
@@ -312,7 +314,7 @@ class DatabaseManager:
                        ORDER BY ac.term DESC LIMIT 1
                    ), '') AS term,
                    COALESCE((
-                       SELECT ac.dept FROM all_courses ac
+                       SELECT normalize_department(ac.dept) FROM all_courses ac
                        WHERE ac.course_id = c.course_id
                        ORDER BY ac.term DESC LIMIT 1
                    ), '') AS dept,
@@ -677,7 +679,7 @@ class DatabaseManager:
         page_size = max(1, min(limit, 200))
         needle = f"%{query.strip()}%"
         clauses = [
-            "(title LIKE ? OR teacher LIKE ? OR dept LIKE ? OR course_id LIKE ?)",
+            "(title LIKE ? OR teacher LIKE ? OR normalize_department(dept) LIKE ? OR course_id LIKE ?)",
         ]
         params: list[Any] = [needle, needle, needle, needle]
         if term.strip():
@@ -685,7 +687,7 @@ class DatabaseManager:
             params.append(term.strip())
         where = ' AND '.join(clauses)
         sql = f"""
-            SELECT course_id, term, title, teacher, dept
+            SELECT course_id, term, title, teacher, normalize_department(dept) AS dept
             FROM all_courses
             WHERE {where}
             ORDER BY term DESC, title COLLATE NOCASE, course_id
@@ -723,7 +725,7 @@ class DatabaseManager:
                    COALESCE(catalog.term, '') AS term,
                    COALESCE(catalog.title, courses.title, requested.course_id) AS title,
                    COALESCE(catalog.teacher, courses.teacher, '') AS teacher,
-                   COALESCE(catalog.dept, '') AS dept
+                   normalize_department(catalog.dept) AS dept
             FROM (SELECT ? AS course_id) AS requested
             LEFT JOIN catalog ON catalog.course_id = requested.course_id AND catalog.ranking = 1
             LEFT JOIN courses ON courses.course_id = requested.course_id

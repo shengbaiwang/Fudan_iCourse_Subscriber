@@ -11,6 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.data.departments import normalize_catalog_departments
 from src.data.schema import (
     LECTURES_MIGRATION_COLUMNS,
     PPT_PAGES_MIGRATION_COLUMNS,
@@ -23,6 +24,7 @@ from src.data.schema import (
 def _ensure_schema(conn: sqlite3.Connection):
     """Create tables and migration columns if missing in remote DB."""
     conn.executescript(SCHEMA_SQL)
+    normalize_catalog_departments(conn)
     existing_lectures = {r[1] for r in conn.execute("PRAGMA table_info(lectures)")}
     for col, typedef in LECTURES_MIGRATION_COLUMNS:
         if col not in existing_lectures:
@@ -46,6 +48,7 @@ def _migrate_attached(conn: sqlite3.Connection, schema: str):
     those statements crash with "no such column".  ALTER TABLE works on
     attached schemas, so pad the missing columns with NULLs first.
     """
+    normalize_catalog_departments(conn, schema)
     for table, cols in (
         ("lectures", LECTURES_MIGRATION_COLUMNS),
         ("ppt_pages", PPT_PAGES_MIGRATION_COLUMNS),

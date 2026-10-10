@@ -22,7 +22,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   const database = new SQL.Database();
   database.exec(schemaContext.window.ICS.schema.SCHEMA_SQL);
   database.run("INSERT INTO courses VALUES ('1', '现代思想史', '陈老师'), ('2', '科学与社会', '李老师')");
-  database.run("INSERT INTO all_courses(course_id,term,title,teacher,dept) VALUES ('1','2026-秋','现代思想史','陈老师','历史系'), ('2','2026-秋','科学与社会','李老师','社会学院')");
+  database.run("INSERT INTO all_courses(course_id,term,title,teacher,dept) VALUES ('1','2026-秋','现代思想史','陈老师','014 历史学系'), ('2','2026-秋','科学与社会','李老师','历史学系')");
   const catalogInsert = database.prepare('INSERT INTO all_courses(course_id,term,title,teacher,dept) VALUES (?, ?, ?, ?, ?)');
   for (let i = 0; i < 207; i++) catalogInsert.run([
     `catalog-${String(i).padStart(3,'0')}`, i < 205 ? '2026-秋' : '2026-春', '目录课程', '目录教师', '目录学院',
@@ -56,7 +56,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       return result;
     } finally { statement.free(); }
   };
-  const courses = rows("SELECT c.*,COUNT(l.sub_id) total_count,SUM(l.summary IS NOT NULL) summary_count FROM courses c LEFT JOIN lectures l USING(course_id) GROUP BY c.course_id");
+  const courses = rows("SELECT c.*,ac.term,ac.dept,COUNT(l.sub_id) total_count,SUM(l.summary IS NOT NULL) summary_count FROM courses c LEFT JOIN lectures l USING(course_id) LEFT JOIN all_courses ac USING(course_id) GROUP BY c.course_id");
   const lectures = rows("SELECT *,summary IS NOT NULL has_summary,transcript IS NOT NULL transcript_available FROM lectures WHERE course_id='1'");
   const lecture = {...rows("SELECT l.*,c.title course_title,c.teacher FROM lectures l JOIN courses c USING(course_id) WHERE sub_id='10'")[0],summary_versions:rows("SELECT * FROM summary_versions"),ppt_pages:rows("SELECT * FROM ppt_pages")};
   let sections = [{id:'study', name:'学习区'}];
@@ -160,6 +160,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       const errors=[];
       page.on('pageerror', error => errors.push(error.message));
       page.on('dialog', dialog=>dialog.accept());
+      await page.addInitScript(() => localStorage.setItem('icourse-local-course-filter', JSON.stringify({kind:'dept',value:'014 历史学系'})));
       await page.goto(`${origin}/${mode}/`);
       if(mode==='fork') {
         await page.locator('#setup:not(.hidden)').waitFor();
@@ -168,6 +169,19 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       }
       await page.locator('.course-card').first().waitFor();
       assert.equal(await page.locator('.course-card').count(),2);
+      const dept = page.locator('#course-sidebar [data-filter-kind="dept"][data-filter-value="历史学系"]');
+      assert.equal(await dept.count(), 1);
+      assert.equal(await dept.locator('.sidebar-count').textContent(), '2');
+      assert.equal(await dept.getAttribute('aria-current'), 'page');
+      assert.equal(await page.locator('#course-sidebar [data-filter-value="014 历史学系"]').count(), 0);
+      assert.match(await page.locator('#course-filter-caption').textContent(), /历史学系 · 2 门/);
+      assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('icourse-local-course-filter')).value), '历史学系');
+      if (mode === 'fork') {
+        assert.equal(await page.evaluate(() => window.ICS.db.getAllCoursesDepts().filter(name => name.includes('历史学系')).join(',')), '历史学系');
+        assert.equal(await page.evaluate(() => window.ICS.db.countAllCourses({depts:['014 历史学系']})), 2);
+        assert.equal(await page.evaluate(() => window.ICS.db.queryAll("SELECT COUNT(*) n FROM all_courses WHERE dept = '014 历史学系'")[0].n), 0);
+      }
+      await page.locator('#course-sidebar [data-filter-kind="all"]').click();
       assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
       if (mode === 'fork') await page.evaluate(async () => { await api('/api/local/course-sections', {method:'PUT', body:JSON.stringify({sections:[{id:'study',name:'学习区'}],revision:0})}); await loadCourseZones(); await loadCourses(); });
       await page.locator('.course-card').filter({hasText:'现代思想史'}).locator('select').selectOption('study');
