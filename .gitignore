@@ -22,6 +22,7 @@ silero_vad.onnx
 vosk-model-*/
 
 # IDE & misc
+.DS_Store
 .vscode/
 .idea/
 .playwright-mcp/
