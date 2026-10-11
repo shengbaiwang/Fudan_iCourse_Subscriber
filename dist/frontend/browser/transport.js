@@ -95,14 +95,27 @@
     const courseIds = saved === null ? ids((db.getMeta('subscribed_course_ids') || db.getMeta('course_ids') || '').split(',')) : saved;
     const pauses = readPreference('auto-check-pauses', null) ?? parsePauses(db.getMeta('auto_check_pauses'));
     const scans = parsePauses(db.getMeta('auto_check_pause_scans'));
+    const finished = parsePauses(db.getMeta('auto_check_finished_terms'));
+    const today = window.ICS.courseToday();
     const progress = new Map(query(`SELECT course_id, COUNT(*) total_count,
-      SUM(TRIM(COALESCE(summary,'')) != '') summary_count,
+      SUM(TRIM(COALESCE(summary,''), char(9)||char(10)||char(13)||' ') != '') summary_count,
+      SUM(NULLIF(processed_at,'') IS NOT NULL AND TRIM(COALESCE(summary,''), char(9)||char(10)||char(13)||' ') != '') ready_count,
+      MAX(date) latest_date,
+      SUM(date(date) IS NULL OR date(date) != date) invalid_date_count,
       SUM(processed_at IS NULL AND (COALESCE(error_count,0) < 3 OR error_stage IN ('no_video','video','video_access'))) pending_count,
       SUM(processed_at IS NULL AND COALESCE(error_count,0) >= 3 AND COALESCE(error_stage,'') NOT IN ('no_video','video','video_access')) blocked_count
       FROM lectures GROUP BY course_id`).map(row => [String(row.course_id), row]));
-    const courses = db.getCoursesByIds(courseIds).map(course => ({...course, ...progress.get(String(course.course_id)),
-      auto_check_paused: Object.hasOwn(pauses, String(course.course_id)),
-      pause_scan_pending: Object.hasOwn(pauses, String(course.course_id)) && scans[course.course_id] !== pauses[course.course_id]}));
+    const courses = db.getCoursesByIds(courseIds).map(course => {
+      const id = String(course.course_id), status = progress.get(id) || {};
+      const end = window.ICS.termEndDate(course.term);
+      const ended = !!end && today >= end;
+      const complete = !!status.total_count && status.ready_count === status.total_count;
+      return {...course, ...status, term_end_date:end, term_ended:ended, notes_complete:complete,
+        auto_check_stopped:ended && complete && !!status.latest_date && status.latest_date <= today
+          && !status.invalid_date_count && finished[id] === end,
+        auto_check_paused:Object.hasOwn(pauses, id),
+        pause_scan_pending:Object.hasOwn(pauses, id) && scans[id] !== pauses[id]};
+    });
     return {course_ids: courseIds, courses, paused_course_ids:courseIds.filter(id => Object.hasOwn(pauses,id)),
       source: saved === null ? 'data-snapshot' : 'browser-save'};
   }
@@ -367,6 +380,18 @@
         savePreference('lecture-names', names);
       }
       return {names};
+    }
+    if (route === '/lecture-holidays') {
+      const values = new Set(ids(readPreference('lecture-holidays', [])));
+      if (method === 'PUT') {
+        const id = String(payload.sub_id || '').trim();
+        if (!id || id.length > 100 || typeof payload.holiday !== 'boolean') throw new Error('课次放假标记无效');
+        if (!ready) throw new Error('请先检查更新，打开资料库');
+        if (!db.getLecture(id)) throw new Error('课次不存在');
+        if (payload.holiday) values.add(id); else values.delete(id);
+        savePreference('lecture-holidays', [...values]);
+      }
+      return {sub_ids: [...values].sort()};
     }
     if (route === '/course-zones' || route === '/course-sections') {
       const legacy = readPreference('zones', {});

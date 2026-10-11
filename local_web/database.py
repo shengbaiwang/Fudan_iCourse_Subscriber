@@ -677,21 +677,9 @@ class DatabaseManager:
         return parse_auto_check_pauses(row[0] if row else None)
 
     def subscription_check_status(self, pauses: dict[str, str]) -> dict[str, dict]:
-        from src.runtime.auto_check import PAUSE_SCANS_META, parse_auto_check_pauses
+        from src.runtime.auto_check import load_auto_check_status
         with closing(self._connect()) as db:
-            row = db.execute("SELECT value FROM meta WHERE key=?", (PAUSE_SCANS_META,)).fetchone()
-            scans = parse_auto_check_pauses(row[0] if row else None)
-            rows = db.execute("""
-                SELECT course_id, COUNT(*) AS total_count,
-                    SUM(TRIM(COALESCE(summary, '')) != '') AS summary_count,
-                    SUM(processed_at IS NULL AND (COALESCE(error_count, 0) < 3 OR error_stage IN ('no_video', 'video', 'video_access'))) AS pending_count,
-                    SUM(processed_at IS NULL AND COALESCE(error_count, 0) >= 3 AND COALESCE(error_stage, '') NOT IN ('no_video', 'video', 'video_access')) AS blocked_count
-                FROM lectures GROUP BY course_id
-            """).fetchall()
-        result = {str(row["course_id"]): dict(row) for row in rows}
-        for cid, token in pauses.items():
-            result.setdefault(cid, {}).update(pause_scan_pending=scans.get(cid) != token)
-        return result
+            return load_auto_check_status(db, pauses)
 
     def subscription_terms(self) -> list[str]:
         with closing(self._connect()) as db:

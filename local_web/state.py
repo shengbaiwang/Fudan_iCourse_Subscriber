@@ -389,6 +389,38 @@ class CourseZoneStore:
         temp.replace(self.path)
 
 
+class LectureHolidayStore:
+    """Keep manual holiday labels separate from synced course content."""
+
+    def __init__(self, directory: Path):
+        self.path = directory / "lecture-holidays.json"
+
+    def _document(self) -> dict:
+        try:
+            raw = json.loads(self.path.read_text("utf-8"))
+            return raw if isinstance(raw, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    @staticmethod
+    def _scope(settings: RepositorySettings) -> str:
+        return f"{settings.owner}/{settings.repo}/{settings.branch}"
+
+    def load(self, settings: RepositorySettings) -> set[str]:
+        values = self._document().get(self._scope(settings), [])
+        return {value.strip() for value in values
+                if isinstance(value, str) and 0 < len(value.strip()) <= 100} if isinstance(values, list) else set()
+
+    def save(self, settings: RepositorySettings, sub_ids: set[str]) -> None:
+        document = self._document()
+        document[self._scope(settings)] = sorted(sub_ids)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.path.with_suffix(".tmp")
+        temp.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temp, 0o600)
+        temp.replace(self.path)
+
+
 class LectureNameStore:
     """Persist local-only custom note names (empty name = back to auto naming)."""
 
@@ -486,6 +518,8 @@ class RuntimeState:
         )
         self.credential_store = credential_store or MacOSKeychainStore()
         self.settings = self.store.load()
+        self.lecture_holiday_store = LectureHolidayStore(self.store.directory)
+        self.lecture_holidays = self.lecture_holiday_store.load(self.settings)
         self.obsidian_settings = self.obsidian_store.load()
         self.subscription_ids = self.subscription_store.load()
         self.auto_check_pauses = self.subscription_store.load_auto_check_pauses()
@@ -520,6 +554,7 @@ class RuntimeState:
             raise ValueError("学号和 UIS 密码不能为空")
         with self.lock:
             self.settings = settings
+            self.lecture_holidays = self.lecture_holiday_store.load(settings)
             credentials = RuntimeCredentials(
                 token=resolved_token,
                 stuid=stuid.strip(),
@@ -619,3 +654,16 @@ class RuntimeState:
                 names.pop(normalized_id, None)
             self.lecture_names = names
             self.lecture_name_store.save(names)
+
+    def save_lecture_holiday(self, sub_id: str, holiday: bool) -> None:
+        normalized_id = sub_id.strip()
+        if not normalized_id or len(normalized_id) > 100 or type(holiday) is not bool:
+            raise ValueError("课次放假标记无效")
+        with self.lock:
+            values = set(self.lecture_holidays)
+            if holiday:
+                values.add(normalized_id)
+            else:
+                values.discard(normalized_id)
+            self.lecture_holiday_store.save(self.settings, values)
+            self.lecture_holidays = values

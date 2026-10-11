@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data.departments import normalize_catalog_departments
-from src.runtime.auto_check import PAUSE_VARIABLE, PAUSE_SCANS_META, parse_auto_check_pauses
+from src.runtime.auto_check import FINISHED_TERMS_META, PAUSE_VARIABLE, PAUSE_SCANS_META, parse_auto_check_pauses
 from src.data.schema import (
     LECTURES_MIGRATION_COLUMNS,
     PPT_PAGES_MIGRATION_COLUMNS,
@@ -92,9 +92,19 @@ def merge(local_path: str, remote_path: str):
 
     try:
         with conn:
+            has_meta = conn.execute("SELECT 1 FROM local.sqlite_master WHERE type='table' AND name='meta'").fetchone()
+            # Keep final term discoveries through progress checkpoints and
+            # concurrent manual runs. Live note completeness still decides.
+            if has_meta:
+                local_row = conn.execute("SELECT value FROM local.meta WHERE key=?", (FINISHED_TERMS_META,)).fetchone()
+                remote_row = conn.execute("SELECT value FROM main.meta WHERE key=?", (FINISHED_TERMS_META,)).fetchone()
+                finished = parse_auto_check_pauses(remote_row[0] if remote_row else None)
+                for cid, end in parse_auto_check_pauses(local_row[0] if local_row else None).items():
+                    finished[cid] = max(end, finished.get(cid, end))
+                if finished:
+                    conn.execute("INSERT OR REPLACE INTO main.meta VALUES (?, ?)", (FINISHED_TERMS_META, json.dumps(finished)))
             # Final pause discoveries must survive every encrypted checkpoint.
-            if (PAUSE_VARIABLE in os.environ
-                    and conn.execute("SELECT 1 FROM local.sqlite_master WHERE type='table' AND name='meta'").fetchone()):
+            if PAUSE_VARIABLE in os.environ and has_meta:
                 expected = parse_auto_check_pauses(os.environ[PAUSE_VARIABLE])
                 local_row = conn.execute("SELECT value FROM local.meta WHERE key=?", (PAUSE_SCANS_META,)).fetchone()
                 remote_row = conn.execute("SELECT value FROM main.meta WHERE key=?", (PAUSE_SCANS_META,)).fetchone()

@@ -14,6 +14,18 @@ def run(*args):
     subprocess.run([str(arg) for arg in args], check=True, cwd=ROOT)
 
 
+def build_icon(resources, work):
+    iconset = work / 'Sea.iconset'
+    iconset.mkdir(exist_ok=True)
+    source = ROOT / 'local_web/static/branding/icourse-icon-1024.png'
+    for size in [16, 32, 128, 256, 512]:
+        for scale in [1, 2]:
+            suffix = '@2x' if scale == 2 else ''
+            run('sips', '-z', str(size * scale), str(size * scale), source,
+                '--out', iconset / f'icon_{size}x{size}{suffix}.png')
+    run('iconutil', '-c', 'icns', iconset, '-o', resources / 'Sea.icns')
+
+
 def build(skip_backend=False):
     output = ROOT / 'dist' / 'desktop'
     work = ROOT / 'dist' / 'desktop-build'
@@ -42,15 +54,7 @@ def build(skip_backend=False):
     run('swiftc', '-module-cache-path', str(work / 'swift-cache'), '-O',
         '-target', 'arm64-apple-macosx13.0', ROOT / 'desktop/SeaOfAbundance.swift',
         '-o', macos / 'SeaOfAbundance', '-framework', 'AppKit', '-framework', 'WebKit')
-    iconset = work / 'Sea.iconset'
-    iconset.mkdir(exist_ok=True)
-    source = ROOT / 'local_web/static/branding/icourse-icon-1024.png'
-    for size in [16, 32, 128, 256, 512]:
-        for scale in [1, 2]:
-            suffix = '@2x' if scale == 2 else ''
-            run('sips', '-z', str(size * scale), str(size * scale), source,
-                '--out', iconset / f'icon_{size}x{size}{suffix}.png')
-    run('iconutil', '-c', 'icns', iconset, '-o', resources / 'Sea.icns')
+    build_icon(resources, work)
     run('codesign', '--force', '--deep', '--sign', '-', app)
     run('codesign', '--verify', '--deep', '--strict', app)
     archive = output / '丰饶之海-macOS-arm64.zip'

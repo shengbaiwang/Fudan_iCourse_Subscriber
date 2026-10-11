@@ -1,6 +1,7 @@
 """Semester display names, independent of API codes and stored catalog keys."""
 
 import re
+from datetime import date
 
 _TERM = re.compile(
     r"([0-9]{4})\s*[-–—]\s*([0-9]{4})\s*(?:学年\s*)?"
@@ -37,3 +38,25 @@ def term_sort_key(value: str | None) -> str:
         return name
     rank = _RANK[match[3]]
     return f"{match[1]}-{match[2]}-{rank}"
+
+
+def term_end_date(value: str | None) -> date | None:
+    """Conservative calendar cutoffs when the catalog has no academic dates.
+
+    Wait until March for autumn, August for spring, September for summer.
+    Unknown terms remain active; lecture dates must also have passed.
+    """
+    name = normalize_term(value)
+    match = _SORT_TERM.fullmatch(name)
+    if match:
+        year = int(match[2])
+        season = match[3]
+    else:
+        match = re.fullmatch(r"([0-9]{4})\s*[-–—]?\s*([秋春暑])(?:季|期)?(?:学期)?", name)
+        if not match:
+            return None
+        year = int(match[1]) + (match[2] == "秋")
+        season = {"秋": "秋季", "春": "春季", "暑": "暑期"}[match[2]]
+    if not 1 <= year <= 9999:
+        return None
+    return date(year, {"秋季": 3, "春季": 8, "暑期": 9}[season], 1)

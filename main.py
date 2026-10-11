@@ -12,13 +12,14 @@ AudioDownloader.  This file does only orchestration:
 Anything more interesting belongs in one of ``src/*`` modules.
 """
 
-import datetime
 import json
 import time
 import traceback
 
 from src.runtime import config
-from src.runtime.auto_check import PAUSE_SCANS_META, parse_auto_check_pauses
+from src.runtime.auto_check import (
+    FINISHED_TERMS_META, PAUSE_SCANS_META, course_today, parse_auto_check_pauses,
+)
 from src.data.database import Database
 from src.api.icourse import ICourseClient
 from src.pipeline.lecture_runner import LectureRunner
@@ -78,8 +79,16 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
     out: list[tuple[str, str, dict]] = []
     pause_scans = parse_auto_check_pauses(db.read_meta(PAUSE_SCANS_META))
     pause_scans = {cid: token for cid, token in pause_scans.items() if cid in config.AUTO_CHECK_PAUSES}
+    automatic = config.AUTO_CHECK_ENABLED and not force_video_recheck
+    today = course_today()
+    statuses = db.auto_check_status(today=today) if automatic else {}
+    finished_terms = parse_auto_check_pauses(db.read_meta(FINISHED_TERMS_META))
     for course_id in config.COURSE_IDS:
         try:
+            if statuses.get(course_id, {}).get("auto_check_stopped"):
+                title = (db.get_course(course_id) or {}).get("title") or course_id
+                reporter.info(f"[Auto check] {title}: 学期已结束且笔记齐全，已自动停止检查。")
+                continue
             pause_token = config.AUTO_CHECK_PAUSES.get(course_id)
             if pause_token and pause_scans.get(course_id) == pause_token:
                 course = db.get_course(course_id) or {}
@@ -152,6 +161,15 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
                 db.write_meta(PAUSE_SCANS_META, json.dumps(pause_scans))
             elif pause_token:
                 reporter.info(f"[Auto check] {course_title}: {len(awaiting_playback)} 节录播尚未发布，继续核对直到可补齐。")
+            if automatic and lectures:
+                status = db.auto_check_status(today=today, course_id=course_id).get(course_id, {})
+                if status.get("term_ended") and all(
+                    lec.get("date") and lec["date"] <= today.isoformat() for lec in lectures
+                ):
+                    # A successful final discovery is retained. Completeness
+                    # is checked live, including deferred and exhausted rows.
+                    finished_terms[course_id] = status["term_end_date"]
+                    db.write_meta(FINISHED_TERMS_META, json.dumps(finished_terms))
         except Exception:
             emit("course_failed", course_id=course_id)
             reporter.course_enumeration_error(course_id)
@@ -279,11 +297,17 @@ def run():
     # Refresh the semester catalog: run on the 5th and 25th of each month,
     # or immediately if the database has no catalog data yet.
     has_catalog = db.has_all_courses()
-    today = datetime.datetime.now().day
-    needs_catalog = not has_catalog or today in (5, 25)
+    today = course_today()
+    needs_catalog = not has_catalog or today.day in (5, 25)
     scans = parse_auto_check_pauses(db.read_meta(PAUSE_SCANS_META))
+    statuses = db.auto_check_status(today=today) if config.AUTO_CHECK_ENABLED and not config.VIDEO_RECHECK_NOW else {}
+    if config.COURSE_IDS and all(statuses.get(cid, {}).get("auto_check_stopped") for cid in config.COURSE_IDS):
+        reporter.info("订阅课程学期均已结束且笔记齐全，已自动停止检查，跳过平台登录。")
+        reporter.run_footer()
+        return
     if config.COURSE_IDS and not needs_catalog and all(
-        cid in config.AUTO_CHECK_PAUSES and scans.get(cid) == config.AUTO_CHECK_PAUSES[cid]
+        (statuses.get(cid, {}).get("auto_check_stopped")
+         or cid in config.AUTO_CHECK_PAUSES and scans.get(cid) == config.AUTO_CHECK_PAUSES[cid])
         and not db.get_unprocessed_lectures(cid, include_deferred=config.VIDEO_RECHECK_NOW) for cid in config.COURSE_IDS
     ):
         reporter.info("订阅课程均已暂停且没有可自动补齐的课次，跳过平台登录与检查。")

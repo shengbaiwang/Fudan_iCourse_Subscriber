@@ -29,3 +29,15 @@ window.ICS.termSortKey = (value) => {
   return `${match[1]}-${match[2]}-${rank}`;
 };
 window.ICS.compareTerms = (a, b) => window.ICS.termSortKey(a).localeCompare(window.ICS.termSortKey(b), "zh");
+// Conservative fallback cutoffs; unknown terms keep checking.
+window.ICS.termEndDate = (value) => {
+  const name = window.ICS.normalizeTerm(value);
+  const academic = name.match(/^([0-9]{4})–([0-9]{4}) (秋季|春季|暑期)$/u);
+  const calendar = name.match(/^([0-9]{4})\s*[-–—]?\s*([秋春暑])(?:季|期)?(?:学期)?$/u);
+  if (!academic && !calendar) return null;
+  const season = academic ? academic[3][0] : calendar[2];
+  const year = academic ? Number(academic[2]) : Number(calendar[1]) + (season === "秋" ? 1 : 0);
+  if (year < 1 || year > 9999) return null;
+  return `${String(year).padStart(4, "0")}-${{秋:"03", 春:"08", 暑:"09"}[season]}-01`;
+};
+window.ICS.courseToday = () => new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);

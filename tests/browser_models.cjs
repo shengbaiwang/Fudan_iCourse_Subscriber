@@ -40,6 +40,7 @@ const root = path.resolve(process.env.MODEL_STATIC_ROOT || path.join(__dirname, 
         case '/sync': return json({unchanged:true});
         case '/subscriptions': return json({course_ids:[],courses:[]});
         case '/lecture-names': return json({names:{}});
+        case '/lecture-holidays': return json({sub_ids:[]});
         case '/model-providers':
           if (request.method() === 'PUT') {
             if (failSave) return route.fulfill({status:502,json:{detail:'synthetic save failure'}});

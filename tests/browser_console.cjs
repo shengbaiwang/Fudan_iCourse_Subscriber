@@ -35,6 +35,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   database.run("INSERT INTO lectures(sub_id,course_id,sub_title,summary,transcript,processed_at,summary_model) VALUES ('10','1','2026-03-09第11-12节', '# 导论\n\n**理论**与实践。<script>window.pwned=1</script>','专属转录关键词','2026-09-08','test/model-a'), ('11','1','2026-03-09第6-8节','第二篇笔记','第二份转录','2026-09-07','test/model-b')");
   database.run("INSERT INTO lectures(sub_id,course_id,sub_title,error_stage) VALUES ('12','1','2026-03-10第1-2节','no_video')");
   database.run("UPDATE lectures SET error_msg='no playable video URL', error_count=78, retry_after=2000000000 WHERE sub_id='12'");
+  database.run("INSERT INTO lectures(sub_id,course_id,sub_title,error_stage,error_msg,retry_after) VALUES ('13','1','2026-05-01第1-2节','video_access','当前账号未选该课程，平台不允许观看录播',2000000000)");
   database.run("UPDATE lectures SET transcript_source='official', recording_duration=3600, recording_duration_source='sub-info.video_duration_seconds', ppt_warning='课件清单读取失败（TimeoutError）' WHERE sub_id='10'");
   const searchInsert = database.prepare("INSERT INTO lectures(sub_id,course_id,sub_title,summary) VALUES (?, '2', ?, ?)");
   for (let i = 0; i < 45; i++) searchInsert.run([`search-${String(i).padStart(3,'0')}`, `分页笔记 ${i}`, `分页关键词 ${i}`]);
@@ -66,6 +67,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   let sections = [{id:'study', name:'学习区'}];
   let sectionsRevision = 0;
   let zones = {}, names = {}, version = 'commit-1', missingShard = false, legacy = false, liveShard = false;
+  let holidayIds = [];
   let localRevision = 0, localJobs = [], runRequests = [], preferences = {course_ids:['1'],lecture_order:'api'};
   let dispatches = [];
   const approvalRequests = [];
@@ -139,6 +141,14 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         if (p==='/courses') return json(courses);
         if (p.startsWith('/notebook')) return json([]);
         if (p==='/lecture-names') {if(request.method()==='PUT') {const body=request.postDataJSON();names[body.sub_id]=body.name;} return json({names});}
+        if (p==='/lecture-holidays') {
+          if(request.method()==='PUT') {
+            const body=request.postDataJSON();
+            holidayIds=holidayIds.filter(id=>id!==body.sub_id);
+            if(body.holiday) holidayIds.push(body.sub_id);
+          }
+          return json({sub_ids:holidayIds});
+        }
         if (p==='/course-zones') {if(request.method()==='PUT') {const body=request.postDataJSON();zones[body.course_id]=organization.updateMemberships(zones[body.course_id],body.zones??[body.zone],body.operation||'replace',new Set(['archive','unassigned',...sections.map(s=>s.id)]));} return json({zones,sections,revision:sectionsRevision,default_zone:"unassigned"});}
         if (p==='/course-sections' && request.method()==='PUT') {
           const body = request.postDataJSON();
@@ -690,6 +700,70 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       assert.equal(await page.getByText(/官方转录 · 已通过独立录制时长校验.*课件提示：课件清单读取失败/).count(),1);
       assert.equal(await page.evaluate(() => lectureStateLabel({error_stage:'video_access'})), '录播无权限');
       assert.equal(await page.evaluate(() => lectureStateLabel({error_stage:'video'})), '录播准备待重试');
+      // Manual holiday labels keep the row, hide its failure and survive refresh.
+      const holidayCard = page.locator('.lecture-card[data-sub-id="13"]');
+      assert.equal(await holidayCard.locator('.state-badge.failed').count(),1);
+      await holidayCard.locator('.lecture-more-button').click();
+      await page.getByRole('menuitem',{name:'标记放假',exact:true}).click();
+      await page.waitForFunction(()=>lectureHolidays.has('13')&&!lectureHolidaySaving);
+      assert.equal(await holidayCard.locator('.state-badge.holiday').textContent(),'放假');
+      assert.equal(await holidayCard.locator('.state-badge.failed').count(),0);
+      assert.equal(await holidayCard.getByText(/当前账号未选/).count(),0);
+      assert.equal(await page.locator('.state-badge.ready').count(),2);
+      assert.equal(await page.locator('.state-badge.novideo').count(),1);
+      await page.evaluate(async()=>{lectureHolidays.clear();await loadLectureHolidays();await openCourse(currentCourse);});
+      assert.equal(await holidayCard.locator('.state-badge.holiday').count(),1);
+      await page.screenshot({path:`/tmp/icourse-${mode}-manual-holiday.png`,fullPage:true});
+      await page.getByRole('button',{name:'撤销放假标记修改',exact:true}).click();
+      await page.waitForFunction(()=>!lectureHolidays.has('13')&&!lectureHolidaySaving);
+      assert.equal(await holidayCard.locator('.state-badge.failed').count(),1);
+      assert.equal(await holidayCard.getByText(/当前账号未选/).count(),1);
+      // Right-click and keyboard access act on only the selected lecture.
+      await holidayCard.click({button:'right'});
+      await page.keyboard.press('Escape');
+      assert.equal(await holidayCard.locator('.lecture-more-button').evaluate(node=>document.activeElement===node),true);
+      await holidayCard.locator('.lecture-open').focus();
+      await page.keyboard.press('Shift+F10');
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(()=>lectureHolidays.has('13')&&!lectureHolidaySaving);
+      await holidayCard.locator('.lecture-more-button').click();
+      await page.getByRole('menuitem',{name:'取消放假标记',exact:true}).click();
+      await page.waitForFunction(()=>!lectureHolidays.has('13')&&!lectureHolidaySaving);
+      // A failed save leaves the original error visible.
+      await page.evaluate(()=>{
+        window.holidayOriginalApi=window.ICOURSE_API;
+        window.ICOURSE_API=async(path,options)=>{
+          if(path==='/api/local/lecture-holidays'&&options?.method==='PUT') throw new Error('合成放假保存失败');
+          if(window.holidayOriginalApi) return window.holidayOriginalApi(path,options);
+          const response=await fetch(path,{...options,headers:{'Content-Type':'application/json'}});
+          if(!response.ok) throw new Error('API error');
+          return response.json();
+        };
+      });
+      await holidayCard.locator('.lecture-more-button').click();
+      await page.getByRole('menuitem',{name:'标记放假',exact:true}).click();
+      await page.getByText('合成放假保存失败',{exact:true}).waitFor();
+      assert.equal(await holidayCard.locator('.state-badge.failed').count(),1);
+      await page.evaluate(()=>{window.ICOURSE_API=window.holidayOriginalApi;delete window.holidayOriginalApi;});
+      // Touch long-press opens the same inline menu without opening the note.
+      await page.setViewportSize({width:390,height:844});
+      await holidayCard.scrollIntoViewIfNeeded();
+      const holidayTouch = await context.newCDPSession(page);
+      const holidayBox = await holidayCard.locator('.lecture-open').boundingBox();
+      await holidayTouch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:holidayBox.x+40,y:holidayBox.y+holidayBox.height/2}]});
+      await page.getByRole('menuitem',{name:'标记放假',exact:true}).waitFor();
+      await holidayTouch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      assert.equal(await page.evaluate(()=>activeView),'lectures');
+      const holidayMenuBox = await page.locator('.lecture-context-menu').boundingBox();
+      assert.ok(holidayMenuBox.x>=0&&holidayMenuBox.x+holidayMenuBox.width<=390);
+      await page.getByRole('menuitem',{name:'标记放假',exact:true}).click();
+      await page.waitForFunction(()=>lectureHolidays.has('13')&&!lectureHolidaySaving);
+      await page.screenshot({path:`/tmp/icourse-${mode}-manual-holiday-mobile.png`,fullPage:true});
+      await holidayCard.locator('.lecture-more-button').click();
+      await page.getByRole('menuitem',{name:'取消放假标记',exact:true}).click();
+      await page.waitForFunction(()=>!lectureHolidays.has('13')&&!lectureHolidaySaving);
+      await holidayTouch.detach();
+      await page.setViewportSize({width:1280,height:900});
       await page.locator('.lecture-open').filter({hasText:'第11-12节'}).click();
       await page.locator('.summary-version-choice').first().waitFor();
       // Three stored reruns plus the distinct active summary must all remain selectable.
@@ -837,6 +911,55 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.locator('#subscription-list').getByRole('button',{name:'恢复现代思想史的自动检查',exact:true}).click();
       await page.waitForFunction(()=>!pausedCourseIds.has('1'));
       assert.equal(await page.locator('#subscription-check-status').innerText(),'1 门自动检查 · 0 门已暂停');
+      // Term completion uses real sql.js data; incomplete notes and a new
+      // semester reactivate discovery instead of inheriting an old stop.
+      if (mode === 'fork') {
+        await page.evaluate(async () => {
+          const db = window.ICS.db;
+          db.queryAll('BEGIN');
+          db.queryAll("UPDATE all_courses SET term='2025-20262' WHERE course_id='1'");
+          db.queryAll("UPDATE lectures SET date='2026-06-30',summary='完整笔记',processed_at='2026-07-01' WHERE course_id='1'");
+          db.queryAll("INSERT OR REPLACE INTO meta VALUES ('auto_check_finished_terms', ?)", [JSON.stringify({'1':'2026-08-01'})]);
+          window.savedCourseToday = window.ICS.courseToday;
+          window.ICS.courseToday = () => '2026-10-12';
+          const state = await api('/api/local/subscriptions');
+          if (!state.courses[0].auto_check_stopped) throw new Error('complete ended course should stop');
+          db.queryAll("UPDATE lectures SET summary=NULL WHERE sub_id='12'");
+          if ((await api('/api/local/subscriptions')).courses[0].auto_check_stopped) throw new Error('deferred missing note should keep checking');
+          db.queryAll("UPDATE lectures SET summary=' \n' WHERE sub_id='12'");
+          if ((await api('/api/local/subscriptions')).courses[0].auto_check_stopped) throw new Error('blank note should keep checking');
+          db.queryAll("UPDATE lectures SET summary='完整笔记' WHERE sub_id='12'");
+          db.queryAll("UPDATE all_courses SET term='2026-20271' WHERE course_id='1'");
+          if ((await api('/api/local/subscriptions')).courses[0].auto_check_stopped) throw new Error('new term should keep checking');
+          db.queryAll('ROLLBACK');
+          window.ICS.courseToday = window.savedCourseToday;
+        });
+      }
+      await page.evaluate(() => {
+        window.savedSubscriptionCourses = subscriptionCourses;
+        window.savedStoppedRunSelection = {input:$('#single-run-ids').value,
+          ids:[...rerunSelectedCourseIds], priority:[...runPriorityIds]};
+        subscriptionCourses = subscriptionCourses.map(course => ({...course, term:'2025-20262',
+          auto_check_stopped:true, summary_count:course.total_count, pending_count:0, blocked_count:0}));
+        renderSubscriptions();
+      });
+      assert.match(await page.locator('#subscription-list').innerText(), /已结课.*笔记齐全.*自动停止检查/);
+      assert.equal(await page.locator('#subscription-check-status').innerText(),'0 门自动检查 · 0 门已暂停 · 1 门已自动停止');
+      await page.setViewportSize({width:390,height:844});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      await page.screenshot({path:`/tmp/icourse-${mode}-auto-stopped-mobile.png`,fullPage:true});
+      await page.locator('#subscription-list').getByRole('button',{name:'检查一次现代思想史',exact:true}).click();
+      await page.waitForFunction(()=>activeView==='run' && rerunSelectedCourseIds.has('1'));
+      assert.equal(await page.locator('#run-kind').inputValue(),'process');
+      await page.evaluate(() => {
+        subscriptionCourses=window.savedSubscriptionCourses;
+        $('#single-run-ids').value=window.savedStoppedRunSelection.input;
+        rerunSelectedCourseIds.clear();
+        window.savedStoppedRunSelection.ids.forEach(id=>rerunSelectedCourseIds.add(id));
+        runPriorityIds=window.savedStoppedRunSelection.priority;
+      });
+      await page.setViewportSize({width:1280,height:900});
+      await page.locator('.desktop-nav [data-view="subscriptions"]').click();
       await page.locator('#subscription-query').fill('目录课程');
       await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 207 门课程 · 第 1–20 条');
       // Removing the only row on the last subscribed page returns to the preceding page.

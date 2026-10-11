@@ -28,6 +28,30 @@
 
 ## 构建
 
+### 日常开发（Dev）
+
+双击项目根目录的 `启动丰饶之海 Dev.command`，或在项目目录执行：
+
+```sh
+.venv-course/bin/python scripts/dev_desktop.py
+```
+
+首次只编译原生窗口外壳，之后复用它；后端直接运行项目中的 Python，界面直接读取
+`local_web/static/`，无需打包 Python、模型、ZIP，也无需复制到「应用程序」或重装。
+窗口和应用名称为「丰饶之海 Dev」，应用标识与正式版分开，产物位于
+`dist/desktop-dev/丰饶之海 Dev.app`，依赖当前项目目录和 `.venv-course` 环境。
+启动脚本所在终端保留开发日志；用 `⌘Q` 退出 Dev 后脚本结束。
+
+- 修改 HTML、CSS、JavaScript：在 Dev 窗口按 `⌘R`，或选择「显示 → 刷新开发界面」。刷新前会保存当前手记；保存失败时保留当前页面。
+- 修改 Python：用 `⌘Q` 退出 Dev，然后再次打开启动脚本，即可运行最新源码。
+- 修改 Swift：退出 Dev，再次运行启动脚本，会自动重新编译外壳。
+- macOS 13.3 及以上可使用 Safari 的「开发」菜单检查 Dev 的 WebView。
+
+Dev 默认沿用正式版的本机配置、手记和课程资料，因此编辑会保存到同一资料库。
+自动测试使用下方的临时目录环境变量；日常开发默认使用 Dev，发布或验收正式安装包时再完整构建。
+
+### 正式安装包
+
 在 Apple Silicon Mac 上准备现有 `.venv-course` 环境和项目依赖，并安装桌面构建依赖：
 
 ```sh

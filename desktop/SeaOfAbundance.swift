@@ -13,19 +13,15 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
     private var preferences: [String: String] = [:]
     private var preferencesWrite: DispatchWorkItem?
     private let token = UUID().uuidString
+    private let development = Bundle.main.object(forInfoDictionaryKey: "SeaDevelopment") as? [String: String]
+    private var applicationName: String { development == nil ? "丰饶之海" : "丰饶之海 Dev" }
     private var configDirectory: URL {
         if let override = ProcessInfo.processInfo.environment["ICOURSE_WEB_CONFIG_DIR"] { return URL(fileURLWithPath: override) }
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("fudan-icourse-subscriber")
     }
     private var stateFile: URL { configDirectory.appendingPathComponent("desktop-state.json") }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        if let data = try? Data(contentsOf: stateFile), let value = try? JSONDecoder().decode([String: String].self, from: data) { preferences = value }
-        preferences["sea-personal-library"] = "1"
-        installMenu()
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
-        configuration.userContentController.add(self, name: "sea")
+    private func pageStateScript() -> WKUserScript {
         let data = (try? JSONSerialization.data(withJSONObject: preferences)) ?? Data("{}".utf8)
         let state = String(data: data, encoding: .utf8) ?? "{}"
         let script = """
@@ -49,17 +45,30 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
           };
         })();
         """
-        configuration.userContentController.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        return WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if let data = try? Data(contentsOf: stateFile), let value = try? JSONDecoder().decode([String: String].self, from: data) { preferences = value }
+        preferences["sea-personal-library"] = "1"
+        installMenu()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        configuration.userContentController.add(self, name: "sea")
+        configuration.userContentController.addUserScript(pageStateScript())
         web = WKWebView(frame: .zero, configuration: configuration)
         web.navigationDelegate = self
         web.uiDelegate = self
         web.allowsBackForwardNavigationGestures = false
         window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 1320,height: 860), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
-        window.title = "丰饶之海"
+        window.title = applicationName
         window.minSize = NSSize(width: 820,height: 560)
-        window.setFrameAutosaveName("SeaMainWindow")
+        window.setFrameAutosaveName(development == nil ? "SeaMainWindow" : "SeaDevMainWindow")
         window.isReleasedWhenClosed = false
         window.contentView = web
+        if development != nil {
+            if #available(macOS 13.3, *) { web.isInspectable = true }
+        }
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -70,17 +79,28 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
     private func startBackend() {
         guard let resources = Bundle.main.resourceURL else { fail("没有找到应用资源，请重新构建应用。"); return }
         let process = Process()
-        process.executableURL = resources.appendingPathComponent("backend/sea-backend")
-        process.arguments = ["--port","0","--no-open"]
+        if let development = development {
+            guard let root = development["ProjectRoot"], let python = development["PythonExecutable"],
+                  FileManager.default.isExecutableFile(atPath: python),
+                  FileManager.default.fileExists(atPath: root + "/desktop/backend.py") else {
+                fail("开发环境已移动或缺少 Python。请从项目重新运行「启动丰饶之海 Dev.command」。"); return
+            }
+            process.executableURL = URL(fileURLWithPath: python)
+            process.arguments = ["-u",root + "/desktop/backend.py","--port","0","--no-open"]
+            process.currentDirectoryURL = URL(fileURLWithPath: root)
+        } else {
+            process.executableURL = resources.appendingPathComponent("backend/sea-backend")
+            process.arguments = ["--port","0","--no-open"]
+            process.currentDirectoryURL = resources
+        }
         var env = ProcessInfo.processInfo.environment
         env["SEA_DESKTOP_TOKEN"] = token
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         env["PYTHONUNBUFFERED"] = "1"
         process.environment = env
-        process.currentDirectoryURL = resources
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
+        process.standardError = development == nil ? FileHandle.nullDevice : FileHandle.standardError
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let value = String(data:data,encoding:.utf8) else { return }
@@ -122,14 +142,14 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
     private func installMenu() {
         let main = NSMenu()
         let app = NSMenu(); let appItem = NSMenuItem(); appItem.submenu = app; main.addItem(appItem)
-        app.addItem(withTitle:"关于丰饶之海",action:#selector(about),keyEquivalent:"").target = self
+        app.addItem(withTitle:"关于" + applicationName,action:#selector(about),keyEquivalent:"").target = self
         app.addItem(NSMenuItem.separator())
         app.addItem(withTitle:"设置…",action:#selector(settings),keyEquivalent:",").target = self
         app.addItem(NSMenuItem.separator())
-        app.addItem(withTitle:"隐藏丰饶之海",action:#selector(NSApplication.hide(_:)),keyEquivalent:"h")
+        app.addItem(withTitle:"隐藏" + applicationName,action:#selector(NSApplication.hide(_:)),keyEquivalent:"h")
         app.addItem(withTitle:"显示全部",action:#selector(NSApplication.unhideAllApplications(_:)),keyEquivalent:"")
         app.addItem(NSMenuItem.separator())
-        app.addItem(withTitle:"退出丰饶之海",action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q")
+        app.addItem(withTitle:"退出" + applicationName,action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q")
         let file = NSMenu(title:"文件"); let fileItem = NSMenuItem(title:"文件",action:nil,keyEquivalent:""); fileItem.submenu = file; main.addItem(fileItem)
         file.addItem(withTitle:"新建手记",action:#selector(newNote),keyEquivalent:"n").target = self
         file.addItem(withTitle:"导入 Markdown…",action:#selector(importNotes),keyEquivalent:"o").target = self
@@ -145,6 +165,10 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
         let view = NSMenu(title:"显示"); let viewItem = NSMenuItem(title:"显示",action:nil,keyEquivalent:""); viewItem.submenu = view; main.addItem(viewItem)
         view.addItem(withTitle:"切换阅读与编辑",action:#selector(reading),keyEquivalent:"e").target = self
         view.addItem(withTitle:"切换外观",action:#selector(theme),keyEquivalent:"").target = self
+        if development != nil {
+            view.addItem(NSMenuItem.separator())
+            view.addItem(withTitle:"刷新开发界面",action:#selector(reloadDevelopment),keyEquivalent:"r").target = self
+        }
         let full = view.addItem(withTitle:"进入全屏",action:#selector(NSWindow.toggleFullScreen(_:)),keyEquivalent:"f"); full.keyEquivalentModifierMask = [.command,.control]
         let windows = NSMenu(title:"窗口"); let windowItem = NSMenuItem(title:"窗口",action:nil,keyEquivalent:""); windowItem.submenu = windows; main.addItem(windowItem)
         windows.addItem(withTitle:"最小化",action:#selector(NSWindow.performMiniaturize(_:)),keyEquivalent:"m")
@@ -158,7 +182,20 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
     @objc private func search() { js("showView('search');document.getElementById('search').focus()") }
     @objc private func reading() { js("if(document.body.dataset.view==='notes')document.getElementById('note-mode').click()") }
     @objc private func theme() { js("document.getElementById('theme-toggle').click()") }
-    @objc private func about() { NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"丰饶之海",.applicationVersion:"1.0.0",.credits:NSAttributedString(string:"一座属于自己的知识库。")]) }
+    @objc private func about() { NSApp.orderFrontStandardAboutPanel(options:[.applicationName:applicationName,.applicationVersion:"1.0.0",.credits:NSAttributedString(string:"一座属于自己的知识库。")]) }
+    @objc private func reloadDevelopment() {
+        guard development != nil, baseURL != nil, !quitting else { return }
+        web.callAsyncJavaScript("if(window.SeaNotebook) await window.SeaNotebook.flush(); return true;",arguments:[:],in:nil,in:.page) { [weak self] result in
+            guard let self = self, !self.quitting else { return }
+            if case .failure = result {
+                let alert = NSAlert(); alert.messageText = "刷新前无法保存手记"; alert.informativeText = "请先保存当前内容，再刷新开发界面。"; alert.beginSheetModal(for:self.window); return
+            }
+            self.persistPreferences()
+            self.web.configuration.userContentController.removeAllUserScripts()
+            self.web.configuration.userContentController.addUserScript(self.pageStateScript())
+            self.web.reloadFromOrigin()
+        }
+    }
 
     func userContentController(_ userContentController: WKUserContentController,didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String:Any], body["kind"] as? String == "preferences", let value = body["values"] as? [String:String] else { return }

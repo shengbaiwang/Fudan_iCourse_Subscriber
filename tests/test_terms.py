@@ -1,6 +1,7 @@
 """The same naming contract covers old libraries and future catalog imports."""
 
 import json
+from datetime import date
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -8,7 +9,7 @@ import subprocess
 from local_web.database import DatabaseManager
 from src.data.database import Database
 from src.data.schema import SCHEMA_SQL
-from src.data.terms import normalize_term, term_sort_key
+from src.data.terms import normalize_term, term_end_date, term_sort_key
 
 
 CASES = [
@@ -94,3 +95,17 @@ def test_future_imports_and_catalog_replacements_keep_format(tmp_path):
     finally:
         writer.conn.close()
         manager.close()
+
+
+def test_python_and_browser_share_conservative_term_cutoffs():
+    cases = [(raw, term_end_date(raw)) for raw, _ in CASES] + [
+        ("2026-秋", date(2027, 3, 1)), ("2026 春季学期", date(2026, 8, 1)),
+        ("2026-暑期", date(2026, 9, 1)), ("9999-秋", None), ("0000-春", None),
+    ]
+    source = Path(__file__).resolve().parents[1] / "local_web/static/terms.js"
+    output = subprocess.check_output([
+        "node", "-e", "global.window = {}; require(process.argv[1]); "
+        "console.log(JSON.stringify(JSON.parse(process.argv[2]).map(window.ICS.termEndDate)));",
+        str(source), json.dumps([raw for raw, _ in cases]),
+    ], text=True)
+    assert json.loads(output) == [end.isoformat() if end else None for _, end in cases]

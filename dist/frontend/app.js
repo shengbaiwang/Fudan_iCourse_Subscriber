@@ -21,6 +21,9 @@ let activeView = personalLibrary ? "notes" : "courses";
 let setupRequested = false;
 let currentCourse = null;
 let courseLectures = [];
+let lectureHolidays = new Set();
+let lectureHolidaySaving = false;
+let lectureMenu = null;
 let currentLecture = null;
 let detailTab = "summary";
 let courseRows = [];
@@ -397,6 +400,7 @@ async function refreshStatus() {
   if (statusState.database_ready && loadedLibraryIdentity !== libraryIdentity) {
     await loadCourseZones();
     await loadLectureNames();
+    await loadLectureHolidays();
     await loadCourses();
     await refreshVisibleNotes();
     loadedLibraryIdentity = libraryIdentity;
@@ -1372,6 +1376,136 @@ async function loadLectureNames() {
   lectureNames = result.names || {};
 }
 
+async function loadLectureHolidays() {
+  const result = await api("/api/local/lecture-holidays");
+  lectureHolidays = new Set((result.sub_ids || []).map(String));
+}
+
+function isLectureHoliday(lecture) {
+  return lectureHolidays.has(String(lecture?.sub_id));
+}
+
+async function saveLectureHoliday(lecture, holiday, announce = true) {
+  if (lectureHolidaySaving) throw new Error("正在保存，请稍后再操作");
+  const id = String(lecture.sub_id);
+  const previous = lectureHolidays.has(id);
+  lectureHolidaySaving = true;
+  renderLectureList();
+  try {
+    const result = await api("/api/local/lecture-holidays", {
+      method: "PUT", body: JSON.stringify({sub_id: id, holiday}),
+    });
+    lectureHolidays = new Set((result.sub_ids || []).map(String));
+  } finally {
+    lectureHolidaySaving = false;
+    renderLectureList();
+    document.querySelector(`.lecture-card[data-sub-id="${CSS.escape(id)}"] .lecture-more-button`)?.focus({preventScroll: true});
+  }
+  if (!announce) return;
+  message(holiday ? "已标记放假" : "已取消放假标记");
+  const undo = document.createElement("button");
+  undo.type = "button";
+  undo.className = "section-undo";
+  undo.textContent = "撤销";
+  undo.setAttribute("aria-label", "撤销放假标记修改");
+  undo.onclick = async () => {
+    undo.disabled = true;
+    try {
+      if (lectureHolidays.has(id) !== holiday) throw new Error("课次标记已更新，请重新操作");
+      await saveLectureHoliday(lecture, previous, false);
+      message("已恢复课次状态");
+    } catch (error) { message(error.message, true); }
+  };
+  $("#message").append(undo);
+  clearTimeout(messageTimer);
+  messageTimer = setTimeout(() => $("#message").classList.add("hidden"), 8000);
+}
+
+function closeLectureMenu(restoreFocus = true) {
+  if (!lectureMenu) return;
+  const {node, anchor} = lectureMenu;
+  lectureMenu = null;
+  node.remove();
+  anchor.setAttribute("aria-expanded", "false");
+  if (restoreFocus && anchor.isConnected) anchor.focus({preventScroll: true});
+}
+
+function openLectureMenu(lecture, anchor, point) {
+  if (!anchor || anchor.disabled) return;
+  if (lectureMenu?.anchor === anchor && !point) { closeLectureMenu(); return; }
+  closeCourseMenu(false);
+  closeSectionMenu(false);
+  closeLectureMenu(false);
+  const menu = document.createElement("div");
+  menu.className = "course-context-menu lecture-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", `${lecture.sub_title || lecture.sub_id} 的操作`);
+  const action = document.createElement("button");
+  action.type = "button";
+  action.setAttribute("role", "menuitem");
+  action.textContent = isLectureHoliday(lecture) ? "取消放假标记" : "标记放假";
+  action.onclick = () => {
+    closeLectureMenu(false);
+    saveLectureHoliday(lecture, !isLectureHoliday(lecture)).catch(error => message(error.message, true));
+  };
+  menu.append(action);
+  document.body.append(menu);
+  const rect = anchor.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(point?.x ?? rect.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(point?.y ?? rect.bottom + 4, innerHeight - menu.offsetHeight - 8))}px`;
+  lectureMenu = {node: menu, anchor};
+  anchor.setAttribute("aria-expanded", "true");
+  menu.onkeydown = event => {
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault(); action.focus();
+    }
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeLectureMenu(); }
+    if (event.key === "Tab") closeLectureMenu(false);
+  };
+  action.focus({preventScroll: true});
+}
+
+function bindLectureMenu(card, lecture, anchor) {
+  let press = null, timer = null, suppressClickUntil = 0;
+  const cancel = () => { clearTimeout(timer); timer = null; press = null; };
+  card.oncontextmenu = event => {
+    event.preventDefault(); cancel();
+    openLectureMenu(lecture, anchor, {x: event.clientX, y: event.clientY});
+  };
+  card.addEventListener("keydown", event => {
+    if (event.key === "ContextMenu" || event.key === "F10" && event.shiftKey) {
+      event.preventDefault(); openLectureMenu(lecture, anchor);
+    }
+  });
+  card.addEventListener("click", event => {
+    if (Date.now() < suppressClickUntil) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+  card.onpointerdown = event => {
+    if (event.pointerType === "mouse" || !event.isPrimary || event.target.closest(".lecture-more-button")) return;
+    cancel();
+    press = {x: event.clientX, y: event.clientY};
+    timer = setTimeout(() => {
+      const point = press; cancel();
+      if (!point || !card.isConnected) return;
+      suppressClickUntil = Date.now() + 1000;
+      openLectureMenu(lecture, anchor, point);
+    }, 450);
+  };
+  card.onpointermove = event => {
+    if (press && Math.hypot(event.clientX - press.x, event.clientY - press.y) > 10) cancel();
+  };
+  card.onpointerup = card.onpointercancel = card.onlostpointercapture = cancel;
+}
+
+document.addEventListener("pointerdown", event => {
+  if (lectureMenu && !lectureMenu.node.contains(event.target) && !lectureMenu.anchor.contains(event.target)) closeLectureMenu(false);
+});
+window.addEventListener("resize", () => closeLectureMenu(false));
+window.addEventListener("blur", () => closeLectureMenu(false));
+document.addEventListener("scroll", event => {
+  if (lectureMenu && !lectureMenu.node.contains(event.target)) closeLectureMenu(false);
+}, true);
+
 // Display name for a lecture note: custom rename > auto-derived from the
 // summary > the raw sub_title (date/period label).
 function lectureDisplayName(lecture) {
@@ -1636,11 +1770,13 @@ async function openCourse(course) {
 }
 
 function renderLectureList() {
+  closeLectureMenu(false);
   const list = $("#lecture-list");
   list.replaceChildren();
   courseLectures.forEach((lecture) => {
     const card = document.createElement("article");
     card.className = "lecture-card";
+    card.dataset.subId = lecture.sub_id;
     const row = document.createElement("div");
     row.className = "lecture-row";
     const left = document.createElement("div");
@@ -1656,7 +1792,7 @@ function renderLectureList() {
       time.textContent = timeLabel;
       left.append(time);
     }
-    if (lecture.error_msg) {
+    if (lecture.error_msg && !isLectureHoliday(lecture)) {
       const error = document.createElement("p");
       error.textContent = lecture.error_msg === "no playable video URL"
         ? "尚未取得录播地址；更新后将自动复查，并尝试可用的官方转录"
@@ -1684,11 +1820,24 @@ function renderLectureList() {
     open.append(row);
     open.onclick = () => openLecture(lecture.sub_id);
     card.append(open);
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "course-more-button lecture-more-button";
+    more.textContent = "⋯";
+    more.title = "课次操作：标记放假或取消标记";
+    more.setAttribute("aria-label", `课次操作：${timeLabel}`);
+    more.setAttribute("aria-haspopup", "menu");
+    more.setAttribute("aria-expanded", "false");
+    more.disabled = lectureHolidaySaving;
+    more.onclick = () => openLectureMenu(lecture, more);
+    card.append(more);
+    bindLectureMenu(card, lecture, more);
     list.append(card);
   });
 }
 
 async function openLecture(subId, options = {}) {
+  closeLectureMenu(false);
   currentLecture = await api(`/api/local/lectures/${encodeURIComponent(subId)}`);
   if (!currentCourse || String(currentCourse.course_id) !== String(currentLecture.course_id)) {
     currentCourse = courseRows.find((course) => String(course.course_id) === String(currentLecture.course_id)) || {
@@ -1737,6 +1886,7 @@ function compareLectures(a, b) {
 }
 
 function lectureState(lecture) {
+  if (isLectureHoliday(lecture)) return "holiday";
   if (lecture.error_stage === "no_video") return "novideo";
   if (lecture.error_stage) return "failed";
   if (lecture.has_summary || lecture.summary) return "ready";
@@ -1746,6 +1896,7 @@ function lectureState(lecture) {
 }
 
 function lectureStateLabel(lecture) {
+  if (isLectureHoliday(lecture)) return "放假";
   if (lecture.error_stage === "video_access") return "录播无权限";
   if (lecture.error_stage === "video") return "录播准备待重试";
   const state = lectureState(lecture);
@@ -2754,7 +2905,12 @@ function renderSubscriptions() {
   current.replaceChildren();
   catalog.replaceChildren();
   $("#subscription-count").textContent = String(subscribedCourseIds.length);
-  $("#subscription-check-status").textContent = `${subscribedCourseIds.length - pausedCourseIds.size} 门自动检查 · ${pausedCourseIds.size} 门已暂停`;
+  const stoppedIds = new Set(subscriptionCourses.filter(course => course.auto_check_stopped)
+    .map(course => String(course.course_id)));
+  const pausedCount = subscribedCourseIds.filter(id => pausedCourseIds.has(String(id))
+    && !stoppedIds.has(String(id))).length;
+  $("#subscription-check-status").textContent = `${subscribedCourseIds.length - pausedCount - stoppedIds.size} 门自动检查 · ${pausedCount} 门已暂停`
+    + (stoppedIds.size ? ` · ${stoppedIds.size} 门已自动停止` : "");
   current.classList.toggle("empty", !subscriptionCourses.length);
   if (!subscriptionCourses.length) current.textContent = "尚未订阅课程。";
   subscriptionPage = Math.max(1, Math.min(subscriptionPage, Math.ceil(subscriptionCourses.length / RESULTS_PAGE_SIZE)));
@@ -2767,17 +2923,20 @@ function renderSubscriptions() {
       queueSubscriptionSave();
     }, "移除");
     const paused = pausedCourseIds.has(String(course.course_id));
+    const stopped = course.auto_check_stopped;
     const status = document.createElement("span");
-    status.className = `meta subscription-check-state${paused ? " paused" : ""}`;
-    status.textContent = paused
+    status.className = `meta subscription-check-state${paused || stopped ? " paused" : ""}`;
+    status.textContent = stopped ? "已结课 · 笔记齐全 · 自动停止检查" : paused
       ? course.pause_scan_pending ? "已暂停 · 下次核对并补齐已有课次"
         : `已暂停${course.pending_count ? ` · 待补齐 ${course.pending_count} 节` : " · 已停止每日检查"}${course.blocked_count ? ` · ${course.blocked_count} 节达到重试上限` : ""}`
       : `自动检查${course.pending_count ? ` · 待处理 ${course.pending_count} 节` : ""}`;
     if (course.total_count) status.textContent += ` · ${course.summary_count || 0}/${course.total_count} 篇笔记`;
     row.firstElementChild.append(status);
-    const toggle = createButton(paused ? "恢复自动检查" : "暂停自动检查", () => toggleAutoCheck(course), "subscription-action");
+    const toggle = createButton(stopped ? "检查一次" : paused ? "恢复自动检查" : "暂停自动检查",
+      () => stopped ? addCourseToRun(course) : toggleAutoCheck(course), "subscription-action");
     toggle.disabled = autoCheckSaving || subscriptionSaving;
-    toggle.setAttribute("aria-label", `${paused ? "恢复" : "暂停"}${course.title || course.course_id}的自动检查`);
+    toggle.setAttribute("aria-label", stopped ? `检查一次${course.title || course.course_id}`
+      : `${paused ? "恢复" : "暂停"}${course.title || course.course_id}的自动检查`);
     row.append(toggle);
     current.append(row);
   });
@@ -2807,24 +2966,27 @@ function renderSubscriptions() {
       // 点击“订阅/移除”立即保存，无需再按保存按钮。
       queueSubscriptionSave();
     }, subscribed ? "移除" : "订阅");
-    catalogItem.append(createButton("单次运行", () => {
-      const field = $("#single-run-ids");
-      const ids = new Set(field.value.split(/[,，\s]+/).filter(Boolean));
-      ids.add(String(course.course_id)); field.value = [...ids].join(",");
-      rerunSelectedCourseIds.add(String(course.course_id));
-      if (!runPriorityIds.includes(String(course.course_id))) runPriorityIds.push(String(course.course_id));
-      $("#run-kind").value = "process";
-      rerunSelectedSubIds.clear();
-      showView("run");
-      loadRunView().catch(error => message(error.message, true));
-      message(`已加入运行队列：${course.title || course.course_id}`);
-    }));
+    catalogItem.append(createButton("单次运行", () => addCourseToRun(course)));
     catalog.append(catalogItem);
   });
   if (autoCheckSaving) {
     current.querySelectorAll("button").forEach(button => { button.disabled = true; });
     catalog.querySelectorAll("button").forEach(button => { button.disabled = true; });
   }
+}
+
+function addCourseToRun(course) {
+  const id = String(course.course_id), field = $("#single-run-ids");
+  const ids = new Set(field.value.split(/[,，\s]+/).filter(Boolean));
+  ids.add(id);
+  field.value = [...ids].join(",");
+  rerunSelectedCourseIds.add(id);
+  if (!runPriorityIds.includes(id)) runPriorityIds.push(id);
+  $("#run-kind").value = "process";
+  rerunSelectedSubIds.clear();
+  showView("run");
+  loadRunView().catch(error => message(error.message, true));
+  message(`已加入运行队列：${course.title || id}`);
 }
 
 async function loadSubscriptionCatalog(page = 1) {
@@ -3903,7 +4065,8 @@ $("#run-button").onclick = async () => {
   try {
     await loadSubscriptions();
     subscribedCourseIds.forEach(id => {
-      if (!pausedCourseIds.has(String(id))) rerunSelectedCourseIds.add(String(id));
+      if (!pausedCourseIds.has(String(id)) && !subscriptionCourses.some(course =>
+        String(course.course_id) === String(id) && course.auto_check_stopped)) rerunSelectedCourseIds.add(String(id));
       else rerunSelectedCourseIds.delete(String(id));
     });
     $("#run-kind").value = "process";

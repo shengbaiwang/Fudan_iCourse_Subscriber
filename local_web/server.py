@@ -18,7 +18,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, StrictBool
 
 from . import __version__
 from .database import DatabaseManager
@@ -148,6 +148,11 @@ class CourseSectionsRequest(BaseModel):
 class LectureNameRequest(BaseModel):
     sub_id: str = Field(min_length=1, max_length=100)
     name: str = Field(default="", max_length=100)
+
+
+class LectureHolidayRequest(BaseModel):
+    sub_id: str = Field(min_length=1, max_length=100)
+    holiday: StrictBool
 
 
 class SummaryRerunRequest(BaseModel):
@@ -702,6 +707,21 @@ def create_app(
     @app.get("/api/local/lecture-names")
     async def lecture_names() -> dict[str, dict[str, str]]:
         return {"names": dict(runtime.lecture_names)}
+
+    @app.get("/api/local/lecture-holidays")
+    async def lecture_holidays() -> dict:
+        return {"sub_ids": sorted(runtime.lecture_holidays)}
+
+    @app.put("/api/local/lecture-holidays")
+    async def save_lecture_holiday(payload: LectureHolidayRequest) -> dict:
+        sub_id = payload.sub_id.strip()
+        if await run_in_threadpool(require_db().lecture, sub_id) is None:
+            raise HTTPException(status_code=404, detail="课次不存在")
+        try:
+            await run_in_threadpool(runtime.save_lecture_holiday, sub_id, payload.holiday)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"sub_ids": sorted(runtime.lecture_holidays)}
 
     @app.put("/api/local/lecture-names")
     async def save_lecture_name(payload: LectureNameRequest) -> dict[str, dict[str, str]]:

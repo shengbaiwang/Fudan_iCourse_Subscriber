@@ -93,6 +93,11 @@ class Database:
             ).fetchone()
         return row["value"] if row else None
 
+    def auto_check_status(self, pauses=None, *, today=None, course_id=None) -> dict[str, dict]:
+        from src.runtime.auto_check import load_auto_check_status
+        with self._lock:
+            return load_auto_check_status(self.conn, pauses, today=today, course_id=course_id)
+
     def upsert_course(self, course_id: str, title: str, teacher: str):
         with self._lock, self.conn:
             self.conn.execute(
