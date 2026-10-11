@@ -2,7 +2,7 @@
  * Markdown + KaTeX rendering pipeline.
  * Sets window.ICS.render global.
  *
- * Depends on CDN globals: marked, DOMPurify, renderMathInElement
+ * Depends on bundled globals: marked, DOMPurify, renderMathInElement
  *
  * Pipeline: stash formulas → marked → restore formulas → DOMPurify → KaTeX
  * We stash formula delimiters before marked.parse() because characters like
@@ -57,7 +57,7 @@ function _renderMarkdown(mdText) {
   var stashed = _stashFormulas(mdText);
   var rawHtml = marked.parse(stashed.text, { breaks: true });
   var restored = _restoreFormulas(rawHtml, stashed.formulas);
-  return DOMPurify.sanitize(restored);
+  return DOMPurify.sanitize(restored, { FORBID_TAGS: ['img', 'iframe', 'object', 'embed', 'form', 'input', 'style'] });
 }
 
 function _activateKaTeX(element) {

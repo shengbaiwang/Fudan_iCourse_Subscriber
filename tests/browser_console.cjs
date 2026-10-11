@@ -67,6 +67,9 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   let zones = {}, names = {}, version = 'commit-1', missingShard = false, legacy = false, liveShard = false;
   let localRevision = 0, localJobs = [], runRequests = [], preferences = {course_ids:['1'],lecture_order:'api'};
   let dispatches = [];
+  const approvalRequests = [];
+  const blockedRun = {id:42,name:'iCourse Check',status:'completed',conclusion:'action_required',
+    event:'schedule',created_at:new Date().toISOString(),html_url:'https://github.com/alice/fork/actions/runs/42'};
   let autoCheckPauses = {};
   const server = http.createServer((req,res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
@@ -87,6 +90,10 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
     await context.route('**/*', async route => {
       const request=route.request(), url=new URL(request.url());
       const json = data => route.fulfill({json:data});
+      if (/\/workflow-approvals$|\/approve$/.test(url.pathname)) {
+        approvalRequests.push(url.pathname);
+        return route.fulfill({status:500,json:{detail:'Automatic workflow approval must not be requested'}});
+      }
       if (url.hostname==='cdnjs.cloudflare.com') {
         const name = path.basename(url.pathname);
         if (['sql-wasm.js','sql-wasm.wasm'].includes(name)) return route.fulfill({path:path.join(sqlDir,name), contentType:name.endsWith('.wasm')?'application/wasm':'text/javascript'});
@@ -101,7 +108,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
           ...(!missingShard ? [{type:'blob',path:'data/shards/test.db.gz.enc',sha:liveShard?'shardLive':'shard'}] : []),
         ]});
         if (p.startsWith('/git/blobs/')) return route.fulfill({body:blobs[p.split('/').at(-1)],contentType:'application/octet-stream'});
-        if (p==='/actions/runs') return json({workflow_runs:[]});
+        if (p==='/actions/runs') return json({workflow_runs:[blockedRun]});
         if (p==='/actions/variables/MODEL_PROVIDERS_JSON') return json({value:JSON.stringify({version:1,providers:[provider]})});
         if (p==='/actions/variables/LECTURE_ORDER') return json({value:'api'});
         if (p==='/actions/variables/COURSE_AUTO_CHECK_JSON') {
@@ -129,6 +136,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         }
         if(p==='/runs/local-job/cancel') {localJobs[0].status='cancelled';return json(localJobs[0]);}
         if (p==='/courses') return json(courses);
+        if (p.startsWith('/notebook')) return json([]);
         if (p==='/lecture-names') {if(request.method()==='PUT') {const body=request.postDataJSON();names[body.sub_id]=body.name;} return json({names});}
         if (p==='/course-zones') {if(request.method()==='PUT') {const body=request.postDataJSON();zones[body.course_id]=organization.updateMemberships(zones[body.course_id],body.zones??[body.zone],body.operation||'replace',new Set(['archive','unassigned',...sections.map(s=>s.id)]));} return json({zones,sections,revision:sectionsRevision,default_zone:"unassigned"});}
         if (p==='/course-sections' && request.method()==='PUT') {
@@ -140,8 +148,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
           sectionsRevision++;
           return json({zones,sections,revision:sectionsRevision,default_zone:'unassigned'});
         }
-        if (p==='/workflows') return json([]);
-        if (p==='/workflow-approvals') return json({approved:[],errors:[]});
+        if (p==='/workflows') return json([blockedRun]);
         if (p==='/courses/1/lectures') return json(lectures);
         if (p==='/lectures/10') return json(lecture);
         if (p==='/model-providers') return json({source:'github-variable',providers:[provider]});
@@ -703,14 +710,14 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         };
       });
       assert.deepEqual(await noteColors(), {
-        title:'rgb(147, 197, 253)', subtitle:'rgb(94, 234, 212)', emphasis:'rgb(253, 164, 175)',
-        code:'rgb(249, 168, 212)', quote:'rgb(191, 219, 254)', quoteBackground:'rgb(21, 34, 56)',
+        title:'rgb(229, 228, 223)', subtitle:'rgb(155, 200, 241)', emphasis:'rgb(229, 228, 223)',
+        code:'rgb(155, 200, 241)', quote:'rgb(161, 163, 169)', quoteBackground:'rgba(0, 0, 0, 0)',
       });
       await page.locator('#theme-toggle').click();
       assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'light');
       assert.deepEqual(await noteColors(), {
-        title:'rgb(29, 78, 216)', subtitle:'rgb(15, 118, 110)', emphasis:'rgb(180, 35, 24)',
-        code:'rgb(157, 23, 77)', quote:'rgb(30, 64, 175)', quoteBackground:'rgb(239, 246, 255)',
+        title:'rgb(38, 43, 49)', subtitle:'rgb(30, 80, 133)', emphasis:'rgb(38, 43, 49)',
+        code:'rgb(33, 97, 166)', quote:'rgb(116, 121, 131)', quoteBackground:'rgba(0, 0, 0, 0)',
       });
       await page.locator('#theme-toggle').click();
       await page.locator('#note-color-check').evaluate(node => node.remove());
@@ -818,6 +825,10 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.setViewportSize({width:1280,height:900});
       // A default subscription run skips paused courses; explicit IDs still work.
       await page.locator('.desktop-nav [data-view="run"]').click();
+      await page.locator('#runs .status-action_required').waitFor();
+      assert.match(await page.locator('#runs').innerText(), /需在 GitHub 处理.*在 GitHub 查看原因/s);
+      assert.equal(await page.locator('#runs a').first().getAttribute('href'), blockedRun.html_url);
+      assert.deepEqual(approvalRequests, []);
       await page.locator('#run-button').click();
       await page.waitForFunction(()=>!rerunSelectedCourseIds.has('1'));
       await page.locator('.desktop-nav [data-view="subscriptions"]').click();
@@ -997,6 +1008,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         assert.equal(await page.locator('#detail-content').innerText(),'');
       }
       assert.deepEqual(errors,[]);
+      assert.deepEqual(approvalRequests,[]);
       await page.close();
       console.log(`${mode}: shared UI, zones, ordering, versions, export, search, catalog, run queue, backend selection, live note refresh, mobile layout passed`);
     }

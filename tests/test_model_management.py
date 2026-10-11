@@ -15,7 +15,7 @@ from unittest.mock import patch
 from nacl.public import PrivateKey, SealedBox
 
 from local_web.github_client import GitHubClient
-from local_web.provider_test import ProviderTestError, test_provider
+from local_web.provider_test import ProviderTestError, test_provider as probe_provider
 from local_web.state import ModelConfigStore
 from src.runtime.model_config import select_runtime_model, validate_model_config
 
@@ -283,7 +283,7 @@ class ProviderConnectionTest(unittest.TestCase):
         )
 
         with patch("urllib.request.urlopen", return_value=response) as urlopen:
-            result = test_provider(
+            result = probe_provider(
                 "https://provider.example/v1",
                 "test-model",
                 "fake-key",
@@ -305,7 +305,7 @@ class ProviderConnectionTest(unittest.TestCase):
         )
         with patch("urllib.request.urlopen", side_effect=error):
             with self.assertRaises(ProviderTestError) as caught:
-                test_provider(
+                probe_provider(
                     "https://provider.example/v1",
                     "test-model",
                     api_key,

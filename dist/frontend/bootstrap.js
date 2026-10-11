@@ -2,7 +2,7 @@
 (async () => {
   const pages = window.ICOURSE_RUNTIME === 'pages' || new URLSearchParams(location.search).get('runtime') === 'pages';
   window.ICOURSE_RUNTIME = pages ? 'pages' : 'local';
-  window.ICOURSE_CAPABILITIES = {talks: !pages, obsidian: !pages, providerTest: !pages};
+  window.ICOURSE_CAPABILITIES = {notes: !pages, talks: !pages, obsidian: !pages, providerTest: !pages};
   const script = (src) => new Promise((resolve, reject) => {
     const node = document.createElement('script');
     node.src = src;
@@ -30,22 +30,24 @@
       for (const src of [
         'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.js',
         'browser/crypto.js', 'browser/github.js', 'browser/schema.js', 'browser/db.js',
-        'browser/workflow-approvals.js', 'browser/transport.js',
+        'browser/transport.js',
       ]) await script(src);
     }
     await script('app.js');
+    await script('reading.js');
+    if (!pages) await script('notebook.js');
     // Rich Markdown is progressive: an offline local console still opens immediately.
     try {
       for (const src of [
-        'https://cdn.jsdelivr.net/npm/marked@15/marked.min.js',
-        'https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js',
-        'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js',
-        'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js',
+        'vendor/marked.min.js',
+        'vendor/purify.min.js',
+        'vendor/katex.min.js',
+        'vendor/auto-render.min.js',
         'browser/render.js',
       ]) await script(src);
       const css = document.createElement('link');
       css.rel = 'stylesheet';
-      css.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css';
+      css.href = 'vendor/katex.min.css';
       document.head.append(css);
       window.dispatchEvent(new Event('icourse-render-ready'));
     } catch (error) { console.info('使用内置 Markdown 排版', error.message); }

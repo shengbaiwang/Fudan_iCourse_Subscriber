@@ -16,7 +16,9 @@ window.addEventListener("beforeunload", (event) => {
 
 let obsidianPlan = null;
 let messageTimer = null;
-let activeView = "courses";
+const personalLibrary = !window.ICOURSE_RUNTIME?.includes("pages") && (window.SEA_DESKTOP || localStorage.getItem("sea-personal-library") === "1");
+let activeView = personalLibrary ? "notes" : "courses";
+let setupRequested = false;
 let currentCourse = null;
 let courseLectures = [];
 let currentLecture = null;
@@ -94,7 +96,7 @@ const RUN_STATUS_LABELS = {
   success: "成功", failure: "失败", cancelled: "已取消", timed_out: "超时",
   in_progress: "进行中", queued: "排队中", requested: "已请求", waiting: "等待中",
   pending: "排队中", completed: "已完成", neutral: "已完成", skipped: "已跳过",
-  stale: "已过期", action_required: "等待 GitHub 批准", startup_failure: "启动失败",
+  stale: "已过期", action_required: "需在 GitHub 处理", startup_failure: "启动失败",
 };
 
 function loadStarred() {
@@ -234,7 +236,7 @@ function _restoreFormulas(html, formulas) {
 }
 
 function activateMath(element) {
-  // No-op when the KaTeX CDN scripts failed to load (e.g. offline).
+  // The plain-text fallback remains usable if the bundled renderer fails.
   if (typeof renderMathInElement !== "function" || !element) return;
   renderMathInElement(element, {
     delimiters: [
@@ -362,8 +364,9 @@ async function refreshStatus() {
     current: "本地资料已是最新",
     failed: statusState.database_ready ? "正在使用本地资料" : "更新失败",
   }[updateState] || (statusState.configured ? "本地会话已配置" : "等待配置");
-  $("#connection").textContent = isPages ? connectionLabel.replaceAll("本地", "浏览器") : connectionLabel;
-  $("#settings-repository").textContent = `${repo.owner}/${repo.repo} · ${repo.branch}`;
+  $("#connection").textContent = isPages ? connectionLabel.replaceAll("本地", "浏览器") : statusState.configured ? connectionLabel : "本机资料";
+  $("#settings-repository").textContent = statusState.configured ? `${repo.owner}/${repo.repo} · ${repo.branch}` : "尚未连接课程资料";
+  $("#forget-credentials-button").disabled = !statusState.configured;
   const rememberField = $("#remember-field");
   const rememberInput = rememberField.querySelector("input");
   rememberField.classList.toggle("hidden", !statusState.keychain_available);
@@ -372,11 +375,19 @@ async function refreshStatus() {
   for (const name of ["owner", "repo", "branch"]) {
     $("#setup-form").elements[name].value = repo[name] || "";
   }
-  $("#setup").classList.toggle("hidden", statusState.configured);
-  $("#dashboard").classList.toggle("hidden", !statusState.configured);
-  $("#app-header").classList.toggle("hidden", !statusState.configured);
-  $("#mobile-nav").classList.toggle("hidden", !statusState.configured);
+  const workspaceOpen = (statusState.configured || personalLibrary || localStorage.getItem("sea-personal-library") === "1") && !setupRequested;
+  $("#setup").classList.toggle("hidden", workspaceOpen);
+  for (const id of ["dashboard", "app-header", "app-sidebar", "mobile-nav"]) $("#" + id)?.classList.toggle("hidden", !workspaceOpen);
+  document.body.classList.toggle("workspace-open", workspaceOpen);
   renderStats(statusState.database);
+  $("#stats").classList.toggle("hidden", !statusState.database_ready);
+  if (workspaceOpen && !statusState.configured && !isPages) {
+    const list = $("#course-list");
+    list.replaceChildren();
+    const text = document.createElement("p"); text.textContent = "把课程资料汇入这里。";
+    list.append(text, createButton("连接课程资料", () => $("#configure-button").click()));
+    list.classList.add("empty");
+  }
   const libraryIdentity = statusState.database_ready
     ? `${repo.owner}/${repo.repo}/${repo.branch}:${statusState.database?.commit_sha || "local"}:${statusState.database?.revision || 0}`
     : "";
@@ -390,7 +401,7 @@ async function refreshStatus() {
     await refreshVisibleNotes();
     loadedLibraryIdentity = libraryIdentity;
   }
-  if (statusState.configured) {
+  if (workspaceOpen) {
     // A status poll updates the current view without interrupting sidebar gestures.
     showView(activeView, {preserveDrawer: true});
   }
@@ -402,8 +413,8 @@ async function refreshStatus() {
 
 function renderStats(db) {
   const values = db ? [
-    [db.courses, "课程"], [db.lectures, "课次"], [db.ready, "已生成笔记"], [db.failed, "失败/待重试"],
-  ] : [["—", "课程"], ["—", "课次"], ["—", "已生成笔记"], ["—", "失败/待重试"]];
+    [db.courses, "课程"], [db.lectures, "课次"], [db.ready, "笔记"],
+  ] : [["—", "课程"], ["—", "课次"], ["—", "笔记"]];
   const root = $("#stats");
   root.replaceChildren();
   values.forEach(([value, label]) => {
@@ -456,8 +467,10 @@ function applyCourseOrganization(result) {
 
 function visibleCourseRows() {
   const f = courseFilter;
-  if (f.kind === "zone" && f.value === "archive") return courseRows.filter(c => courseZone(c.course_id) === "archive");
-  const rows = courseRows.filter(c => courseZone(c.course_id) !== "archive");
+  const query = $("#course-query")?.value.trim().toLowerCase() || "";
+  const matching = courseRows.filter(c => !query || [c.title,c.teacher,c.dept,c.course_id].join(" ").toLowerCase().includes(query));
+  if (f.kind === "zone" && f.value === "archive") return matching.filter(c => courseZone(c.course_id) === "archive");
+  const rows = matching.filter(c => courseZone(c.course_id) !== "archive");
   if (f.kind === "star") return rows.filter((c) => starredCourses.has(String(c.course_id)));
   if (f.kind === "zone") {
     const zones = organization.descendantIds(courseSections, f.value);
@@ -1684,7 +1697,7 @@ async function openLecture(subId, options = {}) {
   // Empty on purpose — renderSummaryVersions auto-selects the latest version.
   selectedSummaryVersionKeys = new Set();
   renderDetail();
-  showView("detail");
+  showView("detail", {restoreReading: !options.terms?.length});
   // 搜索定位：高亮关键词并滚动到首个命中处。
   if (Array.isArray(options.terms) && options.terms.length) {
     const root = $("#detail-content");
@@ -3156,6 +3169,12 @@ async function loadRuns() {
       : stamp.toLocaleString("zh-CN", {month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit"});
     meta.textContent = `${RUN_STATUS_LABELS[statusKey] || statusKey}${stampText ? " · " + stampText : ""}`;
     row.append(link, meta);
+    if (statusKey === "action_required") {
+      const hint = document.createElement("div");
+      hint.className = "meta";
+      hint.textContent = "打开此运行记录，在 GitHub 查看原因并按提示处理。";
+      row.append(hint);
+    }
     root.append(row);
   });
 }
@@ -3178,6 +3197,7 @@ function showView(view, options = {}) {
     closeCourseDrawer();
   }
   const paneIds = {
+    notes: "view-notes",
     courses: "view-courses", lectures: "view-lectures", detail: "view-detail",
     talks: "view-talks", talkDetail: "view-talk-detail",
     search: "view-search", subscriptions: "view-subscriptions", run: "view-run", settings: "view-settings",
@@ -3186,13 +3206,16 @@ function showView(view, options = {}) {
   };
   Object.entries(paneIds).forEach(([name, id]) => $("#" + id).classList.toggle("hidden", name !== view));
   const title = {
-    courses: "iCourse", lectures: currentCourse?.title || "课程", detail: currentLecture ? lectureDisplayName(currentLecture) : "笔记",
+    notes: "手记", courses: "课程", lectures: currentCourse?.title || "课程", detail: currentLecture ? lectureDisplayName(currentLecture) : "笔记",
     talks: "讲座", talkDetail: currentTalk ? talkDisplayName(currentTalk) : "讲座",
     search: "搜索", subscriptions: "订阅",
     run: "运行", settings: "设置", models: "模型与 API", obsidian: "同步到 Obsidian",
     blindCompare: blindCompare?.mode === "open" ? "公开对比" : "盲测对比",
-  }[view] || "iCourse";
+  }[view] || "丰饶之海";
   $("#page-title").textContent = title;
+  document.title = `${title} · 丰饶之海`;
+  document.body.dataset.view = view;
+  window.dispatchEvent(new CustomEvent("sea-view", {detail: {view, changed, options}}));
   $("#back-button").classList.toggle("hidden", !["lectures", "detail", "talkDetail", "models", "obsidian", "rerun", "automation", "blindCompare"].includes(view));
   // Lectures/detail are depths of the courses path — keep 课程 highlighted;
   // Run and Talks each have a top-level entry.
@@ -3975,6 +3998,7 @@ $("#setup-form").onsubmit = async (event) => {
     rerunOpenCourseIds.clear(); rerunLectureCache.clear();
     $("#run-api-key").value = "";
     message("本地会话已配置");
+    setupRequested = false;
     activeView = "courses";
     await refreshStatus();
   } catch (error) {
@@ -3986,9 +4010,12 @@ $("#setup-form").onsubmit = async (event) => {
 };
 
 $("#configure-button").onclick = () => {
+  setupRequested = true;
   $("#dashboard").classList.add("hidden");
   $("#app-header").classList.add("hidden");
   $("#mobile-nav").classList.add("hidden");
+  $("#app-sidebar").classList.add("hidden");
+  document.body.classList.remove("workspace-open");
   $("#setup").classList.remove("hidden");
   window.scrollTo({top: 0, behavior: "smooth"});
 };
@@ -4167,6 +4194,10 @@ document.addEventListener("keydown", (event) => {
 document.querySelectorAll(".nav-button").forEach((button) => {
   button.onclick = async () => {
     const view = button.dataset.view;
+    if (!isPages && !statusState?.configured && ["subscriptions", "run"].includes(view)) {
+      $("#configure-button").click();
+      return;
+    }
     showView(view);
     if (view === "subscriptions") {
       try { await loadSubscriptions(); }
@@ -4177,6 +4208,8 @@ document.querySelectorAll(".nav-button").forEach((button) => {
     } else if (view === "talks") {
       try { await loadTalks(); }
       catch (error) { message(error.message, true); }
+    } else if (view === "notes") {
+      window.SeaNotebook?.load();
     }
   };
 });
@@ -4296,6 +4329,7 @@ async function runSearch(page = 1) {
   clearTimeout(searchTimer);
   const requestId = ++searchRequestId;
   const query = $("#search").value.trim();
+  window.SeaNotebook?.search(query, Boolean($("#search-course").value));
   if (!query) {
     searchLoading = false;
     resetSearchResults("输入关键词后开始搜索。");
@@ -4303,6 +4337,12 @@ async function runSearch(page = 1) {
     return;
   }
   if (page === 1) resetSearchResults("正在搜索…");
+  if (!isPages && !statusState?.configured) {
+    searchLoading = false;
+    resetSearchResults("");
+    renderSearchPagination();
+    return;
+  }
   searchLoading = true;
   $("#search-meta").textContent = "正在搜索…";
   $("#search-meta").classList.remove("hidden");
@@ -4487,7 +4527,7 @@ async function openTalk(talkId, options = {}) {
   talkTab = options.tab === "transcript" ? "transcript" : "summary";
   talkSelectedVersionKeys = new Set();
   renderTalkDetail();
-  showView("talkDetail");
+  showView("talkDetail", {restoreReading: !options.terms?.length});
   scheduleTalkRefresh(talkId);
 }
 
@@ -4940,27 +4980,7 @@ $("#talk-generate-button").onclick = async () => {
   }
 };
 
-let approvalPollBusy = false;
-let lastApprovalError = "";
-async function checkWorkflowApprovals() {
-  if (!statusState?.configured || approvalPollBusy) return;
-  approvalPollBusy = true;
-  try {
-    const result = await api('/api/local/workflow-approvals', {method: 'POST'});
-    const errors = result.errors || [];
-    // Network blips self-heal on the next poll; only surface real GitHub denials.
-    const error = errors.every(item => item.transient) ? "" : errors.map(item => item.message).join('; ');
-    if (error && error !== lastApprovalError) message(`自动批准暂未成功：${error}；可在运行页查看任务。`, true);
-    lastApprovalError = error;
-    if (activeView === 'run') await loadRuns();
-  } catch (error) {
-    if (error.message !== lastApprovalError) message(`审批检查暂不可用：${error.message}`, true);
-    lastApprovalError = error.message;
-  }
-  finally { approvalPollBusy = false; }
-}
-refreshStatus().then(checkWorkflowApprovals).catch((error) => message(`无法连接本地服务：${error.message}`, true));
-setInterval(checkWorkflowApprovals, 30000);
+refreshStatus().catch((error) => message(`无法连接本地服务：${error.message}`, true));
 
 let talkListRefreshBusy = false;
 setInterval(async () => {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import os
 from typing import Protocol, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,7 +31,7 @@ class MacOSKeychainStore:
 
     @property
     def available(self) -> bool:
-        return sys.platform == "darwin"
+        return sys.platform == "darwin" and os.environ.get("SEA_DISABLE_KEYCHAIN") != "1"
 
     @staticmethod
     def _service(settings: "RepositorySettings") -> str:

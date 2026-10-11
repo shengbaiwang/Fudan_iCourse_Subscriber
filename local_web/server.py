@@ -8,13 +8,15 @@ import ipaddress
 import threading
 import webbrowser
 import json
+import os
+import secrets
 import uuid
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
@@ -25,7 +27,6 @@ from .obsidian import ObsidianSyncError, ObsidianSyncService
 from .provider_test import ProviderTestError, test_provider
 from .provider_models import ModelDirectoryError, fetch_provider_models
 from .talk_cloud import TalkCloudSync
-from .workflow_approvals import WorkflowApprovals
 from .runs import LocalRuns, LocalRunBusy
 from src.runtime.auto_check import PAUSE_VARIABLE, parse_auto_check_pauses
 from .api_keychain import LocalAPIKeychain
@@ -50,6 +51,7 @@ from .state import (
     RepositorySettings,
     RuntimeState,
 )
+from .notebook import Notebook, NoteConflict
 from src.runtime.config import DEFAULT_MODEL_PROVIDERS
 from src.runtime.model_config import config_json, validate_model_config
 from src.runtime.run_order import ordered_ids, ordered_lectures
@@ -191,43 +193,47 @@ class TalkSummarizeRequest(BaseModel):
     api_key: SecretStr = Field(min_length=1)
 
 
+class PersonalNoteRequest(BaseModel):
+    title: str = Field(default="", max_length=200)
+    body: str = Field(default="", max_length=2_000_000)
+    revision: int = Field(default=0, ge=0)
+    starred: bool | None = None
+    deleted: bool | None = None
+
+
 def create_app(
     state: RuntimeState | None = None,
     database: DatabaseManager | None = None,
     talk_store: TalkStore | None = None,
     talk_jobs: TalkJobs | None = None,
     talk_uploads: TalkUploadQueue | None = None,
+    notebook: Notebook | None = None,
 ) -> FastAPI:
     runtime = state or RuntimeState()
     db = database or DatabaseManager()
     talks = talk_store or TalkStore()
     jobs = talk_jobs or TalkJobs(talks)
     local_runs = LocalRuns(db)
+    personal_notes = notebook or Notebook(runtime.store.directory)
 
     def _upload_client() -> GitHubClient:
         return client()
 
     uploads = talk_uploads or TalkUploadQueue(talks, _upload_client)
     cloud = TalkCloudSync(talks, uploads, _upload_client, lambda: runtime.credentials)
-    approvals = WorkflowApprovals(
-        _upload_client,
-        lambda: (runtime.settings, runtime.credentials) if runtime.credentials else None,
-    )
 
     @asynccontextmanager
     async def lifespan(_app):
         cloud.start()
-        approvals.start()
         try:
             yield
         finally:
             local_runs.close()
-            approvals.close()
             cloud.close()
 
     static_dir = Path(__file__).with_name("static")
     app = FastAPI(
-        title="iCourse Subscriber Local Console",
+        title="丰饶之海",
         version=__version__,
         docs_url=None,
         redoc_url=None,
@@ -239,7 +245,6 @@ def create_app(
     app.state.talk_jobs = jobs
     app.state.talk_uploads = uploads
     app.state.talk_cloud = cloud
-    app.state.workflow_approvals = approvals
     app.state.local_runs = local_runs
     app.state.obsidian = ObsidianSyncService()
     atexit.register(db.close)
@@ -257,12 +262,63 @@ def create_app(
 
     @app.middleware("http")
     async def security_headers(request, call_next):
+        desktop_token = os.environ.get("SEA_DESKTOP_TOKEN", "")
+        if desktop_token and request.url.path.startswith("/api/"):
+            if not secrets.compare_digest(request.headers.get("X-Sea-Session", ""), desktop_token):
+                return JSONResponse({"detail": "请从丰饶之海应用打开资料库"}, status_code=403)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
+
+    @app.get("/api/local/notebook")
+    async def list_notes(q: str = "", trash: bool = False):
+        return await run_in_threadpool(personal_notes.list, q, trash)
+
+    @app.post("/api/local/notebook")
+    async def create_note(payload: PersonalNoteRequest):
+        return await run_in_threadpool(personal_notes.save, None, payload.title, payload.body)
+
+    @app.get("/api/local/notebook/backup")
+    async def backup_notes():
+        return Response(await run_in_threadpool(personal_notes.backup), media_type="application/zip",
+                        headers={"Content-Disposition": "attachment; filename=sea-notebook.zip"})
+
+    @app.post("/api/local/notebook/restore")
+    async def restore_notes(file: UploadFile = File(...)):
+        from zipfile import BadZipFile
+        data = await file.read(20_000_001)
+        try:
+            count = await run_in_threadpool(personal_notes.restore, data)
+        except (ValueError, BadZipFile, UnicodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"imported": count}
+
+    @app.get("/api/local/notebook/{note_id}")
+    async def read_note(note_id: str):
+        try:
+            return await run_in_threadpool(personal_notes.get, note_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="手记不存在") from exc
+
+    @app.get("/api/local/notebook/{note_id}/versions")
+    async def note_versions(note_id: str):
+        try:
+            return await run_in_threadpool(personal_notes.versions, note_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="手记不存在") from exc
+
+    @app.put("/api/local/notebook/{note_id}")
+    async def save_note(note_id: str, payload: PersonalNoteRequest):
+        try:
+            flags = {name: getattr(payload, name) for name in ("starred", "deleted") if getattr(payload, name) is not None}
+            return await run_in_threadpool(personal_notes.save, note_id, payload.title, payload.body, payload.revision, **flags)
+        except NoteConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="手记不存在") from exc
 
     def client() -> GitHubClient:
         credentials = runtime.credentials
@@ -1255,11 +1311,6 @@ def create_app(
             page_size=page_size,
         )
 
-    @app.post("/api/local/workflow-approvals")
-    async def workflow_approvals():
-        client()  # Require a configured session even when serving a cached result.
-        return await run_in_threadpool(approvals.check)
-
     @app.get("/api/local/workflows")
     async def workflows():
         try:
@@ -1312,6 +1363,18 @@ def main() -> None:
         parser.error("出于安全考虑，非本机地址必须显式使用 --allow-remote")
 
     import uvicorn
+
+    if os.environ.get("SEA_DESKTOP_TOKEN"):
+        import socket
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", args.port))
+        listener.listen(128)
+        port = listener.getsockname()[1]
+        application = create_app()
+        print("SEA_READY " + json.dumps({"url": f"http://127.0.0.1:{port}"}), flush=True)
+        uvicorn.Server(uvicorn.Config(application, log_level="warning")).run(sockets=[listener])
+        listener.close()
+        return
 
     url = f"http://{args.host}:{args.port}"
     if not args.no_open:

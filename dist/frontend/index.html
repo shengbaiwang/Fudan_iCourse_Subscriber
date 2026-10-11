@@ -3,7 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <title>iCourse 控制台</title>
+  <title>丰饶之海</title>
+  <link rel="icon" href="branding/favicon.ico" sizes="16x16 32x32">
+  <link rel="icon" type="image/png" sizes="32x32" href="branding/favicon-32.png">
+  <link rel="icon" type="image/svg+xml" sizes="any" href="branding/favicon.svg">
+  <link rel="apple-touch-icon" sizes="180x180" href="branding/apple-touch-icon.png">
   <script>
     // 首屏渲染前应用主题，避免日间/夜间切换时闪烁
     (function () {
@@ -13,27 +17,36 @@
         || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     })();
   </script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+  <link rel="stylesheet" href="vendor/katex.min.css">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="sea.css">
 </head>
 <body>
+  <aside id="app-sidebar" class="app-sidebar hidden" aria-label="资料库导航">
+    <button id="library-home" class="library-brand" type="button" aria-label="丰饶之海首页">
+      <img class="brand-icon" src="branding/icourse-icon-192.png" width="38" height="38" alt="">
+      <span><strong>丰饶之海</strong><small>私人知识库</small></span>
+    </button>
+      <nav class="desktop-nav" aria-label="主导航">
+        <button class="nav-button" type="button" data-capability="notes" data-view="notes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 16h6"/></svg>手记</button>
+        <button class="nav-button" type="button" data-view="courses"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h6v16H4zM14 4h6v16h-6zM7 8h0M17 8h0"/></svg>课程</button>
+        <button class="nav-button" type="button" data-capability="talks" data-view="talks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg>讲座</button>
+        <button class="nav-button" type="button" data-view="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg>搜索</button>
+        <button class="nav-button" type="button" data-view="subscriptions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></svg>订阅</button>
+        <button class="nav-button" type="button" data-view="run"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 10 7-10 7z"/></svg>运行</button>
+        <button class="nav-button" type="button" data-view="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>设置</button>
+      </nav>
+    <div class="sidebar-bottom"><span class="local-indicator"></span><span>本机资料库</span></div>
+  </aside>
   <header id="app-header" class="app-header hidden">
     <div class="header-inner">
       <div class="header-title">
         <button id="back-button" class="icon-button hidden" type="button" aria-label="返回">←</button>
         <div>
-          <strong id="page-title">iCourse</strong>
+          <strong id="page-title">丰饶之海</strong>
           <span id="connection" class="connection-dot">本地会话</span>
         </div>
       </div>
-      <nav class="desktop-nav" aria-label="主导航">
-        <button class="nav-button" type="button" data-view="courses">课程</button>
-        <button class="nav-button" type="button" data-capability="talks" data-view="talks">讲座</button>
-        <button class="nav-button" type="button" data-view="search">搜索</button>
-        <button class="nav-button" type="button" data-view="subscriptions">订阅</button>
-        <button class="nav-button" type="button" data-view="run">运行</button>
-        <button class="nav-button" type="button" data-view="settings">设置</button>
-      </nav>
       <div class="header-actions">
         <button id="header-sync-button" class="icon-button" type="button" aria-label="检查更新" title="检查更新">↻</button>
         <button id="theme-toggle" class="icon-button" type="button" aria-label="切换到夜间模式" title="切换到夜间模式">🌙</button>
@@ -44,11 +57,14 @@
   <main>
     <section id="setup" class="setup-shell hidden" aria-labelledby="setup-title">
       <div class="brand-lockup">
-        <p id="edition-label">LOCAL EDITION</p>
-        <h1 id="setup-title">iCourse Subscriber</h1>
+        <img class="brand-icon setup-brand-icon" src="branding/icourse-icon-192.png" width="56" height="56" alt="" aria-hidden="true">
+        <div>
+          <p id="edition-label">私人知识库</p>
+          <h1 id="setup-title">丰饶之海</h1>
+        </div>
       </div>
       <div class="setup-card">
-        <h2>连接你的 GitHub Fork</h2>
+        <h2>连接课程资料</h2>
         <form id="setup-form" class="setup-form">
           <div class="two-columns">
             <label>仓库所有者<input name="owner" autocomplete="username" required></label>
@@ -67,9 +83,32 @@
           <button class="primary wide-button" type="submit">连接并打开本地资料库</button>
         </form>
       </div>
+      <button id="open-personal-library" data-capability="notes" class="setup-skip" type="button">先打开私人资料库 →</button>
     </section>
 
     <section id="dashboard" class="hidden">
+
+      <section id="view-notes" class="view-pane notebook-view hidden" aria-label="私人手记">
+        <aside class="notebook-index">
+          <div class="notebook-head"><h1>手记</h1><button id="note-new" class="icon-button" type="button" aria-label="新建手记" title="新建手记 ⌘N">＋</button></div>
+          <input id="note-search" type="search" placeholder="搜索手记" aria-label="搜索手记">
+          <div class="notebook-filters" aria-label="手记筛选"><button data-note-filter="all" class="active" type="button">全部</button><button data-note-filter="starred" type="button">收藏</button><button data-note-filter="trash" type="button">回收站</button></div>
+          <div id="note-list" class="note-list" aria-label="手记列表"></div>
+          <div class="notebook-index-footer"><span id="note-count" class="meta"></span><button id="note-import" class="text-button" type="button">导入 Markdown</button><input id="note-import-files" class="hidden" type="file" accept=".md,.markdown,.txt" multiple></div>
+        </aside>
+        <div class="notebook-paper">
+          <div id="note-welcome" class="note-welcome"><img class="brand-icon" src="branding/icourse-icon-192.png" width="64" height="64" alt=""><h2>让知识在这里汇流。</h2><button id="note-first" class="primary" type="button">写一篇手记</button></div>
+          <article id="note-editor" class="note-editor hidden">
+            <div class="note-toolbar"><button id="note-index-back" class="text-button" type="button">← 手记</button><span id="note-save-state" role="status">已保存</span><div class="note-tools"><button id="note-mode" class="text-button" type="button">阅读</button><button id="note-star" class="icon-button" type="button" aria-label="收藏手记">☆</button><button id="note-more" class="icon-button" type="button" aria-label="手记操作" aria-haspopup="menu">⋯</button></div></div>
+            <input id="note-title" class="note-title-input" aria-label="手记标题" placeholder="未命名手记" maxlength="200">
+            <p id="note-date" class="meta"></p>
+            <textarea id="note-body" class="note-body-input" aria-label="手记正文" placeholder="从一个想法开始…" spellcheck="false"></textarea>
+            <div id="note-preview" class="summary hidden" tabindex="0" aria-label="手记阅读"></div>
+            <details id="note-history" class="note-history hidden"><summary>历史版本</summary><div id="note-history-list"></div></details>
+          </article>
+        </div>
+      </section>
+
       <section id="view-courses" class="view-pane content-wide">
         <div class="view-heading">
           <div class="courses-heading">
@@ -78,12 +117,13 @@
             </button>
             <div><h1>课程</h1></div>
           </div>
+          <div class="library-heading-tools"><button id="continue-reading" class="text-button hidden" type="button">继续阅读 →</button><input id="course-query" type="search" placeholder="筛选课程" aria-label="筛选课程"></div>
         </div>
         <div class="courses-layout">
           <aside id="course-sidebar" class="course-sidebar" aria-label="课程分类"></aside>
           <div class="courses-main">
             <p id="course-filter-caption" class="course-filter-caption"></p>
-            <p id="course-organize-hint" class="course-organize-hint">拖到左侧分区添加归属；在分区内拖动，可移出本分区。触屏长按拖动。</p>
+            <p id="course-organize-hint" class="visually-hidden">拖到左侧分区添加归属；在分区内拖动，可移出本分区。触屏长按拖动。</p>
             <div id="stats" class="stats"></div>
             <div id="course-list" class="course-list empty">正在打开本地资料库。</div>
           </div>
@@ -100,7 +140,7 @@
 
       <section id="view-talks" class="view-pane content-column hidden">
         <div class="view-heading">
-          <div><h1>讲座</h1><p class="muted">上传讲座录音，云端自动转写并生成笔记（与 iCourse 课次同款 ASR + 同款摘要链）；也可直接粘贴已有转写文本手动生成。</p></div>
+          <div><h1>讲座</h1></div>
           <div class="heading-actions"><button id="talk-upload-button" type="button">上传录音</button><button id="talk-new-button" class="primary" type="button">粘贴转写</button></div>
         </div>
         <div id="talk-list" class="lecture-list empty">正在读取本机讲座…</div>
@@ -117,7 +157,7 @@
         </div>
         <section id="talk-summary-controls" class="summary-version-controls hidden" aria-label="讲座版本对比"></section>
         <div id="talk-generate" class="talk-generate hidden">
-          <p class="muted">选择模型并重新输入 API Key 后生成笔记（Key 仅用于本次请求，不保存）。</p>
+          <p class="muted">选择模型，生成笔记。</p>
           <div class="talk-generate-row">
             <select id="talk-model-select" aria-label="选择生成模型"></select>
             <input id="talk-api-key" type="password" autocomplete="off" placeholder="输入所选供应商的 API Key" aria-label="API Key">
@@ -145,7 +185,7 @@
       <dialog id="talk-upload" aria-labelledby="talk-upload-title">
         <form id="talk-upload-form" method="dialog">
           <h2 id="talk-upload-title">上传录音</h2>
-          <p class="muted">录音将加密后传到你的 Fork（talk-audio 分支），云端自动转写并生成笔记（与 iCourse 课次同款），完成后自动删除云端音频。支持 mp3/m4a/wav/flac/ogg/opus/mp4/mov，上限 500MB。上传在后台分片进行（约 4MB/片），页面会显示进度；网络中断可一键断点续传。首次使用前需把本分支 push 到 Fork 的 main（转写 workflow 须在 main 上存在才能被触发）。</p>
+          <p class="muted">录音加密上传后生成笔记，完成后删除云端音频。支持常见音视频格式，最大 500 MB。</p>
           <label>标题（可选）<input id="talk-upload-title-input" maxlength="100" placeholder="例如 梯度下降"></label>
           <label>录音文件<input id="talk-upload-file" type="file" accept=".mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.mp4,.mov,audio/*,video/mp4,video/quicktime"></label>
           <div id="talk-upload-progress" class="talk-upload-progress hidden" aria-live="polite">
@@ -173,7 +213,7 @@
         <div class="detail-tabs" role="tablist" aria-label="笔记内容">
           <button class="detail-tab active" type="button" role="tab" aria-selected="true" data-detail-tab="summary">摘要</button>
           <button class="detail-tab" type="button" role="tab" aria-selected="false" data-detail-tab="transcript">转录</button>
-          <button class="detail-tab" type="button" role="tab" aria-selected="false" data-detail-tab="ppt">PPT OCR</button>
+          <button class="detail-tab" type="button" role="tab" aria-selected="false" data-detail-tab="ppt">幻灯片</button>
         </div>
         <div class="detail-actions">
           <button id="detail-blind-compare" type="button">盲测对比</button>
@@ -231,6 +271,7 @@
           </div>
         </div>
         <p id="search-meta" class="search-meta hidden" role="status" aria-live="polite"></p>
+        <div id="search-personal-results" class="personal-search-results hidden" aria-label="手记搜索结果"></div>
         <div id="search-results" class="search-results empty">输入关键词后开始搜索。</div>
         <nav id="search-pagination" class="pagination hidden" aria-label="搜索结果翻页"></nav>
         <button id="search-retry" class="hidden" type="button">重试</button>
@@ -255,7 +296,7 @@
               </div>
             </div>
             <p id="subscription-check-status" class="meta"></p>
-            <p class="meta">结课后可暂停自动检查：下次核对并补齐已有课次，随后停止检查。资料保留，可随时恢复或单次运行。</p>
+
             <div id="subscription-list" class="subscription-list empty">尚未订阅课程。</div>
             <nav id="subscription-pagination" class="pagination hidden" aria-label="已订阅课程翻页"></nav>
           </section>
@@ -272,7 +313,7 @@
       </section>
 
       <section id="view-run" class="view-pane content-wide hidden">
-        <div class="view-heading"><div><h1>运行</h1><p class="muted">选择运行位置、课程和模型，按队列顺序处理。新笔记自动出现在资料库中。</p></div><span id="run-live-status" class="live-indicator" role="status">自动更新已开启</span></div>
+        <div class="view-heading"><div><h1>运行</h1><p class="muted"></p></div><span id="run-live-status" class="live-indicator" role="status">自动更新已开启</span></div>
         <div class="run-layout">
           <section class="settings-card run-config" aria-label="运行设置">
             <h2>运行设置</h2>
@@ -287,12 +328,12 @@
             <label class="check-option"><input id="single-run-official" type="checkbox"> 优先使用官方转录</label>
             <details class="run-manual"><summary>通过课程 ID 添加</summary><label>课程 ID<input id="single-run-ids" placeholder="多个 ID 用逗号分隔"></label><button id="single-run-button" type="button">加入队列</button></details>
             <button id="rerun-page-submit" class="primary" type="button" disabled>开始运行</button>
-            <p class="meta">会产生所选模型的 API 费用。本地运行需保持本地服务开启。</p>
+            <p class="meta">使用模型会产生 API 费用。</p>
           </section>
           <div class="run-selection">
             <section class="runs-card">
               <div class="section-title"><h2>运行队列</h2><button id="run-button" type="button">选择订阅课程</button></div>
-              <p class="meta">上方课程先处理；↑ ↓ 调整顺序。顺序变更用于下次提交。</p>
+              <p class="meta"></p>
               <div id="run-queue" class="run-queue empty">从下方选择课程或课次。</div>
               <button id="run-save-priority" type="button">保存订阅课程的每日优先级</button>
               <p id="run-priority-status" class="meta" role="status"></p>
@@ -304,7 +345,7 @@
             </section>
           </div>
         </div>
-        <section class="runs-card run-history"><div class="section-title"><h2>本地运行</h2><span class="meta">每 3 秒自动更新</span></div><div id="local-runs" class="runs-list empty">暂无本地任务。</div></section>
+        <section class="runs-card run-history"><div class="section-title"><h2>本地运行</h2><span class="meta">自动更新</span></div><div id="local-runs" class="runs-list empty">暂无本地任务。</div></section>
         <section class="runs-card run-history"><div class="section-title"><h2>GitHub Actions</h2><button id="refresh-runs-button" type="button">刷新状态</button></div><div id="runs" class="runs-list empty">正在读取运行记录…</div><div class="quick-actions"><button id="backfill-titles-button" type="button">设置标题补齐任务</button><button data-capability="obsidian" id="obsidian-button" type="button">打开 Obsidian 同步</button></div></section>
       </section>
 
@@ -312,12 +353,13 @@
         <div class="view-heading"><div><h1>设置</h1></div></div>
         <section class="settings-card"><h2>当前连接</h2><p id="settings-repository" class="mono-value">—</p><div class="settings-actions"><button id="configure-button" type="button">重新配置会话</button><button id="forget-credentials-button" class="danger" type="button">忘记本机登录</button></div></section>
         <section class="settings-card"><h2>管理</h2><div class="settings-actions"><button id="model-button" class="primary" type="button">打开模型管理</button><button data-capability="obsidian" id="settings-obsidian-button" type="button">打开 Obsidian 同步</button></div></section>
+        <section data-capability="notes" class="settings-card"><h2>保存与备份</h2><p class="meta">手记和历史版本保存在本机，备份可导入其他电脑。</p><div class="settings-actions"><button id="notebook-backup" type="button">导出手记备份</button><button id="notebook-restore" type="button">导入备份</button><input id="notebook-restore-file" class="hidden" type="file" accept=".zip"></div><p id="notebook-backup-status" class="meta" role="status"></p></section>
         <section class="settings-card"><h2>工具</h2><div class="settings-actions"><button id="settings-rerun-button" type="button">重新生成笔记</button><button id="settings-automation-button" type="button">运行与进度</button></div></section>
       </section>
 
       <section id="model-management" class="view-pane content-wide hidden" aria-labelledby="model-management-title">
         <div class="view-heading compact"><div><h1 id="model-management-title">模型与 API</h1><p id="model-source" class="hidden"></p></div><button id="model-close-button" type="button">返回设置</button></div>
-        <p class="muted">先配置服务商，再添加模型。按列表顺序调用，失败时自动尝试下一项。</p>
+        <p class="muted"></p>
         <div class="model-workspace">
           <aside class="provider-sidebar" aria-label="模型服务商">
             <div class="section-title"><h2>服务商</h2><span id="provider-count" class="meta"></span></div>
@@ -348,6 +390,7 @@
   </main>
 
   <nav id="mobile-nav" class="mobile-nav hidden" aria-label="主导航">
+    <button class="nav-button" type="button" data-capability="notes" data-view="notes">手记</button>
     <button class="nav-button" type="button" data-view="courses">课程</button>
     <button class="nav-button" type="button" data-capability="talks" data-view="talks">讲座</button>
     <button class="nav-button" type="button" data-view="search">搜索</button>

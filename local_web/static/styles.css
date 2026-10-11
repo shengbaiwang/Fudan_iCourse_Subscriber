@@ -42,6 +42,9 @@ textarea { resize:vertical; }
 .header-inner { max-width:1120px; height:100%; margin:auto; padding:0 16px; display:flex; align-items:center; justify-content:space-between; gap:16px; }
 .header-title { display:flex; align-items:center; gap:7px; min-width:150px; }
 .header-title strong { display:block; font-size:16px; }
+.brand-icon { display:block; flex:none; border-radius:22%; }
+.header-brand-icon { width:32px; height:32px; }
+.setup-brand-icon { width:56px; height:56px; }
 .connection-dot { display:block; color:var(--muted); font-size:11px; }
 .desktop-nav { display:flex; align-items:center; gap:2px; margin-left:auto; }
 .nav-button { border:0; background:transparent; color:var(--muted); padding:7px 12px; }
@@ -60,7 +63,7 @@ main { min-height:calc(100vh - 56px); }
 .view-heading h1 { margin:0; font-size:23px; line-height:1.25; letter-spacing:-.02em; }
 
 .setup-shell { max-width:448px; margin:0 auto; padding:clamp(42px,10vh,90px) 22px 50px; }
-.brand-lockup { margin-bottom:24px; }
+.brand-lockup { display:flex; align-items:center; gap:14px; margin-bottom:24px; }
 .brand-lockup p { margin:0 0 4px; color:var(--blue); font-size:11px; font-weight:800; letter-spacing:.16em; }
 .brand-lockup h1 { margin:0; font-size:29px; letter-spacing:-.04em; }
 .setup-card,.settings-card,.runs-card,.detail-card,.action-card { background:var(--card); border:1px solid var(--line); border-radius:12px; box-shadow:0 1px 2px rgba(0,0,0,.025); }

@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1254 1254" role="img" aria-labelledby="title desc">
+  <title id="title">iCourse — 秩序成为海浪</title>
+  <desc id="desc">午夜蓝背景上的圆润三角形。三层蓝色从整齐的水平排列向右上涌，成为海浪。</desc>
+  <defs>
+    <radialGradient id="background" cx="55%" cy="51%" r="75%">
+      <stop offset="0" stop-color="#011b6b"/>
+      <stop offset=".62" stop-color="#01185f"/>
+      <stop offset="1" stop-color="#031955"/>
+    </radialGradient>
+    <linearGradient id="upper" gradientUnits="userSpaceOnUse" x1="742" y1="268" x2="383" y2="708">
+      <stop offset="0" stop-color="#ccecff"/>
+      <stop offset=".42" stop-color="#98d2fd"/>
+      <stop offset="1" stop-color="#60aefd"/>
+    </linearGradient>
+    <linearGradient id="channel" gradientUnits="userSpaceOnUse" x1="355" y1="746" x2="815" y2="480">
+      <stop offset="0" stop-color="#0340b4"/>
+      <stop offset=".22" stop-color="#0035ac"/>
+      <stop offset=".5" stop-color="#011a68"/>
+      <stop offset=".75" stop-color="#02175b"/>
+      <stop offset="1" stop-color="#031858"/>
+    </linearGradient>
+    <linearGradient id="middle" gradientUnits="userSpaceOnUse" x1="714" y1="544" x2="705" y2="842">
+      <stop offset="0" stop-color="#43abfc"/>
+      <stop offset=".46" stop-color="#1785f8"/>
+      <stop offset="1" stop-color="#1368ef"/>
+    </linearGradient>
+    <radialGradient id="middle-light" gradientUnits="userSpaceOnUse" cx="380" cy="800" r="520">
+      <stop offset="0" stop-color="#42a5ff" stop-opacity=".3"/>
+      <stop offset=".6" stop-color="#42a5ff" stop-opacity=".1"/>
+      <stop offset="1" stop-color="#42a5ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="lower" gradientUnits="userSpaceOnUse" x1="660" y1="682" x2="660" y2="981">
+      <stop offset="0" stop-color="#399bfd"/>
+      <stop offset=".3" stop-color="#147cf5"/>
+      <stop offset=".55" stop-color="#015ee0"/>
+      <stop offset=".7" stop-color="#0044c6"/>
+      <stop offset="1" stop-color="#072ba4"/>
+    </linearGradient>
+    <radialGradient id="lower-light" gradientUnits="userSpaceOnUse" cx="1020" cy="810" r="390">
+      <stop offset="0" stop-color="#0064ff" stop-opacity=".4"/>
+      <stop offset="1" stop-color="#0064ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="edge" gradientUnits="userSpaceOnUse" x1="280" y1="829" x2="949" y2="699">
+      <stop offset="0" stop-color="#83ccff" stop-opacity=".12"/>
+      <stop offset=".74" stop-color="#83ccff" stop-opacity=".48"/>
+      <stop offset="1" stop-color="#83ccff" stop-opacity=".15"/>
+    </linearGradient>
+    <path id="silhouette" d="M 698 269
+      C 706 260 719 258 729 266
+      C 733 270 736 275 739.6 280
+      C 874.7 493.3 983.9 706.7 1063 920
+      C 1069 935 1068 947 1055 956
+      C 1033 972 831 980 638 980
+      C 469 980 281 975 217 951
+      C 186 940 186 928 198 900
+      C 213 873 223 859 232 850
+      C 383 665 524 459 684 280
+      C 689 275 694 272 698 269 Z"/>
+    <clipPath id="triangle"><use href="#silhouette"/></clipPath>
+  </defs>
+  <rect width="1254" height="1254" rx="270" fill="url(#background)"/>
+  <g clip-path="url(#triangle)">
+    <use href="#silhouette" fill="url(#upper)"/>
+    <path fill="url(#channel)" d="M 0 700 H 426
+      C 535 701 621 599 737 494
+      C 790 450 846 465 887 523
+      L 1254 523 V 1254 H 0 Z"/>
+    <path fill="url(#middle)" d="M 0 753 H 423
+      C 548 753 637 668 741 581
+      C 801 540 861 542 904 571
+      C 928 588 944 611 963 637
+      L 1254 637 V 1254 H 0 Z"/>
+    <path fill="url(#middle-light)" d="M 0 753 H 423
+      C 548 753 637 668 741 581
+      C 801 540 861 542 904 571
+      C 928 588 944 611 963 637
+      L 1254 637 V 1254 H 0 Z"/>
+    <path fill="url(#lower)" d="M 0 829 H 417
+      C 548 829 648 775 759 720
+      C 835 680 907 676 968 713
+      C 997 732 1020 763 1042 790
+      L 1254 790 V 1254 H 0 Z"/>
+    <path fill="url(#lower-light)" d="M 0 829 H 417
+      C 548 829 648 775 759 720
+      C 835 680 907 676 968 713
+      C 997 732 1020 763 1042 790
+      L 1254 790 V 1254 H 0 Z"/>
+    <path fill="none" stroke="url(#edge)" stroke-width="1.6" d="M 248 829 H 417
+      C 548 829 648 775 759 720
+      C 835 680 907 676 968 713
+      C 997 732 1020 763 1042 790"/>
+  </g>
+</svg>

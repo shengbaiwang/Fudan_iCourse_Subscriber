@@ -34,13 +34,16 @@ class LocalRuns:
 
     @staticmethod
     def python() -> str:
+        if getattr(sys, "frozen", False):
+            return sys.executable
         value = ROOT / (".venv-course/Scripts/python.exe" if os.name == "nt" else ".venv-course/bin/python")
         return str(value) if value.is_file() else sys.executable
 
     def capabilities(self):
-        result = subprocess.run([self.python(), "-c",
-            "import importlib.util,json; print(json.dumps([n for n in ['openai','sherpa_onnx','rapidocr_onnxruntime','psutil','imagehash','numpy','PIL','requests','curl_cffi','imageio_ffmpeg'] if importlib.util.find_spec(n) is None]))"],
-            capture_output=True, text=True, timeout=10)
+        command = [self.python(), "--capabilities"] if getattr(sys, "frozen", False) else [self.python(), "-c",
+            "import importlib.util,json; print(json.dumps([n for n in ['openai','sherpa_onnx','rapidocr_onnxruntime','psutil','imagehash','numpy','PIL','requests','curl_cffi','imageio_ffmpeg'] if importlib.util.find_spec(n) is None]))"]
+        # The source interpreter accepts -c; a frozen backend uses its dispatcher.
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
         missing = json.loads(result.stdout) if result.returncode == 0 else ["Python 运行环境"]
         models = (ROOT / "silero_vad.onnx").is_file() and (ROOT / "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17").is_dir()
         return {"local": True, "process_ready": not missing and models,
@@ -83,8 +86,9 @@ class LocalRuns:
                 with self.lock:
                     if job["status"] == "cancelled":
                         return
-                    process = subprocess.Popen([self.python(), "-u", str(ROOT / "scripts/run_console_job.py")],
-                        cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    command = [self.python(), "--worker"] if getattr(sys, "frozen", False) else [self.python(), "-u", str(ROOT / "scripts/run_console_job.py")]
+                    process = subprocess.Popen(command,
+                        cwd=directory if getattr(sys, "frozen", False) else ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, start_new_session=True)
                     self.processes[job_id] = process
                     cleanup.callback(self._terminate, process)

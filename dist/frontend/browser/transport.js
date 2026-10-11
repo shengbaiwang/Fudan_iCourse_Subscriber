@@ -8,48 +8,6 @@
   let commitSha = null;
   let syncing = null;
   const encryptedCache = new Map();
-  let approvalCheck = null, approvalSession = null, nextApprovalCheck = 0;
-  let approvalResult = {approved: [], errors: []};
-
-  async function checkApprovals() {
-    const session = credentials;
-    if (session !== approvalSession) {
-      approvalSession = session; nextApprovalCheck = 0; approvalCheck = null;
-      approvalResult = {approved: [], errors: []};
-    }
-    if (!session || Date.now() < nextApprovalCheck) return approvalResult;
-    if (approvalCheck) return approvalCheck;
-    const {owner, repo} = repository;
-    // Bind both the token and destination to this session, including across awaits.
-    const request = async (path, options = {}) => {
-      const response = await fetch(`https://api.github.com${path}`, {...options, headers: {
-        Authorization: `Bearer ${session.token}`, Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      }});
-      const body = await response.text();
-      if (!response.ok) throw new Error(`GitHub ${response.status}：${body.slice(0,500)}`);
-      return body ? JSON.parse(body) : null;
-    };
-    const task = window.ICourseWorkflowApprovals.reconcile(request, owner, repo, () => credentials === session)
-      .catch(error => {
-        const transient = error.name === 'TypeError' || /network|fetch|Failed to fetch/i.test(error.message || '');
-        return {approved: [], errors: [{
-          message: transient ? '网络连接 GitHub 失败，稍后自动重试' : error.message,
-          transient,
-        }]};
-      });
-    approvalCheck = task;
-    const result = await task;
-    if (credentials === session) {
-      approvalResult = result;
-      const errors = result.errors || [];
-      const delay = !errors.length || errors.every(item => item.transient) ? 30000 : 300000;
-      nextApprovalCheck = Date.now() + delay;
-    }
-    if (approvalCheck === task) approvalCheck = null;
-    return credentials === session ? result : {approved: [], errors: []};
-  }
-
   function readJSON(key, fallback) {
     try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch (_) { return fallback; }
   }
@@ -376,7 +334,6 @@
       return {ok: true};
     }
     if (!credentials) throw new Error('请先连接 GitHub 仓库');
-    if (route === '/workflow-approvals' && method === 'POST') return checkApprovals();
     if (route === '/sync' && method === 'POST') return synchronize();
     if (route === '/run-capabilities') return {local:false,github:true,process_ready:false,summary_ready:false};
     if (route === '/runs') return method === 'POST' ? startRun(payload) : {jobs:[]};
