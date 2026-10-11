@@ -176,6 +176,7 @@
       if (!Array.isArray(row.models) || row.models.some(model => typeof model !== 'string')) throw new Error(`${name} 的模型列表无效`);
       const models = ids(row.models);
       if (!models.length || models.length > 30 || models.some(model => model.length > 200)) throw new Error(`${name} 需要 1–30 个有效模型`);
+      if ((url.hostname === 'openrouter.ai' || name.toLowerCase() === 'openrouter') && models.some(model => ['openrouter/auto','openrouter/free','openrouter/bodybuilder','openrouter/auto-exacto'].includes(model.toLowerCase().split(':')[0]) || /^[@~]/.test(model) || model.includes('*'))) throw new Error('OpenRouter 只允许添加具体模型 ID，不能自动选模或使用预设');
       if (row.enabled !== undefined && typeof row.enabled !== 'boolean') throw new Error('enabled 必须是布尔值');
       const provider = {name, api_key_env: env, default_base_url: base, models, enabled: row.enabled !== false};
       if (row.base_url_env) {
@@ -235,9 +236,8 @@
       if (id.length > 100 || id.includes(',') || !db.getLecture(id)?.transcript?.trim()) throw new Error(`课次没有可用转录或 ID 无效：${id}`);
     }
     const config = await providers();
-    const provider = config.providers.find(row => row.name === payload.provider && row.enabled && row.api_key_configured);
-    if (!provider?.models.includes(payload.model)) throw new Error('所选模型未启用或尚未配置 Key');
-    await dispatch('single_run.yml', {inputs: {course_ids: '', resummarize_sub_ids: subIds.join(','), summary_provider: payload.provider, summary_model: payload.model, use_official_transcript: 'false'}});
+    if (!config.providers.some(row => row.enabled && row.api_key_configured)) throw new Error('请先保存已启用模型的 API Key');
+    await dispatch('single_run.yml', {inputs: {course_ids: '', resummarize_sub_ids: subIds.join(','), use_official_transcript: 'false'}});
     return {ok: true, sub_ids: subIds, count: subIds.length};
   }
 
@@ -249,10 +249,9 @@
     const courseIds = ids(payload.course_ids).sort((a,b) => (rank.get(a) ?? rank.size) - (rank.get(b) ?? rank.size));
     if (courseIds.some(id => id.length > 100 || /[,\s]/.test(id))) throw new Error('课程 ID 格式不正确');
     const config = await providers();
-    const provider = config.providers.find(row => row.name === payload.provider && row.enabled && row.api_key_configured);
-    if (!provider?.models.includes(payload.model)) throw new Error('所选模型未启用或尚未配置 GitHub Key');
+    if (!config.providers.some(row => row.enabled && row.api_key_configured)) throw new Error('请先保存已启用模型的 GitHub Key');
     const inputs = {course_ids:courseIds.join(','),lecture_order:payload.lecture_order,
-      summary_provider:payload.provider,summary_model:payload.model,use_official_transcript:String(!!payload.use_official_transcript)};
+      use_official_transcript:String(!!payload.use_official_transcript)};
     let count = courseIds.length;
     if (kind === 'rerun') {
       const selected = ids(payload.sub_ids);

@@ -272,30 +272,34 @@ def select_summary_provider(provider_name: str, model_name: str | None):
     return providers[0]
 
 
-def build_summarizer(provider_name: str, model_name: str | None):
+def summary_providers():
+    from local_web.state import ModelConfigStore
     from src.runtime import config
+    from src.runtime.model_config import runtime_providers
+    return runtime_providers(ModelConfigStore().load() or {"version": 1, "providers": config.MODEL_PROVIDERS})
+
+
+def build_summarizer(provider_name="default", model_name=None):
     from src.ai.summarizer import Summarizer
     from local_web.api_keychain import LocalAPIKeychain
     from src.runtime.model_config import normalize_base_url
-    provider = select_summary_provider(provider_name, model_name)
-    # Never fall back to a different host sharing the same key variable.
-    key_name = provider["api_key_env"]
-    override = os.environ.get(provider.get("base_url_env", ""), "").strip()
-    if override and normalize_base_url(override) != provider["default_base_url"]:
-        raise ValueError("摘要地址与本机保存配置不符；请在模型配置中明确设置地址")
-    if not os.environ.get(key_name):
-        remembered = LocalAPIKeychain().load(provider)
-        if remembered:
-            os.environ[key_name] = remembered
-            print(f"已从 macOS 钥匙串读取 {provider['name']} API Key。", flush=True)
-    if not os.environ.get(key_name):
-        if not sys.stdin.isatty():
-            raise ValueError(f"本机缺少 {key_name}；请在终端运行摘要入口并隐藏输入 Key")
-        os.environ[key_name] = getpass.getpass(f"{provider['name']} API Key（仅本次进程使用）：")
-    if not os.environ.get(key_name):
-        raise ValueError("API Key 为空；转录/OCR 仍可用 prepare 单独运行")
-    config.MODEL_PROVIDERS = [provider]
-    return Summarizer()
+    # Legacy CLI choices cannot narrow or reorder generation.
+    providers = summary_providers()
+    resolved = []
+    for provider in providers:
+        override = os.environ.get(provider.get("base_url_env", ""), "").strip()
+        if override and normalize_base_url(override) != provider["default_base_url"]:
+            raise ValueError("摘要地址与本机保存配置不符；请在模型配置中明确设置地址")
+        key = os.environ.get(provider["api_key_env"]) or LocalAPIKeychain().load(provider)
+        if not key and not resolved and sys.stdin.isatty():
+            key = getpass.getpass(f"{provider['name']} API Key（仅本次进程使用，可留空跳过）：")
+        if key:
+            resolved.append({**provider, "base_url": provider["default_base_url"], "api_key": key})
+        else:
+            print(f"跳过 {provider['name']}：未配置本机 API Key。", flush=True)
+    if not resolved:
+        raise ValueError("本机缺少 API Key；请在模型与 API 中保存本机密钥")
+    return Summarizer(providers=resolved)
 
 
 def summarize(db, checkpoint, lecture, summarizer):

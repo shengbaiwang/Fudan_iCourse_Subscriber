@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from local_web.database import DatabaseManager
 from local_web.github_client import BlobEntry, DataManifest, GitHubAPIError
 from local_web.runs import LocalRuns, LocalRunBusy
-from local_web.server import AutoCheckRequest, RunPreferencesRequest, RunRequest, create_app
+from local_web.server import ProviderTestRequest, AutoCheckRequest, RunPreferencesRequest, RunRequest, create_app
 from local_web.state import RuntimeCredentials, RuntimeState, SettingsStore
 from local_web.talks import TalkStore
 from scripts.publish_progress import publish_database, snapshot_database
@@ -96,6 +96,41 @@ class RunEndpointsTest(unittest.TestCase):
         self.call("/api/local/runs", "POST", RunRequest(kind="titles", course_ids=["2"], provider="test", model="model"))
         self.assertEqual(self.gh.dispatches[-1][1]["inputs"]["backfill_titles"], "true")
         self.assertEqual(self.gh.dispatches[-1][1]["inputs"]["course_ids"], "2")
+
+    def test_all_cloud_task_kinds_ignore_legacy_model_overrides(self):
+        for kind in ("process", "rerun", "titles"):
+            self.call("/api/local/runs", "POST", RunRequest(kind=kind, course_ids=["1"],
+                      provider="OpenRouter", model="unconfigured/model"))
+            inputs = self.gh.dispatches[-1][1]["inputs"]
+            self.assertNotIn("summary_provider", inputs)
+            self.assertNotIn("summary_model", inputs)
+
+    def test_local_task_passes_every_configured_key_in_saved_order(self):
+        providers = [PROVIDER, {**PROVIDER, "name": "kimi", "models": ["kimi-k3"], "api_key_env": "LLM_KIMI_API_KEY"}]
+        self.gh.repository_variable = lambda _: json.dumps({"version": 1, "providers": providers})
+        runs = self.app.state.local_runs
+        with patch("local_web.server.LocalAPIKeychain.load", side_effect=lambda p: "key-" + p["name"]), \
+             patch.object(runs, "capabilities", return_value={"process_ready": True, "summary_ready": True}), \
+             patch.object(runs, "start", return_value={"id": "job"}) as start:
+            self.call("/api/local/runs", "POST", RunRequest(target="local", kind="titles", course_ids=["1"]))
+        self.assertEqual([p["name"] for p in start.call_args.args[2]["providers"]], ["test", "kimi"])
+        self.assertEqual(start.call_args.args[3], {"LLM_TEST_API_KEY": "key-test", "LLM_KIMI_API_KEY": "key-kimi"})
+        self.assertNotIn("model", start.call_args.args[0])
+
+    def test_openrouter_connection_probe_cannot_use_an_unadded_model(self):
+        saved = {**PROVIDER, "name": "OpenRouter", "base_url": "https://openrouter.ai/api/v1", "models": ["saved/model"]}
+        self.gh.repository_variable = lambda _: json.dumps({"version": 1, "providers": [saved]})
+        with patch("local_web.server.test_provider", return_value={"ok": True}) as probe:
+            with self.assertRaises(HTTPException) as error:
+                self.call("/api/local/model-providers/test", "POST", ProviderTestRequest(
+                    name="OpenRouter", base_url=saved["base_url"], api_key_env=saved["api_key_env"],
+                    model="unadded/model", api_key="synthetic-key"))
+            self.assertEqual(error.exception.status_code, 400)
+            probe.assert_not_called()
+            self.call("/api/local/model-providers/test", "POST", ProviderTestRequest(
+                name="OpenRouter", base_url=saved["base_url"], api_key_env=saved["api_key_env"],
+                model="saved/model", api_key="synthetic-key"))
+            probe.assert_called_once()
 
     def test_daily_reorder_preserves_subscriptions(self):
         result = self.call("/api/local/run-preferences", "PUT", RunPreferencesRequest(course_ids=["2", "1"], lecture_order="oldest"))

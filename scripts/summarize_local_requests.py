@@ -13,18 +13,13 @@ import os
 from pathlib import Path
 import sys
 import time
-from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts import local_course as runner
 
 
-class IncompleteSummaryError(ValueError):
-    def __init__(self, reason):
-        self.finish_reason = reason
-        super().__init__(f"摘要未正常完成（finish_reason={reason!r}），禁止导入截断结果")
-
+from src.ai.model_policy import IncompleteSummaryError
 
 def complete_result(value, request):
     return (isinstance(value, dict)
@@ -37,42 +32,15 @@ def complete_result(value, request):
 
 
 def generate_result(summarizer, request):
-    if len(summarizer.providers) != 1 or len(summarizer.providers[0]["models"]) != 1:
-        raise ValueError("摘要入口必须选定一个服务商和一个模型")
-    provider = summarizer.providers[0]
-    mimo = urlparse(provider["base_url"]).hostname in {
-        "api.xiaomimimo.com", "token-plan-cn.xiaomimimo.com",
-    }
-    # MiMo enables thinking by default and counts it against the same output
-    # budget as the notes. Allocate the budget to the requested final text.
-    budgets = (32768, 65536) if mimo else (None,)
-    for attempt, budget in enumerate(budgets):
-        options = {"timeout": 600 if mimo else 180}
-        if mimo:
-            options.update(max_completion_tokens=budget,
-                           extra_body={"thinking": {"type": "disabled"}})
-        response = summarizer._clients[provider["name"]].chat.completions.create(
-            model=provider["models"][0], messages=request["messages"], **options,
-        )
-        reason = response.choices[0].finish_reason if response.choices else "empty_choices"
-        content = response.choices[0].message.content if response.choices else None
-        usage = getattr(response, "usage", None)
-        print(f"[{request.get('sub_id', '?')}] API 完成状态：{reason!r}；"
-              f"正文 {len(content) if isinstance(content, str) else 0} 字；"
-              f"输出 tokens {getattr(usage, 'completion_tokens', None)}", flush=True)
-        if reason == "stop":
-            break
-        if mimo and reason == "length" and attempt + 1 < len(budgets):
-            print(f"[{request.get('sub_id', '?')}] 输出触及额度，增加额度重试一次。", flush=True)
-            continue
-        raise IncompleteSummaryError(reason)
+    response, provider, requested_model, options = summarizer.complete_messages(request["messages"])
+    usage = getattr(response, "usage", None)
     text = response.choices[0].message.content
     actual_model = response.model
     if not isinstance(text, str) or not text.strip() or not isinstance(actual_model, str) or not actual_model.strip():
         raise ValueError("摘要缺少完整正文或实际模型名")
     receipt = {"course_id": request["course_id"], "sub_id": request["sub_id"],
             "prompt_sha256": request["prompt_sha256"], "text": text,
-            "model": f"{provider['name']}/{actual_model}", "requested_model": provider["models"][0],
+            "model": f"{provider['name']}/{actual_model}", "requested_model": requested_model,
             "provider": provider["name"], "base_url": provider["base_url"],
             "finish_reason": "stop"}
     if usage is not None:
@@ -80,8 +48,8 @@ def generate_result(summarizer, request):
         receipt["usage"] = {"prompt_tokens": getattr(usage, "prompt_tokens", None),
                             "completion_tokens": getattr(usage, "completion_tokens", None),
                             "reasoning_tokens": getattr(details, "reasoning_tokens", None)}
-    if mimo:
-        receipt["max_completion_tokens"] = budget
+    if "max_completion_tokens" in options:
+        receipt["max_completion_tokens"] = options["max_completion_tokens"]
         receipt["thinking"] = "disabled"
     return receipt
 
@@ -98,14 +66,17 @@ def generate_with_retry(summarizer, request):
     for attempt in range(3):
         try:
             return generate_result(summarizer, request)
-        except (APIConnectionError, APIStatusError) as exc:
-            status = getattr(exc, 'status_code', None)
-            transient = isinstance(exc, APIConnectionError) or status == 429 or status is not None and status >= 500
-            if not transient or attempt == 2:
+        except (APIConnectionError, APIStatusError, RuntimeError) as exc:
+            failures = getattr(exc, "failures", [exc])
+            def transient(error):
+                status = getattr(error, "status_code", None)
+                return (isinstance(error, APIConnectionError) or isinstance(error, APIStatusError)
+                        and (status == 429 or status is not None and status >= 500))
+            if not failures or not all(transient(error) for error in failures) or attempt == 2:
                 raise
             delay = 10 * (attempt + 1)
-            print(f"[{request['sub_id']}] {type(exc).__name__}（HTTP {status}）；"
-                  f"{delay} 秒后重试，不改变服务商。", flush=True)
+            print(f"[{request['sub_id']}] 已配置模型均暂时不可用；"
+                  f"{delay} 秒后按保存顺序重试。", flush=True)
             time.sleep(delay)
 
 
@@ -145,16 +116,14 @@ def process_requests(creds, manifest, lectures, summarizer, watch):
     output.mkdir(exist_ok=True)
     os.chmod(output, 0o700)
     blocked = {}
-    provider = summarizer.providers[0]
+    chain = [{"name": p["name"], "base_url": p["base_url"], "models": p["models"]} for p in summarizer.providers]
     for path in (runner.RUN_DIR / "summary-failures").glob("*.json"):
         try:
             failure = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
         if (failure.get("course_id") == runner.COURSE_ID
-                and failure.get("provider") == provider["name"]
-                and failure.get("base_url", provider["base_url"]) == provider["base_url"]
-                and failure.get("model", provider["models"][0]) == provider["models"][0]
+                and failure.get("model_chain") == chain
                 and failure.get("finish_reason") == "content_filter"):
             blocked[str(failure["sub_id"])] = {
                 "prompt_sha256": failure["prompt_sha256"], "finish_reason": "content_filter",
@@ -193,8 +162,7 @@ def process_requests(creds, manifest, lectures, summarizer, watch):
                     failures.mkdir(exist_ok=True)
                     runner.write_private(failures / f"{sub_id}.json", json.dumps({
                         "course_id": runner.COURSE_ID, "sub_id": sub_id,
-                        "provider": provider["name"], "model": provider["models"][0],
-                        "base_url": provider["base_url"],
+                        "model_chain": chain,
                         **blocked[sub_id],
                     }, ensure_ascii=False, indent=2).encode())
                     print(f"[{sub_id}] {exc}；保留失败记录，继续其他课次。", flush=True)
@@ -246,11 +214,9 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("这门课已有终端摘要任务运行") from None
-        provider = runner.select_summary_provider(args.provider, args.model)
-        print(f"摘要服务：{provider['name']} / {provider['models'][0]}\n地址：{provider['default_base_url']}\n"
-              f"将发送课程 {runner.COURSE_ID} 已验收的完整转录及课件 OCR，生成课堂笔记。", flush=True)
+        print(f"按已保存模型顺序生成课程 {runner.COURSE_ID} 的课堂笔记。", flush=True)
         creds = runner.credentials()
-        write_status("waiting_key", provider=provider["name"], model=provider["models"][0])
+        write_status("waiting_key", model_policy="saved-order")
         summarizer = runner.build_summarizer(args.provider, args.model)
         return process_requests(creds, manifest, lectures, summarizer, args.watch)
 

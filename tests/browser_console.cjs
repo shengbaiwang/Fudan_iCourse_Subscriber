@@ -883,10 +883,18 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.getByRole('button',{name:'上移科学与社会',exact:true}).click();
       assert.deepEqual(await page.locator('#run-queue .run-queue-row').evaluateAll(rows=>rows.map(row=>row.dataset.courseId)),['2','1']);
       await page.locator('#run-lecture-order').selectOption('newest');
+      assert.equal(await page.locator('#rerun-page-model-select').count(),0);
+      assert.match(await page.locator('#run-model-order').innerText(),/test \/ model-a/);
       await page.locator('#rerun-page-submit').click();
       await page.waitForFunction(()=>document.querySelector('#message').textContent.includes('已开始GitHub Actions'));
       assert.equal(dispatches.at(-1).body.inputs.course_ids,'2,1');
       assert.equal(dispatches.at(-1).body.inputs.lecture_order,'newest');
+      assert.equal(dispatches.at(-1).body.inputs.summary_provider,undefined);
+      assert.equal(dispatches.at(-1).body.inputs.summary_model,undefined);
+      if (mode==='local') {
+        assert.equal(runRequests.at(-1).provider,undefined);
+        assert.equal(runRequests.at(-1).model,undefined);
+      }
       await page.locator('#run-target').selectOption('local');
       if(mode==='local') {
         await page.locator('#run-api-key').fill('synthetic-local-key');

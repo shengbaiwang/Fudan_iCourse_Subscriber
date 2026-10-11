@@ -10,7 +10,6 @@ AUTO_CHECK_PAUSES = parse_auto_check_pauses(os.environ.get("COURSE_AUTO_CHECK_JS
 from src.runtime.model_config import (
     normalize_base_url,
     runtime_providers,
-    select_runtime_model,
 )
 
 STUDENT_ID = os.environ.get("StuId", "")
@@ -87,10 +86,7 @@ def _declared_model_providers() -> list[dict]:
     raw = os.environ.get("MODEL_PROVIDERS_JSON", "").strip()
     try:
         declared = DEFAULT_MODEL_PROVIDERS if not raw else json.loads(raw)
-        provider_name = os.environ.get("SUMMARY_PROVIDER", "").strip()
-        model_name = os.environ.get("SUMMARY_MODEL", "").strip()
-        if provider_name or model_name:
-            return select_runtime_model(declared, provider_name, model_name)
+        # Legacy dispatch inputs must never narrow or reorder the saved chain.
         return runtime_providers(declared)
     except (ValueError, json.JSONDecodeError) as exc:
         raise ValueError(f"Invalid MODEL_PROVIDERS_JSON: {exc}") from exc

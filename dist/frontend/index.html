@@ -157,10 +157,10 @@
         </div>
         <section id="talk-summary-controls" class="summary-version-controls hidden" aria-label="讲座版本对比"></section>
         <div id="talk-generate" class="talk-generate hidden">
-          <p class="muted">选择模型，生成笔记。</p>
+          <p class="muted">按模型设置顺序生成笔记，失败后尝试下一模型。</p>
           <div class="talk-generate-row">
-            <select id="talk-model-select" aria-label="选择生成模型"></select>
-            <input id="talk-api-key" type="password" autocomplete="off" placeholder="输入所选供应商的 API Key" aria-label="API Key">
+            <p id="talk-model-order" class="meta" aria-label="模型生成顺序"></p>
+            <input id="talk-api-key" type="password" autocomplete="off" placeholder="首个供应商 API Key，已存本机时可留空" aria-label="API Key">
             <button id="talk-generate-button" class="primary" type="button">生成笔记</button>
           </div>
           <p id="talk-generate-hint" class="meta"></p>
@@ -244,12 +244,12 @@
         </div>
         <p id="blind-hint" class="blind-hint"></p>
         <section id="blind-generate" class="blind-generate" aria-label="生成对照版本">
-          <strong>用其他模型生成对照笔记</strong>
-          <p class="meta">可一次勾选多个模型批量生成对照；已有版本都会保留。会产生模型费用。</p>
-          <div id="blind-model-list" class="blind-model-list" role="group" aria-label="选择生成模型"></div>
-          <div id="blind-api-keys" class="blind-api-keys hidden"></div>
+          <strong>重新生成对照笔记</strong>
+          <p class="meta">按模型设置顺序生成一份新笔记；已有版本都会保留。会产生模型费用。</p>
+          <div id="blind-model-list" class="blind-model-list" role="group" aria-label="模型生成顺序"></div>
+          <label id="blind-api-keys" class="blind-api-keys hidden">首个供应商 API Key（可选）<input id="blind-api-key" type="password" autocomplete="off" placeholder="已存本机钥匙串时可留空"></label>
           <div class="blind-generate-row">
-            <button id="blind-generate-button" class="primary" type="button" disabled>生成所选对照（0）</button>
+            <button id="blind-generate-button" class="primary" type="button" disabled>按模型顺序重新生成</button>
             <button id="blind-refresh-versions" type="button">刷新版本</button>
           </div>
           <p id="blind-generate-hint" class="meta"></p>
@@ -322,8 +322,8 @@
             <a id="run-local-link" class="hidden" href="http://127.0.0.1:8765/#run" target="_blank" rel="noreferrer">打开本地控制台</a>
             <label>任务<select id="run-kind"><option value="process">处理新课次</option><option value="rerun">重新生成笔记</option><option value="titles">补齐笔记标题</option></select></label>
             <p id="run-kind-hint" class="meta"></p>
-            <label>生成模型<select id="rerun-page-model-select" aria-label="选择运行模型"></select></label>
-            <label id="run-key-field" class="hidden">本次运行的 API Key<input id="run-api-key" type="password" autocomplete="off" placeholder="已存本机钥匙串时可留空"><span class="field-hint">仅交给本地任务，不写入 GitHub。</span></label>
+            <p class="meta">按模型与 API 中的顺序生成，失败后尝试下一模型。</p><p id="run-model-order" class="meta" aria-label="模型生成顺序"></p>
+            <label id="run-key-field" class="hidden">首个供应商的 API Key（可选）<input id="run-api-key" type="password" autocomplete="off" placeholder="已存本机钥匙串时可留空"><span class="field-hint">仅交给本地任务，不写入 GitHub。</span></label>
             <label>课内优先级<select id="run-lecture-order"><option value="newest">最新课次优先</option><option value="oldest">最早课次优先</option><option value="api">沿用平台顺序</option></select></label>
             <label class="check-option"><input id="single-run-official" type="checkbox"> 优先使用官方转录</label>
             <details class="run-manual"><summary>通过课程 ID 添加</summary><label>课程 ID<input id="single-run-ids" placeholder="多个 ID 用逗号分隔"></label><button id="single-run-button" type="button">加入队列</button></details>

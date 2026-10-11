@@ -151,8 +151,8 @@ class LectureNameRequest(BaseModel):
 
 
 class SummaryRerunRequest(BaseModel):
-    provider: str = Field(min_length=1, max_length=50)
-    model: str = Field(min_length=1, max_length=200)
+    provider: str = Field(default="", max_length=50)
+    model: str = Field(default="", max_length=200)
 
 
 class SummaryBatchRerunRequest(SummaryRerunRequest):
@@ -188,9 +188,9 @@ class TalkRenameRequest(BaseModel):
 
 
 class TalkSummarizeRequest(BaseModel):
-    provider: str = Field(min_length=1, max_length=50)
-    model: str = Field(min_length=1, max_length=200)
-    api_key: SecretStr = Field(min_length=1)
+    provider: str = Field(default="", max_length=50)
+    model: str = Field(default="", max_length=200)
+    api_key: SecretStr = SecretStr("")
 
 
 class PersonalNoteRequest(BaseModel):
@@ -568,13 +568,21 @@ def create_app(
                 }
             )
             provider = document["providers"][0]
+            from src.ai.model_policy import is_openrouter
+            if is_openrouter(provider):
+                raw = await run_in_threadpool(client().repository_variable, "MODEL_PROVIDERS_JSON")
+                saved = validate_model_config(raw or runtime.model_store.load() or DEFAULT_MODEL_PROVIDERS)
+                if not any(row["name"] == provider["name"]
+                           and row["default_base_url"] == provider["default_base_url"]
+                           and payload.model in row["models"] for row in saved["providers"]):
+                    raise ValueError("OpenRouter 只能测试已保存的模型，请先保存模型设置")
             return await run_in_threadpool(
                 test_provider,
                 provider["default_base_url"],
                 provider["models"][0],
                 api_key,
             )
-        except (ValueError, ProviderTestError) as exc:
+        except (ValueError, ProviderTestError, GitHubAPIError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/local/sync")
@@ -860,22 +868,9 @@ def create_app(
                 gh.repository_variable, "MODEL_PROVIDERS_JSON"
             )
             document = validate_model_config(raw or DEFAULT_MODEL_PROVIDERS)
-            provider_name = provider_value.strip()
-            model_name = model_value.strip()
-            provider = next(
-                (row for row in document["providers"] if row["name"] == provider_name),
-                None,
-            )
-            if provider is None or not provider["enabled"]:
-                raise HTTPException(status_code=400, detail="所选模型供应商不存在或未启用")
-            if model_name not in provider["models"]:
-                raise HTTPException(status_code=400, detail="所选模型不在当前配置中")
             secret_names = await run_in_threadpool(gh.repository_secret_names)
-            if provider["api_key_env"] not in secret_names:
-                raise HTTPException(
-                    status_code=400,
-                    detail="所选模型尚未配置 API Key，请先在模型管理中保存",
-                )
+            if not any(row["enabled"] and row["api_key_env"] in secret_names for row in document["providers"]):
+                raise HTTPException(status_code=400, detail="请先在模型与 API 中保存已启用模型的 API Key")
             await run_in_threadpool(
                 gh.dispatch_workflow,
                 "single_run.yml",
@@ -883,15 +878,12 @@ def create_app(
                 inputs={
                     "course_ids": "",
                     "resummarize_sub_ids": ",".join(sub_ids),
-                    "summary_provider": provider_name,
-                    "summary_model": model_name,
                     "use_official_transcript": "false",
                 },
             )
             return {
                 "ok": True,
-                "provider": provider_name,
-                "model": model_name,
+                "model_policy": "saved-order",
                 "sub_ids": sub_ids,
                 "sub_id": sub_ids[0] if len(sub_ids) == 1 else None,
                 "count": len(sub_ids),
@@ -912,6 +904,26 @@ def create_app(
     async def run_capabilities():
         result = await run_in_threadpool(local_runs.capabilities)
         return {**result, "github": True}
+
+    def local_generation_keys(document, payload):
+        import os
+        enabled = [p for p in document["providers"] if p["enabled"]]
+        entered = payload.api_key.get_secret_value().strip()
+        binding = next((p for p in enabled if p["name"] == payload.provider), None) if payload.provider else enabled[0]
+        if entered and (binding is None or payload.model and payload.model not in binding["models"]):
+            raise ValueError("API Key 对应的供应商或模型未添加")
+        keys = {}
+        for provider in enabled:
+            key = entered if entered and provider is binding else LocalAPIKeychain().load(provider)
+            key = key or os.environ.get(provider["api_key_env"], "")
+            if key:
+                env = provider["api_key_env"]
+                if env in keys and keys[env] != key:
+                    raise ValueError(f"{env} 对应不同供应商的本机 Key，请在模型设置中使用不同的 Secret 名称")
+                keys[env] = key
+        if not keys:
+            raise ValueError("请在本机钥匙串保存 API Key，或输入首个供应商的 Key（仅本次运行使用）")
+        return keys
 
     @app.get("/api/local/runs")
     async def run_jobs():
@@ -985,15 +997,11 @@ def create_app(
                     raise
                 raw = runtime.model_store.load()
             document = validate_model_config(raw or DEFAULT_MODEL_PROVIDERS)
-            provider = next((p for p in document["providers"] if p["name"] == payload.provider and p["enabled"]), None)
-            if not provider or payload.model not in provider["models"]:
-                raise ValueError("请选择已启用的模型")
             if payload.target == "github":
                 secrets = await run_in_threadpool(gh.repository_secret_names)
-                if provider["api_key_env"] not in secrets:
-                    raise ValueError("该模型未配置 GitHub Secret，请先在模型与 API 中保存")
+                if not any(p["enabled"] and p["api_key_env"] in secrets for p in document["providers"]):
+                    raise ValueError("请先在模型与 API 中保存已启用模型的 GitHub Key")
                 inputs = {"course_ids": ",".join(courses), "lecture_order": payload.lecture_order,
-                          "summary_provider": payload.provider, "summary_model": payload.model,
                           "use_official_transcript": str(payload.use_official_transcript).lower()}
                 if payload.kind == "rerun":
                     inputs["resummarize_sub_ids"] = ",".join(selected)
@@ -1005,18 +1013,10 @@ def create_app(
             if not capabilities["summary_ready"] or payload.kind == "process" and not capabilities["process_ready"]:
                 missing = capabilities["missing"] + (["ASR 权重"] if payload.kind == "process" and not capabilities.get("models_ready") else [])
                 raise ValueError("本地运行环境未就绪，请安装 requirements-course.txt 及 ASR 权重；缺少：" + ", ".join(missing))
-            key = payload.api_key.get_secret_value().strip()
-            if not key:
-                key = await run_in_threadpool(LocalAPIKeychain().load, provider)
-            if not key:
-                import os
-                key = os.environ.get(provider["api_key_env"], "")
-            if not key:
-                raise ValueError("本地无法读取 GitHub Secret，请输入该供应商的 API Key（仅本次运行使用）")
+            api_keys = local_generation_keys(document, payload)
             request = {"kind": payload.kind, "course_ids": courses, "sub_ids": selected,
-                       "lecture_order": payload.lecture_order, "provider": payload.provider,
-                       "model": payload.model, "use_official_transcript": payload.use_official_transcript}
-            job = local_runs.start(request, runtime.credentials, document, {provider["api_key_env"]: key})
+                       "lecture_order": payload.lecture_order, "use_official_transcript": payload.use_official_transcript}
+            job = local_runs.start(request, runtime.credentials, document, api_keys)
             return {"ok": True, "target": "local", "job": job}
         except LocalRunBusy as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1223,12 +1223,7 @@ def create_app(
 
     @app.post("/api/local/talks/{talk_id}/summarize")
     async def summarize_talk(talk_id: str, payload: TalkSummarizeRequest):
-        """Generate a note with an explicitly chosen provider/model + key.
-
-        The API key must be re-entered every time (GitHub never reveals a
-        saved Secret, and the console never persists keys) — same rule as
-        the provider connection test.
-        """
+        """Generate using the complete saved chain and locally available keys."""
         item = _talk_or_404(talk_id)
         if jobs.is_running(item["id"]) or item["status"] in {"transcribing", "dispatching", "summarizing", "uploading"}:
             raise HTTPException(
@@ -1239,32 +1234,16 @@ def create_app(
             raise HTTPException(
                 status_code=409, detail="该讲座没有可用转写文本"
             )
-        api_key = payload.api_key.get_secret_value().strip()
-        if not api_key:
-            raise HTTPException(
-                status_code=400, detail="请重新输入用于生成笔记的 API Key"
-            )
         try:
             gh = client()
             raw = await run_in_threadpool(
                 gh.repository_variable, "MODEL_PROVIDERS_JSON"
             )
             document = validate_model_config(raw or DEFAULT_MODEL_PROVIDERS)
-            provider_name = payload.provider.strip()
-            model_name = payload.model.strip()
-            provider = next(
-                (row for row in document["providers"]
-                 if row["name"] == provider_name),
-                None,
-            )
-            if provider is None or not provider["enabled"]:
-                raise HTTPException(
-                    status_code=400, detail="所选模型供应商不存在或未启用"
-                )
-            if model_name not in provider["models"]:
-                raise HTTPException(
-                    status_code=400, detail="所选模型不在当前配置中"
-                )
+            keys = local_generation_keys(document, payload)
+            providers = [{"name": p["name"], "base_url": p["default_base_url"],
+                          "models": p["models"], "api_key": keys[p["api_key_env"]]}
+                         for p in document["providers"] if p["enabled"] and p["api_key_env"] in keys]
         except HTTPException:
             raise
         except (GitHubAPIError, ValueError) as exc:
@@ -1275,10 +1254,7 @@ def create_app(
                 item["id"],
                 str(item.get("custom_title") or ""),
                 transcript,
-                provider["default_base_url"],
-                model_name,
-                api_key,
-                provider_name,
+                providers,
             )
         except TalkBusyError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -1289,8 +1265,7 @@ def create_app(
         return {
             "ok": True,
             "talk_id": item["id"],
-            "provider": provider_name,
-            "model": model_name,
+            "model_policy": "saved-order",
         }
 
     @app.get("/api/local/search")

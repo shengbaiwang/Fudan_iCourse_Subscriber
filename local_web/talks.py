@@ -30,8 +30,8 @@ Design notes:
   already-configured OpenAI-compatible providers via stdlib
   ``urllib`` — the same endpoint shape ``Summarizer`` uses
   (``POST {base_url}/chat/completions``), **without importing ``openai``**.
-  The API key always comes from the current request body (GitHub never
-  reveals saved Secrets), is held in memory only, and is never persisted.
+  Keys come from the local Keychain, environment or current request and
+  remain in memory. Every generation follows the saved provider/model order.
 
 Status machine: ``uploading`` → ``transcribing`` → ``transcribed`` →
 ``summarizing`` → ``ready`` | ``failed``.  ``failed`` carries the stage in
@@ -59,6 +59,7 @@ from uuid import uuid4
 import certifi
 
 from src.ai.summary_prompt import SYSTEM_PROMPT, summary_user_content
+from src.ai.model_policy import IncompleteSummaryError, request_options, check_response
 from src.ai.title import build_title_material, clean_title, split_generated_title
 
 from .state import default_config_dir
@@ -332,15 +333,18 @@ def chat_complete(
     system: str,
     user: str,
     timeout: int = 180,
+    *, provider: dict | None = None, title: bool = False, budget: int = 32768,
 ) -> str:
     """One OpenAI-compatible ``POST /chat/completions`` call (stdlib only)."""
     endpoint = base_url.rstrip("/") + "/chat/completions"
-    payload = json.dumps(
-        {"model": model, "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]}
-    ).encode("utf-8")
+    provider = provider or {"base_url": base_url, "models": [model]}
+    options = request_options(provider, model, title=title, budget=budget)
+    timeout = options.pop("timeout", timeout)
+    extra = options.pop("extra_body", {})
+    payload = json.dumps({"model": model, "messages": [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ], **options, **extra}).encode("utf-8")
     request = urllib.request.Request(
         endpoint, data=payload, method="POST",
         headers={
@@ -370,12 +374,36 @@ def chat_complete(
     choices = data.get("choices") or []
     if not choices or not isinstance(choices[0], dict):
         raise TalkLLMError("模型 API 返回成功，但没有 choices")
-    if choices[0].get("finish_reason") in {"length", "content_filter"}:
-        raise TalkLLMError("模型输出不完整，请更换模型或缩短转写后重试")
-    content = (choices[0].get("message") or {}).get("content") or ""
-    if not isinstance(content, str) or not content.strip():
-        raise TalkLLMError("模型返回了空内容")
-    return str(content)
+    content = (choices[0].get("message") or {}).get("content")
+    check_response(provider, model, data.get("model"), content, choices[0].get("finish_reason"))
+    return content
+
+
+def complete_talk(providers: list[dict], system: str, user: str, *, title=False) -> tuple[str, str]:
+    errors = []
+    for provider in providers:
+        for model in provider["models"]:
+            try:
+                for budget in (32768, 65536):
+                    try:
+                        raw = chat_complete(provider["base_url"], model, provider["api_key"], system, user,
+                                            provider=provider, title=title, budget=budget)
+                    except IncompleteSummaryError as exc:
+                        if (exc.finish_reason == "length" and not title and budget == 32768
+                                and "max_completion_tokens" in request_options(provider, model)):
+                            continue
+                        raise
+                    if title:
+                        if not clean_title(raw):
+                            raise ValueError("模型没有返回可用标题")
+                    else:
+                        _, body = split_summary_output(raw)
+                        if not body.strip() or (raw.strip().startswith("# ") and not raw.strip().partition("\n")[2].strip()):
+                            raise ValueError("模型只返回标题，没有笔记正文")
+                    return raw, f"{provider['name']}/{model}"
+            except (TalkLLMError, ValueError) as exc:
+                errors.append(f"{provider['name']}/{model}: {_redact(str(exc), provider['api_key'])}")
+    raise TalkLLMError("所有已配置模型均失败：\n" + "\n".join(errors))
 
 
 TITLE_SYSTEM = (
@@ -386,18 +414,14 @@ TITLE_SYSTEM = (
 )
 
 
-def generate_talk_title(
-    base_url: str, model: str, api_key: str, transcript: str
-) -> str:
-    """Tiny fallback title call; returns "" on any failure (never raises)."""
+def generate_talk_title(providers: list[dict], transcript: str) -> str:
+    """Title generation starts at the beginning of the saved order too."""
     try:
-        material = build_title_material(None, transcript, None)
+        material = build_title_material("讲座", transcript, None)
         if not material:
             return ""
-        raw = chat_complete(
-            base_url, model, api_key, TITLE_SYSTEM,
-            f"讲座转写（节选）如下：\n\n{material}", timeout=60,
-        )
+        raw, _ = complete_talk(providers, TITLE_SYSTEM,
+                               f"讲座转写（节选）如下：\n\n{material}", title=True)
         return clean_title(raw)
     except TalkLLMError:
         return ""
@@ -752,25 +776,17 @@ class TalkStore:
                 )
 
 
-def summarize_talk_text(
-    base_url: str,
-    model: str,
-    api_key: str,
-    title: str,
-    transcript: str,
-) -> tuple[str, str, str]:
-    """Run one summary + fallback title. Returns (body, ai_title, model_id)."""
+def summarize_talk_text(providers: list[dict], title: str, transcript: str) -> tuple[str, str, str]:
+    """Generate via the saved chain; preserve the provider that succeeded."""
     prompt_text, _mode = build_talk_prompt(transcript)
-    raw = chat_complete(
-        base_url, model, api_key, SYSTEM_PROMPT,
-        summary_user_content(title or "未命名讲座", prompt_text),
-    )
+    raw, model_id = complete_talk(providers, SYSTEM_PROMPT,
+                                 summary_user_content(title or "未命名讲座", prompt_text))
     ai_title, body = split_summary_output(raw)
     if not body.strip() or (raw.strip().startswith("# ") and not raw.strip().partition("\n")[2].strip()):
         raise TalkLLMError("模型只返回标题，没有笔记正文")
     if not ai_title:
-        ai_title = generate_talk_title(base_url, model, api_key, transcript)
-    return body, ai_title, f"{model}"
+        ai_title = generate_talk_title(providers, transcript)
+    return body, ai_title, model_id
 
 
 class TalkBusyError(RuntimeError):
@@ -1007,9 +1023,7 @@ class TalkJobs:
         with self._lock:
             return talk_id in self._running
 
-    def submit(self, talk_id: str, title: str, transcript: str,
-               base_url: str, model: str, api_key: str,
-               provider_name: str) -> bool:
+    def submit(self, talk_id: str, title: str, transcript: str, providers: list[dict]) -> bool:
         """Start a background summary.
 
         Returns True on launch.  Returns False when this talk already has
@@ -1026,13 +1040,9 @@ class TalkJobs:
         with self._store._lock, closing(self._store._connect()) as db, db:
             db.execute("UPDATE talks SET cloud_request_id='' WHERE id=?", (talk_id,))
         self._store.set_status(talk_id, "summarizing")
-        model_id = f"{provider_name}/{model}"
-
         def worker() -> None:
             try:
-                body, ai_title, _ = summarize_talk_text(
-                    base_url, model, api_key, title, transcript,
-                )
+                body, ai_title, model_id = summarize_talk_text(providers, title, transcript)
                 self._store.save_summary(talk_id, body, ai_title, model_id)
             except TalkLLMError as exc:
                 self._store.set_status(

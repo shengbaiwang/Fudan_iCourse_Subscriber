@@ -298,16 +298,20 @@ class TalkJobsTest(unittest.TestCase):
                 self.assertTrue(
                     jobs.submit(
                         created["id"], "", "转写文本",
-                        "https://x/v1", "m", "k", "p",
+                        [{"name": "p", "base_url": "https://x/v1", "models": ["m"], "api_key": "k"}],
                     )
                 )
                 # Same talk twice → second is a no-op, not a duplicate run.
                 self.assertFalse(
                     jobs.submit(
                         created["id"], "", "转写文本",
-                        "https://x/v1", "m", "k", "p",
+                        [{"name": "p", "base_url": "https://x/v1", "models": ["m"], "api_key": "k"}],
                     )
                 )
+                import time
+                deadline = time.monotonic() + 5
+                while jobs.is_running(created["id"]) and time.monotonic() < deadline:
+                    time.sleep(0.01)
                 summary.assert_called_once()
             fetched = store.get_talk(created["id"])
             assert fetched is not None
@@ -320,7 +324,7 @@ class TalkJobsTest(unittest.TestCase):
             jobs = TalkJobs(store, max_workers=1)
             jobs._running.add("other")
             with self.assertRaises(TalkBusyError):
-                jobs.submit("new", "", "t", "https://x", "m", "k", "p")
+                jobs.submit("new", "", "t", [])
 
     def test_llm_failure_marks_failed(self):
         from local_web.talks import TalkLLMError
@@ -336,9 +340,13 @@ class TalkJobsTest(unittest.TestCase):
                 self.assertTrue(
                     jobs.submit(
                         created["id"], "", "转写文本",
-                        "https://x/v1", "m", "k", "p",
+                        [{"name": "p", "base_url": "https://x/v1", "models": ["m"], "api_key": "k"}],
                     )
                 )
+                import time
+                deadline = time.monotonic() + 5
+                while jobs.is_running(created["id"]) and time.monotonic() < deadline:
+                    time.sleep(0.01)
             fetched = store.get_talk(created["id"])
             assert fetched is not None
             self.assertEqual(fetched["status"], "failed")

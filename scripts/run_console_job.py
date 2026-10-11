@@ -19,8 +19,7 @@ def run(payload):
         "COURSE_IDS": ",".join(payload["course_ids"]),
         "MODEL_PROVIDERS_JSON": json.dumps(payload["providers"]),
         "LECTURE_ORDER": payload["lecture_order"], "LOCAL_RUN_EVENTS": "1",
-        "PUBLISH_NOTE_PROGRESS": "0", "SUMMARY_PROVIDER": payload.get("provider", ""),
-        "SUMMARY_MODEL": payload.get("model", ""),
+        "PUBLISH_NOTE_PROGRESS": "0",
         "USE_OFFICIAL_TRANSCRIPT": "1" if payload.get("use_official_transcript") else "0"})
     os.environ.update(payload["api_keys"])
     if payload["kind"] == "process" and not shutil.which("ffmpeg"):

@@ -34,8 +34,11 @@ const root = path.resolve(process.env.MODEL_STATIC_ROOT || path.join(__dirname, 
       if (!url.pathname.startsWith('/api/local/')) return route.continue();
       switch (url.pathname.slice('/api/local'.length)) {
         case '/status': return json({configured:true,database_ready:true,repository:{owner:'test',repo:'fixture'},database:{courses:0,lectures:0,ready:0},update:{state:'current'}});
-        case '/courses': case '/workflows': return json([]);
+        case '/courses': case '/workflows': case '/notebook': return json([]);
         case '/course-zones': return json({zones:{}});
+        case '/runs': return json({jobs:[]});
+        case '/sync': return json({unchanged:true});
+        case '/subscriptions': return json({course_ids:[],courses:[]});
         case '/lecture-names': return json({names:{}});
         case '/model-providers':
           if (request.method() === 'PUT') {

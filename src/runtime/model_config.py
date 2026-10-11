@@ -13,6 +13,8 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlparse
 
+from src.ai.model_policy import check_model
+
 
 CONFIG_VERSION = 1
 PROVIDER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,49}$")
@@ -147,6 +149,8 @@ def validate_model_config(value: Any) -> dict[str, Any]:
             "models": models,
             "enabled": enabled,
         }
+        for model in models:
+            check_model(provider, model)
         base_url_env = str(raw.get("base_url_env") or "").strip().upper()
         if base_url_env:
             if (
@@ -186,11 +190,8 @@ def select_runtime_model(
 ) -> list[dict[str, Any]]:
     """Return one enabled provider with exactly one approved model.
 
-    The values originate from a workflow-dispatch input, so they must be
-    checked against the saved model configuration instead of being treated as
-    arbitrary provider/model strings.  Keeping the return shape identical to
-    :func:`runtime_providers` lets the normal ``Summarizer`` execute without
-    a separate, less-tested API-key path.
+    Used for explicit credential maintenance only. Generation always uses
+    :func:`runtime_providers` so legacy task inputs cannot change its order.
     """
     provider_name = str(provider_name or "").strip()
     model_name = str(model_name or "").strip()

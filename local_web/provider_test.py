@@ -9,6 +9,7 @@ from typing import Any
 
 import certifi
 
+from src.ai.model_policy import check_model, is_openrouter
 from src.runtime.model_config import is_mimo_url, normalize_base_url
 
 
@@ -28,6 +29,8 @@ def test_provider(
 ) -> dict[str, Any]:
     """Make a minimal OpenAI-compatible request with a user-supplied key."""
     base_url = normalize_base_url(base_url)
+    provider = {"base_url": base_url, "models": [model]}
+    check_model(provider, model)
     endpoint = base_url + "/chat/completions"
     # MiMo documents max_completion_tokens and enables reasoning by default.
     # Disable it for this tiny connectivity probe, not for real summaries.
@@ -35,6 +38,8 @@ def test_provider(
         {"max_completion_tokens": 32, "thinking": {"type": "disabled"}}
         if is_mimo_url(base_url) else {"max_tokens": 2}
     )
+    if is_openrouter(provider):
+        limits["models"] = [model]
     payload = json.dumps(
         {
             "model": model,
@@ -89,6 +94,8 @@ def test_provider(
     message = choices[0].get("message") or {}
     if not isinstance(message, dict):
         raise ProviderTestError("模型 API 返回的 message 格式无效")
+    if is_openrouter(provider) and data.get("model") != model:
+        raise ProviderTestError("OpenRouter 返回了请求之外的模型，拒绝使用")
     return {
         "ok": True,
         "latency_ms": round((time.monotonic() - started) * 1000),

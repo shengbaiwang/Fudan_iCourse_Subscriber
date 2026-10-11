@@ -2209,16 +2209,13 @@ function openBlindCompare() {
     message("请先打开一篇课次或讲座笔记。", true);
     return;
   }
-  // 单版本也可进入：在对比页里选模型生成对照版本后再盲测。
+  // 单版本也可进入：按保存顺序重新生成，然后比较历史版本。
   blindCompare = {
     ...payload,
     revealed: new Set(),
     preferredKey: null,
     mode: "blind",
     generating: false,
-    selectedModelIdx: new Set(),
-    apiKeys: {},
-    pendingTalkJobs: [],
     order: shuffleKeys(payload.versions.map((version) => version.key)),
   };
   renderBlindCompare();
@@ -2228,133 +2225,24 @@ function openBlindCompare() {
     if (hint) hint.textContent = error.message;
   }).finally(() => renderBlindGeneratePanel());
   scheduleBlindRefresh();
-  runNextBlindTalkGenerate().catch(() => {});
 }
 
 async function ensureBlindModelOptions() {
-  if (!rerunModelOptions.length) {
-    // Reuse the shared model catalog (enabled providers with API keys).
-    const result = await api("/api/local/model-providers");
-    rerunModelOptions = [];
-    (result.providers || []).forEach((provider) => {
-      if (!provider.enabled || !provider.api_key_configured) return;
-      (provider.models || []).forEach((model) => {
-        rerunModelOptions.push({provider: String(provider.name), model: String(model)});
-      });
-    });
-  }
-  if (!rerunModelOptions.length) {
-    throw new Error("没有可用于生成的模型；请先在模型管理中启用模型并保存 API Key。");
-  }
-  renderBlindModelList();
-}
-
-function blindModelHasVersion(option) {
-  if (!blindCompare) return false;
-  const candidates = new Set([
-    option.model,
-    `${option.provider}/${option.model}`,
-    `${option.provider}:${option.model}`,
-  ]);
-  return blindCompare.versions.some((version) => candidates.has(String(version.model || "")));
-}
-
-function renderBlindModelList() {
-  const list = $("#blind-model-list");
-  if (!list) return;
-  list.replaceChildren();
-  if (!rerunModelOptions.length) {
-    const empty = document.createElement("p");
-    empty.className = "meta";
-    empty.textContent = "暂无可用模型。";
-    list.append(empty);
-    return;
-  }
-  if (!blindCompare.selectedModelIdx) blindCompare.selectedModelIdx = new Set();
-  rerunModelOptions.forEach((option, index) => {
-    const label = document.createElement("label");
-    label.className = "blind-model-choice";
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = blindCompare.selectedModelIdx.has(index);
-    input.onchange = () => {
-      if (input.checked) blindCompare.selectedModelIdx.add(index);
-      else blindCompare.selectedModelIdx.delete(index);
-      renderBlindGeneratePanel();
-    };
-    const name = document.createElement("span");
-    name.textContent = `${option.provider} / ${option.model}`;
-    label.append(input, name);
-    if (blindModelHasVersion(option)) {
-      const badge = document.createElement("small");
-      badge.textContent = "已有版本";
-      label.append(badge);
-    }
-    list.append(label);
-  });
-}
-
-function selectedBlindModels() {
-  if (!blindCompare?.selectedModelIdx) return [];
-  return [...blindCompare.selectedModelIdx]
-    .filter((index) => rerunModelOptions[index])
-    .map((index) => ({index, ...rerunModelOptions[index]}));
-}
-
-function renderBlindApiKeys() {
-  const root = $("#blind-api-keys");
-  if (!root) return;
-  root.replaceChildren();
-  const isTalk = blindCompare?.source === "talk";
-  const selected = selectedBlindModels();
-  if (!isTalk || !selected.length) {
-    root.classList.add("hidden");
-    return;
-  }
-  root.classList.remove("hidden");
-  const providers = [...new Set(selected.map((item) => item.provider))];
-  if (!blindCompare.apiKeys) blindCompare.apiKeys = {};
-  providers.forEach((provider) => {
-    const label = document.createElement("label");
-    label.className = "blind-api-key-field";
-    const title = document.createElement("span");
-    title.textContent = `${provider} API Key`;
-    const input = document.createElement("input");
-    input.type = "password";
-    input.autocomplete = "off";
-    input.placeholder = "仅用于本次请求，不保存";
-    input.value = blindCompare.apiKeys[provider] || "";
-    input.oninput = () => { blindCompare.apiKeys[provider] = input.value; };
-    label.append(title, input);
-    root.append(label);
-  });
+  await loadGenerationOrder("#blind-model-list", true);
+  renderBlindGeneratePanel();
 }
 
 function renderBlindGeneratePanel() {
-  renderBlindModelList();
-  renderBlindApiKeys();
-  const selected = selectedBlindModels();
   const button = $("#blind-generate-button");
   const talkBusy = blindCompare?.source === "talk" && currentTalk
     && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
-  const queued = Boolean(blindCompare?.pendingTalkJobs?.length);
-  button.disabled = !selected.length || Boolean(blindCompare?.generating) || talkBusy || queued;
-  button.textContent = blindCompare?.generating || talkBusy || queued
-    ? (queued ? "排队生成中…" : "生成中…")
-    : `生成所选对照（${selected.length}）`;
+  button.disabled = !rerunModelOptions.length || Boolean(blindCompare?.generating) || talkBusy;
+  button.textContent = blindCompare?.generating || talkBusy ? "生成中…" : "按模型顺序重新生成";
+  $("#blind-api-keys").classList.toggle("hidden", blindCompare?.source !== "talk");
   $("#blind-refresh-versions").disabled = Boolean(blindCompare?.generating);
-  const generateHint = $("#blind-generate-hint");
-  if (!generateHint.dataset.custom) {
-    if (talkBusy || queued) {
-      generateHint.textContent = "讲座一次只能生成一份；已勾选的模型会排队串行生成，完成后自动出现在下方。";
-    } else if (blindCompare?.source === "talk") {
-      generateHint.textContent = "可多选模型；每个供应商需填写 API Key。讲座会按勾选顺序逐个生成。";
-    } else if ((blindCompare?.versions.length || 0) < 2) {
-      generateHint.textContent = "可多选模型一次提交多个课次重跑；新版本生成后会自动载入。";
-    } else {
-      generateHint.textContent = "可继续多选模型生成更多对照版本；已有版本都会保留。";
-    }
-  }
+  $("#blind-generate-hint").textContent = talkBusy
+    ? "正在按模型设置顺序生成，完成后自动载入。"
+    : "每次生成一份笔记；失败后按保存顺序尝试下一模型，历史版本会保留。";
 }
 
 async function refreshBlindVersions(options = {}) {
@@ -2398,9 +2286,6 @@ async function refreshBlindVersions(options = {}) {
   renderBlindCompare();
   if (grew) message("已载入新版本，顺序已重新洗牌，可开始盲测。");
   scheduleBlindRefresh();
-  if (blindCompare.pendingTalkJobs?.length) {
-    setTimeout(() => runNextBlindTalkGenerate().catch(() => {}), 300);
-  }
   return blindCompare;
 }
 
@@ -2410,131 +2295,35 @@ function scheduleBlindRefresh() {
   if (!blindCompare || activeView !== "blindCompare") return;
   const talkBusy = blindCompare.source === "talk" && currentTalk
     && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
-  const queued = Boolean(blindCompare.pendingTalkJobs?.length);
   // 讲座生成由此轮询；课次由资料库自动同步后更新版本。
-  if (!talkBusy && !queued) return;
+  if (!talkBusy) return;
   blindRefreshTimer = setTimeout(() => {
     refreshBlindVersions().catch(() => {});
   }, currentTalk?.status === "transcribing" ? 15000 : 4000);
 }
 
 async function submitBlindGenerate() {
-  if (!blindCompare) return;
-  const selected = selectedBlindModels();
-  if (!selected.length) {
-    message("请至少勾选一个模型。", true);
-    return;
-  }
-  const isTalk = blindCompare.source === "talk";
-  if (isTalk) {
-    blindCompare.apiKeys = blindCompare.apiKeys || {};
-    const missing = [...new Set(selected.map((item) => item.provider))]
-      .filter((provider) => !String(blindCompare.apiKeys[provider] || "").trim());
-    if (missing.length) {
-      message(`请填写 ${missing.join("、")} 的 API Key（GitHub 不允许读回已保存的密钥）。`, true);
-      renderBlindApiKeys();
-      $("#blind-api-keys input")?.focus();
-      return;
-    }
-  }
-  const labels = selected.map((item) => `${item.provider} / ${item.model}`).join("\n· ");
-  const where = isTalk ? "本讲座" : "本课次";
-  if (!confirm(`用以下 ${selected.length} 个模型为${where}生成对照笔记？\n\n· ${labels}\n\n已有版本会保留；会产生模型费用。`)) return;
-
-  const button = $("#blind-generate-button");
-  button.disabled = true;
-  blindCompare.generating = true;
-  renderBlindGeneratePanel();
-
-  try {
-    if (isTalk) {
-      // 讲座后端一次只允许一个生成任务：按勾选顺序排队串行。
-      blindCompare.pendingTalkJobs = selected.map((item) => ({
-        provider: item.provider,
-        model: item.model,
-        api_key: String(blindCompare.apiKeys[item.provider] || "").trim(),
-      }));
-      message(`已排队 ${selected.length} 个模型，将按顺序逐个生成。`);
-      await runNextBlindTalkGenerate();
-    } else {
-      // 课次可并行提交多个 Actions 重跑，互不占用同一任务锁。
-      let ok = 0;
-      const failures = [];
-      for (const item of selected) {
-        try {
-          const result = await api("/api/local/summary-reruns", {
-            method: "POST",
-            body: JSON.stringify({
-              provider: item.provider,
-              model: item.model,
-              sub_ids: [blindCompare.sourceId],
-              course_ids: [],
-            }),
-          });
-          ok += Number(result.count || 0) ? 1 : 0;
-        } catch (error) {
-          failures.push(`${item.provider}/${item.model}: ${error.message}`);
-        }
-      }
-      if (failures.length) {
-        message(`已提交 ${ok}/${selected.length} 个模型重跑。失败：${failures[0]}`, true);
-      } else {
-        message(`已提交 ${ok} 个模型重跑；新笔记会自动载入对照版本。`);
-      }
-      await refreshBlindVersions();
-    }
-  } catch (error) {
-    message(error.message, true);
-  } finally {
-    blindCompare.generating = false;
-    renderBlindGeneratePanel();
-    renderBlindCompare();
-    scheduleBlindRefresh();
-  }
-}
-
-async function runNextBlindTalkGenerate() {
-  if (!blindCompare || blindCompare.source !== "talk") return;
-  const queue = blindCompare.pendingTalkJobs || [];
-  if (!queue.length) return;
-  const talkBusy = currentTalk
-    && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
-  if (talkBusy || blindCompare.generating) {
-    // 等 refresh 轮询结束后再启动下一项。
-    scheduleBlindRefresh();
-    return;
-  }
-  const job = queue[0];
+  if (!blindCompare || !rerunModelOptions.length) return;
   blindCompare.generating = true;
   renderBlindGeneratePanel();
   try {
-    await api(`/api/local/talks/${encodeURIComponent(blindCompare.sourceId)}/summarize`, {
-      method: "POST",
-      body: JSON.stringify({provider: job.provider, model: job.model, api_key: job.api_key}),
-    });
-    queue.shift();
-    blindCompare.pendingTalkJobs = queue;
-    if (queue.length) {
-      message(`已提交 ${job.provider}/${job.model}，队列还有 ${queue.length} 个模型。`);
+    if (blindCompare.source === "talk") {
+      await api(`/api/local/talks/${encodeURIComponent(blindCompare.sourceId)}/summarize`, {
+        method: "POST", body: JSON.stringify({api_key: $("#blind-api-key").value.trim()}),
+      });
+      $("#blind-api-key").value = "";
     } else {
-      message("已开始生成对照笔记，完成后会自动出现在下方。");
+      await api("/api/local/summary-reruns", {method: "POST", body: JSON.stringify({
+        sub_ids: [blindCompare.sourceId], course_ids: [],
+      })});
     }
-  } catch (error) {
-    // 409 表示仍在生成：保留队首，稍后重试。
-    if (!String(error.message || "").includes("正在生成")) {
-      queue.shift();
-      blindCompare.pendingTalkJobs = queue;
-      message(`${job.provider}/${job.model} 失败：${error.message}`, true);
-    }
-  } finally {
-    blindCompare.generating = false;
-    renderBlindGeneratePanel();
+    message("已提交，将按模型设置的顺序生成；新笔记会自动载入。");
     await refreshBlindVersions();
-    if (blindCompare.pendingTalkJobs?.length) {
-      scheduleBlindRefresh();
-      // 若已空闲，立刻尝试下一项。
-      setTimeout(() => runNextBlindTalkGenerate().catch(() => {}), 500);
-    }
+  } catch (error) { message(error.message, true); }
+  finally {
+    blindCompare.generating = false;
+    renderBlindGeneratePanel();
+    scheduleBlindRefresh();
   }
 }
 
@@ -2604,8 +2393,8 @@ function renderBlindCompare() {
   const hint = $("#blind-hint");
   if (versionCount < 2 && isBlind) {
     hint.textContent = versionCount === 0
-      ? "还没有可对比的笔记。可在下方多选模型生成；有 ≥2 个版本后即可随机盲测。"
-      : "目前只有 1 个版本。可在下方一次勾选多个模型生成对照笔记，凑齐 ≥2 份后再盲测（模型名默认隐藏，点「揭示模型」才显示）。";
+      ? "还没有可对比的笔记。可在下方按保存顺序重新生成；有 ≥2 个版本后即可随机盲测。"
+      : "目前只有 1 个版本。可在下方按保存顺序重新生成，凑齐 ≥2 份后再盲测（模型名默认隐藏，点「揭示模型」才显示）。";
   } else if (isBlind) {
     const left = versionCount - blindCompare.revealed.size;
     hint.textContent = left > 0
@@ -2647,7 +2436,7 @@ function renderBlindCompare() {
   if (!versionCount) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "暂无笔记版本。选择模型生成后，新版本会自动载入。";
+    empty.textContent = "暂无笔记版本。按模型顺序生成后，新版本会自动载入。";
     grid.append(empty);
     return;
   }
@@ -2715,29 +2504,19 @@ function renderBlindCompare() {
   activateMath(grid);
 }
 
-async function populateRerunModelSelect(selector, refresh = false, allowUnconfigured = false) {
+async function loadGenerationOrder(selector, refresh = false) {
   if (refresh || !rerunModelOptions.length) {
     const result = await api("/api/local/model-providers");
     rerunModelOptions = [];
     (result.providers || []).forEach((provider) => {
-      if (!provider.enabled || (!allowUnconfigured && !provider.api_key_configured)) return;
+      if (!provider.enabled) return;
       (provider.models || []).forEach((model) => {
         rerunModelOptions.push({provider: String(provider.name), model: String(model)});
       });
     });
   }
-  if (!rerunModelOptions.length) {
-    throw new Error("没有可用于重跑的模型；请先在模型管理中启用模型并保存 API Key。");
-  }
-  const select = $(selector);
-  select.replaceChildren();
-  rerunModelOptions.forEach((option, index) => {
-    select.append(new Option(`${option.provider} / ${option.model}`, String(index)));
-  });
-}
-
-function selectedRerunModel(selector) {
-  return rerunModelOptions[Number($(selector).value)];
+  if (!rerunModelOptions.length) throw new Error("请先在模型与 API 中启用模型并保存 API Key。");
+  $(selector).textContent = rerunModelOptions.map(option => `${option.provider} / ${option.model}`).join(" → ");
 }
 
 /* ── 重跑视图 ─────────────────────────────────────────────
@@ -4596,10 +4375,8 @@ function talkVersions() {
 }
 
 async function ensureTalkModelOptions() {
-  const select = $("#talk-model-select");
-  if (select.options.length) return;
   try {
-    await populateRerunModelSelect("#talk-model-select", true);
+    await loadGenerationOrder("#talk-model-order", true);
   } catch (error) {
     $("#talk-generate-hint").textContent = error.message;
   }
@@ -4873,7 +4650,7 @@ $("#talk-editor-form").onsubmit = async (event) => {
     $("#talk-editor").close();
     await loadTalks();
     await openTalk(created.id);
-    message("讲座已保存，请选择模型生成笔记");
+    message("讲座已保存，可按模型设置顺序生成笔记");
   } catch (error) {
     $("#talk-editor-error").textContent = error.message;
     if (!$("#talk-editor").open) message(error.message, true);
@@ -4958,24 +4735,13 @@ $("#talk-generate-button").onclick = async () => {
     message("转写文本还没回来，请等待转写完成后再生成。", true);
     return;
   }
-  const option = selectedRerunModel("#talk-model-select");
-  if (!option) {
-    message("请先选择模型。", true);
-    return;
-  }
   const apiKey = $("#talk-api-key").value.trim();
-  if (!apiKey) {
-    message("请重新输入所选供应商的 API Key（GitHub 不允许读回已保存的密钥）。", true);
-    $("#talk-api-key").focus();
-    return;
-  }
-  if (!confirm(`使用 ${option.provider} / ${option.model} 生成笔记？会产生模型费用。`)) return;
   const button = $("#talk-generate-button");
   button.disabled = true;
   try {
     await api(`/api/local/talks/${encodeURIComponent(currentTalk.id)}/summarize`, {
       method: "POST",
-      body: JSON.stringify({...option, api_key: apiKey}),
+      body: JSON.stringify({api_key: apiKey}),
     });
     $("#talk-api-key").value = "";
     message("已开始生成，每 4 秒自动刷新");
@@ -5164,7 +4930,6 @@ function updateRunSettings() {
 }
 
 async function loadRunView() {
-  const previousModel = selectedRerunModel("#rerun-page-model-select");
   await loadSubscriptions();
   if (!runPreferencesLoaded) {
     const preferences = await api("/api/local/run-preferences");
@@ -5172,11 +4937,7 @@ async function loadRunView() {
     $("#run-lecture-order").value = preferences.lecture_order || "api";
     runPreferencesLoaded = true;
   }
-  await populateRerunModelSelect("#rerun-page-model-select", true, true);
-  if (previousModel) {
-    const index = rerunModelOptions.findIndex(option => option.provider === previousModel.provider && option.model === previousModel.model);
-    if (index >= 0) $("#rerun-page-model-select").value = String(index);
-  }
+  await loadGenerationOrder("#run-model-order", true);
   runCapabilities = await api("/api/local/run-capabilities");
   updateRunSettings();
   await refreshLocalRuns();
@@ -5185,11 +4946,10 @@ async function loadRunView() {
 
 async function submitUnifiedRun() {
   if (runSubmitting) return;
-  const model = selectedRerunModel("#rerun-page-model-select");
-  if (!model) { message("请先在模型与 API 中启用模型。", true); return; }
+  if (!rerunModelOptions.length) { message("请先在模型与 API 中启用模型。", true); return; }
   const priority = runCourses().map(course => String(course.course_id));
   const courses = priority.filter(id => rerunSelectedCourseIds.has(id));
-  const payload = {...model, target: $("#run-target").value, kind: $("#run-kind").value,
+  const payload = {target: $("#run-target").value, kind: $("#run-kind").value,
     course_ids: courses, sub_ids: [...rerunSelectedSubIds], priority_course_ids: priority,
     lecture_order: $("#run-lecture-order").value,
     use_official_transcript: $("#single-run-official").checked};

@@ -139,7 +139,7 @@ class TalkRecoveryTest(unittest.TestCase):
     def test_title_only_is_not_a_note(self):
         with patch("local_web.talks.chat_complete", return_value="# 标题"):
             with self.assertRaises(TalkLLMError):
-                summarize_talk_text("https://example.com", "model", "key", "讲座", "转写")
+                summarize_talk_text([{"name": "p", "base_url": "https://example.com", "models": ["model"], "api_key": "key"}], "讲座", "转写")
 
 
 class CloudPipelineTest(unittest.TestCase):

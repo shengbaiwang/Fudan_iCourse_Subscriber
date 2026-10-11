@@ -32,8 +32,10 @@ def api_mock(finish="stop", model="actual-model"):
         return SimpleNamespace(model=model, choices=[SimpleNamespace(
             finish_reason=finish, message=SimpleNamespace(content="# 笔记\n\n完整正文"))])
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    summarizer = SimpleNamespace(providers=[{"name": "chosen", "models": ["requested"],
-        "base_url": "https://chosen.test/v1"}], _clients={"chosen": client})
+    from src.ai.summarizer import Summarizer
+    summarizer = Summarizer.__new__(Summarizer)
+    summarizer.providers = [{"name": "chosen", "models": ["requested"], "base_url": "https://chosen.test/v1"}]
+    summarizer._clients = {"chosen": client}
     return summarizer, calls
 
 
