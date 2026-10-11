@@ -261,12 +261,35 @@ class Database:
             rows = self.conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
 
-    def update_transcript(self, sub_id: str, transcript: str):
+    def update_transcript(self, sub_id: str, transcript: str, source: str = "asr"):
         with self._lock, self.conn:
             self.conn.execute(
-                "UPDATE lectures SET transcript = ? WHERE sub_id = ?",
-                (transcript, sub_id),
+                "UPDATE lectures SET transcript = ?, transcript_source = ? WHERE sub_id = ?",
+                (transcript, source, sub_id),
             )
+
+    def update_recording_duration(self, sub_id: str, seconds: float, source: str):
+        from src.api.materials import _seconds
+        duration = _seconds(seconds, "s")
+        if not duration or not isinstance(source, str) or not source.strip():
+            return
+        with self._lock, self.conn:
+            self.conn.execute(
+                "UPDATE lectures SET recording_duration = ?, recording_duration_source = ? WHERE sub_id = ?",
+                (duration, source, sub_id),
+            )
+
+    def update_ppt_warning(self, sub_id: str, warning: str | None):
+        """Optional slides must not share the blocking transcript error slot."""
+        with self._lock, self.conn:
+            self.conn.execute("UPDATE lectures SET ppt_warning = ? WHERE sub_id = ?", (warning, sub_id))
+
+    def get_ppt_failure_count(self, sub_id: str) -> int:
+        with self._lock:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM ppt_pages WHERE sub_id = ? AND ocr_status IN ('pending', 'failed')",
+                (sub_id,),
+            ).fetchone()[0]
 
     def mark_processed(self, sub_id: str):
         with self._lock, self.conn:

@@ -59,11 +59,13 @@ class PrefetchCache:
         with self._lock:
             if sub_id in self._cache:
                 return
-            self._cache[sub_id] = {"items": None, "futures": {}}
+            self._cache[sub_id] = {"items": None, "futures": {}, "error": None}
 
         try:
             ppt_items = client.get_ppt_list(course_id, sub_id)
         except Exception as e:
+            with self._lock:
+                self._cache[sub_id]["error"] = f"课件清单读取失败（{type(e).__name__}）"
             if self._reporter:
                 self._reporter.ppt_list_failed(type(e).__name__, str(e))
             ppt_items = []
@@ -119,6 +121,10 @@ class PrefetchCache:
             self._cache.pop(sub_id, None)
         if self._reporter:
             self._reporter.image_progress_abort(sub_id)
+
+    def get_error(self, sub_id: str) -> str | None:
+        with self._lock:
+            return (self._cache.get(str(sub_id)) or {}).get("error")
 
 
 # ── AudioDownloader (per-sub_id ffmpeg → disk audio file) ──────────────────

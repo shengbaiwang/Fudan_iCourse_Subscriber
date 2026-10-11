@@ -70,44 +70,8 @@ def run(payload):
     summarizer = Summarizer()
 
     class ConsoleLectureRunner(LocalLectureRunner):
-        def _needs_audio(self, sub_id):
-            existing = self._db.get_lecture(sub_id) or {}
-            if main.config.USE_OFFICIAL_TRANSCRIPT and not existing.get("transcript"):
-                return LectureRunner._needs_audio(self, sub_id)
-            return super()._needs_audio(sub_id)
-
-        def _get_transcript(self, existing, course_id, sub_id):
-            if main.config.USE_OFFICIAL_TRANSCRIPT and not (existing or {}).get("transcript"):
-                try:
-                    segments = self._official_cache.pop(sub_id, None)
-                    if segments is None:
-                        segments = self._client.get_transcript_segments(sub_id)
-                    if self._official_transcript_usable(segments, duration_hint_s=self._db.get_max_ppt_created_sec(sub_id)):
-                        text = " ".join(row["text"] for row in segments)
-                        if text.strip():
-                            self._db.update_transcript(sub_id, text)
-                            self.local.save_meta(self._db, sub_id, "segments", segments)
-                            self.local.save_meta(self._db, sub_id, "audio", {"asr_backend": "official"})
-                            self.checkpoint()
-                            self._release_audio(sub_id)
-                            return text, segments
-                except Exception as exc:
-                    self._reporter.info(f"官方转录不可用，继续本机识别（{type(exc).__name__}）")
-            return super()._get_transcript(existing, course_id, sub_id)
-
         def _summarize(self, sub_id, course_title, transcript, transcript_segments):
-            if not self.local.meta(self._db, sub_id, "ocr"):
-                count = self._client.source_count(sub_id)
-                with self._db._lock:
-                    failed = self._db.conn.execute(
-                        "SELECT count(*) FROM ppt_pages WHERE sub_id=? AND ocr_status IN ('pending','failed')", (sub_id,)).fetchone()[0]
-                if failed:
-                    raise ValueError(f"仍有 {failed} 页课件未完成 OCR")
-                pages = self._db.get_done_ppt_pages(sub_id)
-                if count and not any(page.get("text", "").strip() for page in pages):
-                    raise ValueError("有课件截图但未得到有效 OCR 文字")
-                self.local.save_meta(self._db, sub_id, "ocr", {"source_pages": count, "kept_pages": len(pages)})
-                self.checkpoint()
+            self._record_ppt_status(sub_id)
             return LectureRunner._summarize(self, sub_id, course_title, transcript, transcript_segments)
 
     runner = ConsoleLectureRunner(client, db, scheduler, Transcriber(), reporter,

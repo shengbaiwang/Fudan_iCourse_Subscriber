@@ -68,16 +68,24 @@ def test_failed_final_scan_is_retried(course):
     assert len(main._enumerate_lectures(client, db, reporter)) == 1
 
 
-def test_pause_waits_for_listed_recordings_to_be_published(course):
+def test_pause_probes_official_text_before_recording_is_published(course):
     db, client, reporter = course
     complete(db, "10")
     delayed = {"sub_id": "11", "sub_title": "第二课", "date": "2025-01-02", "has_playback": False}
     client.get_course_detail.return_value["lectures"].append(delayed)
-    assert main._enumerate_lectures(client, db, reporter) == []
+    assert [row[2]["sub_id"] for row in main._enumerate_lectures(client, db, reporter)] == ["11"]
     assert db.read_meta(PAUSE_SCANS_META) is None
     delayed["has_playback"] = True
     assert [row[2]["sub_id"] for row in main._enumerate_lectures(client, db, reporter)] == ["11"]
     assert json.loads(db.read_meta(PAUSE_SCANS_META)) == {"1": "first-pause"}
+
+
+def test_same_title_does_not_hide_a_distinct_official_text_source(course):
+    db, client, reporter = course
+    lectures = client.get_course_detail.return_value['lectures']
+    lectures.append(dict(lectures[0], sub_id='11', has_playback=False))
+    lectures.append(dict(lectures[0]))
+    assert [row[2]['sub_id'] for row in main._enumerate_lectures(client, db, reporter)] == ['10', '11']
 
 
 def test_resume_and_repause_require_fresh_discovery(course, monkeypatch):

@@ -220,7 +220,24 @@ def read_snapshot(creds):
 
 def meta(db, sub_id: str, stage: str):
     value = db.read_meta(f"local:{sub_id}:{stage}")
-    return json.loads(value) if value else None
+    proof = json.loads(value) if value else None
+    if stage == "audio" and proof:
+        row = db.get_lecture(sub_id) or {}
+        if proof.get("asr_backend") == "official" or row.get("transcript_source") == "official":
+            # Older official-text checkpoints used screenshot timestamps.
+            # Recheck every summary entry point against independent evidence.
+            from src.api.materials import transcript_problem
+            segments = meta(db, sub_id, "segments")
+            text = row.get("transcript") or ""
+            source = row.get("recording_duration_source")
+            if (proof.get("asr_backend") != "official" or not source
+                    or proof.get("duration_source") != source
+                    or proof.get("expected_seconds") != row.get("recording_duration")
+                    or proof.get("transcript_sha256") != hashlib.sha256(text.encode()).hexdigest()
+                    or transcript_problem(segments, row.get("recording_duration"))
+                    or " ".join(s["text"] for s in segments) != text):
+                return None
+    return proof
 
 
 def save_meta(db, sub_id: str, stage: str, value):
@@ -289,7 +306,7 @@ def summarize(db, checkpoint, lecture, summarizer):
     if row.get("summary"):
         return
     if not meta(db, sub_id, "audio") or not meta(db, sub_id, "ocr"):
-        raise ValueError("需先完成并验证转录与 OCR")
+        raise ValueError("需先完成并验证转录，同时检查课件状态")
     prompt, _ = bucketer.assemble(row["transcript"], meta(db, sub_id, "segments"), db.get_done_ppt_pages(sub_id))
     text, model = summarizer.summarize(TITLE, prompt)
     save_summary(db, checkpoint, sub_id, text, model)
@@ -299,7 +316,7 @@ def save_summary(db, checkpoint, sub_id: str, text: str, model: str):
     """Commit a complete API result only after its source stages passed."""
     from src.ai.title import split_generated_title
     if not meta(db, sub_id, "audio") or not meta(db, sub_id, "ocr"):
-        raise ValueError("需先完成并验证转录与 OCR")
+        raise ValueError("需先完成并验证转录，同时检查课件状态")
     title, body = split_generated_title(text)
     if not body.strip():
         raise ValueError("摘要正文为空")
@@ -337,7 +354,7 @@ def summary_request(db, lecture):
     from src.ai.summary_prompt import SYSTEM_PROMPT, summary_user_content
     sub_id = str(lecture["sub_id"])
     if not meta(db, sub_id, "audio") or not meta(db, sub_id, "ocr"):
-        raise ValueError("需先完成并验证转录与 OCR")
+        raise ValueError("需先完成并验证转录，同时检查课件状态")
     row = db.get_lecture(sub_id)
     prompt, mode = bucketer.assemble(row["transcript"], meta(db, sub_id, "segments"), db.get_done_ppt_pages(sub_id))
     return {"sub_id": sub_id, "course_id": COURSE_ID,
@@ -382,7 +399,7 @@ def export_materials(db, lecture):
     """Make the verified local source reviewable without any API upload."""
     sub_id = str(lecture["sub_id"])
     if not (meta(db, sub_id, "audio") and meta(db, sub_id, "ocr")):
-        raise ValueError("需先完成并验证转录与 OCR")
+        raise ValueError("需先完成并验证转录，同时检查课件状态")
     row = db.get_lecture(sub_id)
     output = RUN_DIR / "materials" / sub_id
     output.mkdir(parents=True, exist_ok=True)
@@ -409,9 +426,7 @@ def export_index(db, manifest):
         sub_id = str(lecture["sub_id"])
         row = db.get_lecture(sub_id) or {}
         audio, ocr = meta(db, sub_id, "audio"), meta(db, sub_id, "ocr")
-        if not lecture.get("has_playback"):
-            state, link = "平台无回放", "—"
-        elif row.get("summary"):
+        if row.get("summary"):
             state, link = "已完成", f"[{row.get('ai_title') or '阅读'}]({sub_id}.md)"
             combined.append(f"\n## {lecture['date']} · {row.get('ai_title') or lecture['sub_title']}\n\n模型：{row.get('summary_model')}\n\n{row['summary']}\n")
         elif audio and ocr:
@@ -519,8 +534,7 @@ def run(args):
         db.upsert_all_courses_for_term(TERM, [{"course_id": COURSE_ID, "title": TITLE, "teacher": TEACHER, "dept": DEPT}])
         db.write_meta("local:manifest", json.dumps(manifest, ensure_ascii=False))
         for lecture in lectures:
-            if lecture.get("has_playback"):
-                db.insert_lecture(str(lecture["sub_id"]), COURSE_ID, lecture["sub_title"], lecture["date"])
+            db.insert_lecture(str(lecture["sub_id"]), COURSE_ID, lecture["sub_title"], lecture["date"])
         checkpoint()
         if args.stage == "prepare":
             from src.ai.transcriber import Transcriber
@@ -544,8 +558,7 @@ def run(args):
             summary_worker = SummaryWorker(db, checkpoint, manifest, sys.modules[__name__], summarizer)
             pipeline = LocalLectureRunner(client, db, scheduler, transcriber, Reporter(),
                                           checkpoint=checkpoint, runner=sys.modules[__name__], summary_worker=summary_worker)
-            targets = [lecture for lecture in lectures if lecture.get("has_playback")
-                       and not (meta(db, str(lecture["sub_id"]), "audio") and meta(db, str(lecture["sub_id"]), "ocr"))][:args.limit]
+            targets = [lecture for lecture in lectures if not (meta(db, str(lecture["sub_id"]), "audio") and meta(db, str(lecture["sub_id"]), "ocr"))][:args.limit]
             next_lectures = {str(lecture["sub_id"]): (COURSE_ID, str(targets[i + 1]["sub_id"])) if i + 1 < len(targets) else None
                              for i, lecture in enumerate(targets)}
             for lecture in lectures:
@@ -559,8 +572,6 @@ def run(args):
         try:
             for lecture in lectures:
                 sub_id = str(lecture["sub_id"])
-                if not lecture.get("has_playback"):
-                    continue
                 db.insert_lecture(sub_id, COURSE_ID, lecture["sub_title"], lecture["date"])
                 row = db.get_lecture(sub_id)
                 if args.stage == "prepare" and meta(db, sub_id, "audio") and meta(db, sub_id, "ocr"):

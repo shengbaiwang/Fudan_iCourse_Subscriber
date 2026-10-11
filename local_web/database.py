@@ -356,11 +356,14 @@ class DatabaseManager:
             has_retry_after = db.execute(
                 "SELECT 1 FROM pragma_table_info('lectures') WHERE name = 'retry_after'"
             ).fetchone()
+            columns = {row[1] for row in db.execute("PRAGMA table_info(lectures)")}
             sql = f"""
                 SELECT sub_id, course_id, sub_title, date, processed_at,
                        error_stage, error_msg, summary_model, summary,
                        {"ai_title" if has_ai_title else "NULL AS ai_title"},
                        {"retry_after" if has_retry_after else "NULL AS retry_after"},
+                       {"ppt_warning" if "ppt_warning" in columns else "NULL AS ppt_warning"},
+                       {"transcript_source" if "transcript_source" in columns else "NULL AS transcript_source"},
                        CASE WHEN summary IS NOT NULL THEN 1 ELSE 0 END AS has_summary,
                        CASE WHEN TRIM(COALESCE(transcript, '')) != ''
                             THEN 1 ELSE 0 END AS transcript_available

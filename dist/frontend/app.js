@@ -1666,6 +1666,14 @@ function renderLectureList() {
       }
       left.append(error);
     }
+    if (lecture.transcript_source === "official" || lecture.ppt_warning) {
+      const material = document.createElement("p");
+      material.textContent = [
+        lecture.transcript_source === "official" ? "官方转录 · 已通过独立录制时长校验" : "",
+        lecture.ppt_warning ? `课件提示：${lecture.ppt_warning}` : "",
+      ].filter(Boolean).join(" · ");
+      left.append(material);
+    }
     const state = document.createElement("span");
     state.className = `state-badge ${lectureState(lecture)}`;
     state.textContent = lectureStateLabel(lecture);

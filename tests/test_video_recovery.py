@@ -114,11 +114,10 @@ def test_legacy_no_video_backlog_revives_and_cooldown_cannot_be_bypassed(db, mon
 
 
 def make_runner(db, error, segments, duration=3600):
-    with db.conn:
-        db.conn.execute("INSERT INTO ppt_pages(sub_id,page_num,created_sec,pptimgurl) VALUES ('10',1,?,'https://ppt.example/1.jpg')", (duration,))
     downloader = Mock()
     downloader.get.side_effect = error
-    value = LectureRunner(SimpleNamespace(get_transcript_segments=lambda _:segments), db,
+    value = LectureRunner(SimpleNamespace(get_transcript_segments=lambda _:segments,
+        get_recording_duration=lambda *_:{'seconds':duration, 'source':'sub-info.video_duration_seconds'} if duration else None), db,
         SimpleNamespace(audio_downloader=downloader), Mock(), Mock(), Mock())
     return value
 
@@ -153,15 +152,17 @@ def test_recovery_rejects_incomplete_or_unverifiable_official_text(db, monkeypat
     assert not row['transcript'] and row['error_stage'] == 'video_access' and row['retry_after']
 
 
-def test_api_failure_is_recorded_as_retryable_video_error(db, monkeypatch):
+def test_api_failure_can_recover_with_independently_verified_official_text(db, monkeypatch):
     monkeypatch.setattr(config, 'USE_OFFICIAL_TRANSCRIPT', False)
     value = make_runner(db, VideoLookupError('临时异常'), full_segments())
-    assert value._get_transcript(db.get_lecture('10'), '1', '10') == (None, None)
-    assert db.get_lecture('10')['error_stage'] == 'video'
+    assert value._get_transcript(db.get_lecture('10'), '1', '10')[0]
+    assert db.get_lecture('10')['transcript_source'] == 'official'
 
 
 def test_cooldown_survives_shards_merge_and_success_clears_it(db, tmp_path):
     db.update_error('10', 'no_video', '等待发布')
+    db.update_recording_duration('10', 3600, 'sub-info.video_duration_seconds')
+    db.update_ppt_warning('10', '课件清单读取失败（TimeoutError）')
     retry_at = db.get_lecture('10')['retry_after']
     directory = tmp_path / 'shards'
     index = shard_database(db.db_path, str(directory), 'synthetic-password')
@@ -170,7 +171,7 @@ def test_cooldown_survives_shards_merge_and_success_clears_it(db, tmp_path):
     merge(db.db_path, str(restored))
     with sqlite3.connect(restored) as conn:
         assert conn.execute('SELECT retry_after FROM lectures').fetchone()[0] == retry_at
-    db.update_transcript('10', '完整转录')
+    db.update_transcript('10', '完整转录', source='official')
     db.update_summary('10', '恢复笔记', 'test/model')
     db.mark_processed('10')
     db.clear_error('10')
@@ -178,6 +179,8 @@ def test_cooldown_survives_shards_merge_and_success_clears_it(db, tmp_path):
     with sqlite3.connect(restored) as conn:
         assert conn.execute('SELECT error_stage, error_count, retry_after FROM lectures').fetchone() == (None, 0, None)
         assert conn.execute('SELECT summary FROM lectures').fetchone()[0] == '恢复笔记'
+        assert conn.execute('SELECT recording_duration, recording_duration_source, transcript_source, ppt_warning FROM lectures').fetchone() == (
+            3600, 'sub-info.video_duration_seconds', 'official', '课件清单读取失败（TimeoutError）')
 
 
 def test_class_break_does_not_look_like_head_or_tail_truncation(db, monkeypatch):
@@ -191,7 +194,6 @@ def test_class_break_does_not_look_like_head_or_tail_truncation(db, monkeypatch)
 def test_local_recovery_persists_official_source_checkpoint(db, monkeypatch):
     from scripts.local_pipeline import LocalLectureRunner
     monkeypatch.setattr(config, 'USE_OFFICIAL_TRANSCRIPT', False)
-    make_runner(db, VideoAccessError('未选课'), [])  # register the duration hint
     metadata = {}
     local = SimpleNamespace(
         meta=lambda _db, sid, kind:metadata.get((sid,kind)),
@@ -199,7 +201,8 @@ def test_local_recovery_persists_official_source_checkpoint(db, monkeypatch):
     downloader = Mock()
     downloader.get.side_effect = VideoAccessError('未选课')
     checkpoint = Mock()
-    value = LocalLectureRunner(SimpleNamespace(get_transcript_segments=lambda _:full_segments()), db,
+    value = LocalLectureRunner(SimpleNamespace(get_transcript_segments=lambda _:full_segments(),
+        get_recording_duration=lambda *_:{'seconds':3600, 'source':'sub-info.video_duration_seconds'}), db,
         SimpleNamespace(audio_downloader=downloader), Mock(), Mock(),
         checkpoint=checkpoint, runner=local, summary_worker=None)
     assert value._get_transcript(db.get_lecture('10'), '1', '10')[0]

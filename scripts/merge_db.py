@@ -116,10 +116,12 @@ def merge(local_path: str, remote_path: str):
                 INSERT OR IGNORE INTO main.lectures
                     (sub_id, course_id, sub_title, date, transcript, summary,
                      processed_at, emailed_at, error_msg, error_count, error_stage,
-                     summary_model, ai_title, retry_after)
+                     summary_model, ai_title, retry_after, recording_duration,
+                     recording_duration_source, transcript_source, ppt_warning)
                 SELECT sub_id, course_id, sub_title, date, transcript, summary,
                        processed_at, emailed_at, error_msg, error_count, error_stage,
-                       summary_model, ai_title, retry_after
+                       summary_model, ai_title, retry_after, recording_duration,
+                       recording_duration_source, transcript_source, ppt_warning
                 FROM local.lectures
             """)
 
@@ -129,6 +131,14 @@ def merge(local_path: str, remote_path: str):
             conn.execute("""
                 UPDATE main.lectures SET
                     transcript    = COALESCE(l.transcript,    main.lectures.transcript),
+                    transcript_source = CASE WHEN l.transcript IS NOT NULL
+                        THEN l.transcript_source ELSE main.lectures.transcript_source END,
+                    recording_duration = CASE WHEN l.recording_duration IS NOT NULL
+                        THEN l.recording_duration ELSE main.lectures.recording_duration END,
+                    recording_duration_source = CASE WHEN l.recording_duration IS NOT NULL
+                        THEN l.recording_duration_source ELSE main.lectures.recording_duration_source END,
+                    ppt_warning = CASE WHEN COALESCE(julianday(l.processed_at), 0) >= COALESCE(julianday(main.lectures.processed_at), 0)
+                        THEN l.ppt_warning ELSE main.lectures.ppt_warning END,
                     summary = CASE WHEN COALESCE(julianday(l.processed_at), 0) >= COALESCE(julianday(main.lectures.processed_at), 0)
                         THEN COALESCE(l.summary, main.lectures.summary) ELSE COALESCE(main.lectures.summary, l.summary) END,
                     summary_model = CASE WHEN COALESCE(julianday(l.processed_at), 0) >= COALESCE(julianday(main.lectures.processed_at), 0)

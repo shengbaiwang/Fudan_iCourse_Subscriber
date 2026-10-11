@@ -102,29 +102,17 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
             )
             db.upsert_course(course_id, course_title, teacher)
 
-            # School system sometimes lists duplicate lectures; dedup the
-            # raw list so the same logic produces the same outcome each run.
-            # When a sub_title appears more than once, keep the first one
-            # that has playback; if none have playback, keep the first.
-            seen_sub_titles: dict[str, dict] = {}
+            # A repeated label can refer to different recordings/text sources.
+            # Only deduplicate identical lecture IDs, preserving every source.
+            seen_sub_ids = set()
             deduped = []
             for lec in lectures:
-                title = lec.get("sub_title", "")
-                if not title:
-                    deduped.append(lec)
+                sid = str(lec["sub_id"])
+                if sid in seen_sub_ids:
+                    reporter.course_dedup_skip(lec.get("sub_title", ""), sid)
                     continue
-                existing = seen_sub_titles.get(title)
-                if existing is None:
-                    seen_sub_titles[title] = lec
-                    deduped.append(lec)
-                elif not existing.get("has_playback") and lec.get("has_playback"):
-                    # replace the earlier no-playback entry in place so the
-                    # processing order stays chronological
-                    deduped[deduped.index(existing)] = lec
-                    seen_sub_titles[title] = lec
-                    reporter.course_dedup_skip(title, existing["sub_id"])
-                else:
-                    reporter.course_dedup_skip(title, lec["sub_id"])
+                seen_sub_ids.add(sid)
+                deduped.append(lec)
             lectures = deduped
 
             known_processed = db.get_processed_sub_ids(course_id)
@@ -132,8 +120,7 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
             deferred = set() if force_video_recheck else db.get_deferred_sub_ids(course_id)
             new_lectures = [
                 lec for lec in lectures
-                if lec.get("has_playback")
-                and str(lec["sub_id"]) not in known_processed
+                if str(lec["sub_id"]) not in known_processed
                 and str(lec["sub_id"]) not in exhausted
                 and str(lec["sub_id"]) not in deferred
             ]

@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from src.runtime import config
 from src.api.webvpn import WebVPNSession, get_vpn_url
+from src.api.materials import recording_duration
 
 
 _DATE_FROM_SUB_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
@@ -118,6 +119,7 @@ class ICourseClient:
         self.vpn = vpn_session
         self.base_url = config.ICOURSE_BASE
         self._userinfo = None
+        self._recording_durations = {}
 
     def get_userinfo(self) -> dict:
         """Get current user info (id, tenant_id, phone, account).
@@ -207,6 +209,7 @@ class ICourseClient:
                 for day, items in days.items():
                     for item in items:
                         if "id" in item:
+                            self._remember_duration(course_id, str(item["id"]), item, "course-detail")
                             sub_title = item.get("sub_title", "")
                             # Real lecture date is embedded in sub_title
                             # ("2026-03-05第6-8节" → "2026-03-05"); fall back
@@ -528,6 +531,34 @@ class ICourseClient:
 
         return payload
 
+    def _remember_duration(self, course_id, sub_id, payload, source):
+        evidence = recording_duration(payload, source)
+        if evidence:
+            key = (str(course_id), str(sub_id))
+            previous = self._recording_durations.get(key)
+            if not previous or evidence["seconds"] >= previous["seconds"]:
+                self._recording_durations[key] = evidence
+
+    def get_recording_duration(self, course_id: str, sub_id: str) -> dict | None:
+        """Read independent recording length without fetching/signing media.
+
+        An access denial for video does not prohibit reading separately
+        available metadata. Unknown units and scheduled class times are
+        never substituted for the actual recording length.
+        """
+        key = (str(course_id), str(sub_id))
+        if key not in self._recording_durations:
+            for source, getter in (("sub-info", self.get_sub_info),
+                                   ("sub-detail", self.get_sub_detail)):
+                try:
+                    self._remember_duration(course_id, sub_id, getter(course_id, sub_id), source)
+                except InterruptedError:
+                    raise
+                except Exception:
+                    continue
+        evidence = self._recording_durations.get(key)
+        return dict(evidence) if evidence else None
+
     def get_video_url(self, course_id: str, sub_id: str) -> str | None:
         """Get a signed video URL for a specific lecture.
 
@@ -553,6 +584,7 @@ class ICourseClient:
             info = {}
             failures.append(f"sub-info: {type(e).__name__}")
 
+        self._remember_duration(course_id, sub_id, info, "sub-info")
         if info.get("can_watch") in (False, 0, "0", "false"):
             reason = ("当前账号未选该课程，平台不允许观看录播"
                       if info.get("watch_rule") == "not_student"
@@ -578,6 +610,7 @@ class ICourseClient:
         if not base_url:
             try:
                 detail = self.get_sub_detail(course_id, sub_id)
+                self._remember_duration(course_id, sub_id, detail, "sub-detail")
                 if detail.get("can_watch") in (False, 0, "0", "false"):
                     raise VideoAccessError("平台限制当前账号观看该录播；需在 iCourse 核实课程观看权限")
                 content = _video_mapping(detail.get("content"))

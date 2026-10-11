@@ -71,6 +71,7 @@ class PPTStats:
     invalid: int     # matched a classroom-noise pattern
     dedupped: int    # dropped by garbage-catalog match or pairwise dHash dedup
     failed: int      # download or OCR error
+    list_error: str | None = None
 
 
 class PPTAsyncHandle:
@@ -87,7 +88,7 @@ class PPTAsyncHandle:
     def __init__(self, pipeline: "PPTPipeline", sub_id: str,
                  *, total: int, inserted: int,
                  futures: list[Future], dedupped: int, presubmit_failed: int,
-                 images: dict[int, bytes] | None = None):
+                 images: dict[int, bytes] | None = None, list_error: str | None = None):
         self._pipeline = pipeline
         self._sub_id = sub_id
         self._total = total
@@ -96,6 +97,7 @@ class PPTAsyncHandle:
         self._dedupped = dedupped
         self._presubmit_failed = presubmit_failed
         self._images = images  # non-None when OCR was deferred
+        self._list_error = list_error
         self._ocr_submitted = False
         self._drained: PPTStats | None = None
 
@@ -140,6 +142,7 @@ class PPTAsyncHandle:
             total=self._total, inserted=self._inserted,
             done=done, invalid=invalid,
             dedupped=self._dedupped, failed=failed,
+            list_error=self._list_error,
         )
         self._drained = stats
         reporter = self._pipeline._reporter
@@ -210,6 +213,7 @@ class PPTPipeline:
             dedupped=c["dedupped"],
             presubmit_failed=c["failed"],
             images=images or None,
+            list_error=c["list_error"],
         )
 
     def prefetch_and_ocr(self, client: "ICourseClient", course_id: str,
@@ -295,6 +299,7 @@ class PPTPipeline:
         # prefetch already warmed the cache.
         self._scheduler.image_cache.schedule(client, course_id, sub_id)
         ppt_items, cached = self._scheduler.image_cache.wait(sub_id)
+        list_error = self._scheduler.image_cache.get_error(sub_id)
         inserted = 0
         if ppt_items:
             inserted = self._db.insert_ppt_pages_pending(sub_id, ppt_items)
@@ -346,6 +351,7 @@ class PPTPipeline:
         return images, {
             "total": total, "inserted": inserted,
             "failed": failed, "dedupped": len(dropped_pages),
+            "list_error": list_error,
         }
 
     # ── Worker ──────────────────────────────────────────────────────────

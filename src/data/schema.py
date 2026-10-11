@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS lectures (
     error_msg TEXT, error_count INTEGER DEFAULT 0,
     error_stage TEXT, summary_model TEXT,
     ai_title TEXT, retry_after INTEGER,
+    recording_duration REAL, recording_duration_source TEXT,
+    transcript_source TEXT, ppt_warning TEXT,
     FOREIGN KEY (course_id) REFERENCES courses(course_id)
 );
 -- A lecture's current summary remains on ``lectures`` for compatibility
@@ -97,6 +99,10 @@ LECTURES_MIGRATION_COLUMNS: list[tuple[str, str]] = [
     # NULL on older databases — display falls back to local derivation.
     ("ai_title", "TEXT"),
     ("retry_after", "INTEGER"),
+    ("recording_duration", "REAL"),
+    ("recording_duration_source", "TEXT"),
+    ("transcript_source", "TEXT"),
+    ("ppt_warning", "TEXT"),
 ]
 
 # Columns added to ``ppt_pages`` after its initial shape shipped.

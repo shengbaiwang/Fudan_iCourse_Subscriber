@@ -45,6 +45,7 @@ from src.ai.title import build_title_material, split_generated_title
 from src.pipeline.ppt_pipeline import PPTPipeline
 from src.ai.transcriber import IncompleteAudioError, NoAudioStreamError
 from src.api.icourse import VideoAccessError, VideoLookupError, VideoNotReadyError
+from src.api.materials import transcript_problem
 from src.runtime import config
 
 if TYPE_CHECKING:
@@ -74,6 +75,7 @@ class LectureRunner:
         # (``_needs_audio``), keyed by sub_id, so ``_get_transcript`` doesn't
         # re-fetch them one lecture later.
         self._official_cache: dict[str, list[dict]] = {}
+        self._official_failures: dict[str, str] = {}
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -105,9 +107,13 @@ class LectureRunner:
         # ── Phase B — submit PPT pipeline (fetch + dedup, no OCR yet) ──
         # OCR is deferred (defer_ocr=True) so ASR in Phase D gets exclusive
         # CPU.  OCR will be submitted in Phase E (handle.drain()).
-        ppt_handle = self._ppt.submit(
-            self._client, course_id, sub_id, defer_ocr=True,
-        )
+        try:
+            ppt_handle = self._ppt.submit(
+                self._client, course_id, sub_id, defer_ocr=True,
+            )
+        except Exception as exc:
+            ppt_handle = None
+            self._warn_ppt(sub_id, f"课件准备失败（{type(exc).__name__}）")
 
         # ── Phase C — schedule next lecture's prefetch ─────────────────
         # Done BEFORE ASR so the next audio download can start filling its
@@ -125,12 +131,11 @@ class LectureRunner:
             # only submitted at drain() time, so skipping it would leave
             # the pages 'pending' forever and force the retry run to redo
             # download + dedup from scratch.
-            ppt_handle.drain()
+            self._finish_ppt(sub_id, ppt_handle)
             return None
 
         # ── Phase E — drain remaining OCR work ─────────────────────────
-        ppt_stats = ppt_handle.drain()
-        _ = ppt_stats  # stats are emitted by PPTAsyncHandle.drain via reporter
+        self._finish_ppt(sub_id, ppt_handle)
 
         # ── Phase E2 — kick off next lecture's OCR (runs during LLM) ───
         # Images were prefetched in Phase C; prefetch_and_ocr spawns a
@@ -168,6 +173,30 @@ class LectureRunner:
         self._reporter.lecture_done(course_title, sub_title, elapsed)
         return summary
 
+    def _warn_ppt(self, sub_id, message):
+        self._db.update_ppt_warning(sub_id, message)
+        self._reporter.info(f"    [PPT] {message}；课件作为补充材料")
+
+    def _finish_ppt(self, sub_id, handle):
+        if handle is None:
+            return
+        try:
+            stats = handle.drain()
+            failure_count = self._db.get_ppt_failure_count(sub_id)
+            warning = getattr(stats, "list_error", None)
+            if not isinstance(warning, str):
+                warning = None
+            if failure_count:
+                warning = "；".join(filter(None, (warning, f"{failure_count} 页课件未完成 OCR")))
+            elif getattr(stats, "failed", 0) and isinstance(stats.failed, int):
+                warning = warning or f"{stats.failed} 页课件处理失败"
+            if warning:
+                self._warn_ppt(sub_id, warning)
+            else:
+                self._db.update_ppt_warning(sub_id, None)
+        except Exception as exc:
+            self._warn_ppt(sub_id, f"课件处理失败（{type(exc).__name__}）")
+
     # ── Internal helpers ────────────────────────────────────────────────
 
     @staticmethod
@@ -192,10 +221,15 @@ class LectureRunner:
         # actually be ASR-transcribed.  Both are idempotent so repeated
         # invocations are no-ops; the audio side blocks on its semaphore
         # until a download slot frees.
-        self._scheduler.prefetch_lecture(
-            self._client, next_course, next_sub,
-            audio=self._needs_audio(next_sub),
-        )
+        try:
+            self._scheduler.prefetch_lecture(
+                self._client, next_course, next_sub,
+                audio=self._needs_audio(next_sub),
+            )
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            self._reporter.info(f"    课次 {next_sub} 预取失败（{type(exc).__name__}），处理时重新检查")
 
     def _needs_audio(self, sub_id: str) -> bool:
         """False when transcription won't need the audio stream: a cached
@@ -203,15 +237,12 @@ class LectureRunner:
         prefetching from spending a download slot (and a full lecture of
         bandwidth) on audio that would just be killed in Phase H."""
         existing = self._db.get_lecture(sub_id)
-        if existing and existing.get("transcript"):
+        if existing and existing.get("transcript") and existing.get("transcript_source") == "asr":
             return False
-        if config.USE_OFFICIAL_TRANSCRIPT:
+        if config.USE_OFFICIAL_TRANSCRIPT or (existing or {}).get("transcript_source") == "official":
             try:
-                segments = self._client.get_transcript_segments(sub_id)
-                # No tail hint at prefetch time — the lecture's PPT rows
-                # aren't registered yet.  _get_transcript re-checks with
-                # the hint and schedules the download then if needed.
-                if self._official_transcript_usable(segments):
+                segments = self._checked_official_transcript(sub_id)
+                if segments:
                     self._official_cache[sub_id] = segments
                     return False
             except Exception as e:
@@ -221,30 +252,27 @@ class LectureRunner:
                 )
         return True
 
-    @staticmethod
-    def _official_transcript_usable(segments: list[dict] | None,
-                                    max_gap_minutes: int = 20,
-                                    duration_hint_s: int = 0) -> bool:
-        """True if the official transcript is complete enough to use.
+    def _checked_official_transcript(self, sub_id):
+        row = self._db.get_lecture(sub_id) or {}
+        segments = self._official_cache.pop(sub_id, None)
+        if segments is None:
+            segments = self._client.get_transcript_segments(sub_id)
+        evidence = self._client.get_recording_duration(row.get("course_id", ""), sub_id)
+        if isinstance(evidence, dict):
+            self._db.update_recording_duration(sub_id, evidence.get("seconds"), evidence.get("source"))
+        row = self._db.get_lecture(sub_id) or {}
+        duration = row.get("recording_duration") if row.get("recording_duration_source") else None
+        problem = transcript_problem(segments, duration)
+        if problem:
+            self._official_failures[sub_id] = problem
+            self._reporter.info(f"    [Official transcript] {problem}")
+            return None
+        self._official_failures.pop(sub_id, None)
+        return segments
 
-        Looks for a >``max_gap_minutes`` hole in three places: before the
-        first segment (head truncation), between segments, and — when a
-        duration hint is known (the last PPT screenshot offset, a lower
-        bound on lecture length) — after the last segment (tail
-        truncation)."""
-        if not segments:
-            return False
-        max_gap_ms = max_gap_minutes * 60_000
-        if segments[0]["start_ms"] > max_gap_ms:
-            return False
-        prev_end = segments[0]["end_ms"]
-        for seg in segments[1:]:
-            if seg["start_ms"] - prev_end > max_gap_ms:
-                return False
-            prev_end = max(prev_end, seg["end_ms"])
-        if duration_hint_s and duration_hint_s * 1000 - prev_end > max_gap_ms:
-            return False
-        return True
+    def _availability_message(self, sub_id, message):
+        problem = self._official_failures.get(sub_id)
+        return f"{message}；{problem}" if problem else message
 
     def _get_transcript(self, existing: dict | None, course_id: str,
                         sub_id: str) -> tuple[Optional[str], Optional[list]]:
@@ -254,7 +282,7 @@ class LectureRunner:
         complete-enough (no >20 min silence gaps) it replaces the ASR
         step entirely, saving ~5 min of CPU time per lecture.
         """
-        if existing and existing.get("transcript"):
+        if existing and existing.get("transcript") and existing.get("transcript_source") == "asr":
             self._reporter.info(
                 f"    Transcript exists "
                 f"({len(existing['transcript'])} chars), "
@@ -262,34 +290,11 @@ class LectureRunner:
             )
             return existing["transcript"], None
 
-        # Try official transcript before firing up ASR (config-gated).
-        if config.USE_OFFICIAL_TRANSCRIPT:
-            try:
-                official = self._official_cache.pop(sub_id, None)
-                if official is None:
-                    official = self._client.get_transcript_segments(sub_id)
-                # Phase B registered the PPT rows, so the last screenshot
-                # offset is available as a duration lower bound for the
-                # tail-truncation check.
-                duration_hint = self._db.get_max_ppt_created_sec(sub_id)
-                if self._official_transcript_usable(
-                        official, duration_hint_s=duration_hint):
-                    text = " ".join(s["text"] for s in official)
-                    self._reporter.info(
-                        f"    Using official transcript "
-                        f"({len(text)} chars, {len(official)} segments)"
-                    )
-                    self._db.update_transcript(sub_id, text)
-                    # The audio may have been prefetched before we knew the
-                    # official transcript was usable — stop that download
-                    # now instead of letting it run until Phase H.
-                    self._release_audio(sub_id)
-                    return text, official
-            except Exception as e:
-                self._reporter.info(
-                    f"    [Official transcript] unavailable, falling back "
-                    f"to ASR: {type(e).__name__}: {e}"
-                )
+        # Explicit official-first preference uses the same integrity gate.
+        if config.USE_OFFICIAL_TRANSCRIPT or (existing or {}).get("transcript_source") == "official":
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
 
         # Pull the audio handle.  ``schedule`` is idempotent — usually the
         # previous lecture already kicked it off (Phase C), but for the
@@ -303,29 +308,40 @@ class LectureRunner:
             if fallback[0] is not None:
                 return fallback
             self._reporter.info(f"    [ACCESS] {e}")
-            self._db.update_error(sub_id, "video_access", str(e))
+            self._db.update_error(sub_id, "video_access", self._availability_message(sub_id, str(e)))
             return None, None
         except VideoNotReadyError as e:
             fallback = self._official_video_fallback(sub_id)
             if fallback[0] is not None:
                 return fallback
             self._reporter.info(f"    [WAIT] {e}")
-            self._db.update_error(sub_id, "no_video", str(e))
+            self._db.update_error(sub_id, "no_video", self._availability_message(sub_id, str(e)))
             return None, None
         except VideoLookupError as e:
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
             self._reporter.info(f"    [RETRY] {e}")
-            self._db.update_error(sub_id, "video", str(e))
+            self._db.update_error(sub_id, "video", self._availability_message(sub_id, str(e)))
             return None, None
         except TimeoutError as e:
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
             self._reporter.info(f"    [SKIP] {e}")
-            self._db.update_error(sub_id, "video", "录播准备超时，稍后自动重试")
+            self._db.update_error(sub_id, "video", self._availability_message(sub_id, "录播准备超时，稍后自动重试"))
             return None, None
+        except InterruptedError:
+            raise
         except Exception as e:
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
             # Spawning FFmpeg/reading metadata can fail before an audio handle
             # exists. Do not turn that failure into a false no_video result.
             message = f"录播准备失败，稍后自动重试（{type(e).__name__}）"
             self._reporter.info(f"    [RETRY] {message}")
-            self._db.update_error(sub_id, "video", message)
+            self._db.update_error(sub_id, "video", self._availability_message(sub_id, message))
             return None, None
         if handle is None:
             fallback = self._official_video_fallback(sub_id)
@@ -336,7 +352,7 @@ class LectureRunner:
             self._reporter.lecture_skip_no_video(
                 existing.get("sub_title", sub_id) if existing else sub_id
             )
-            self._db.update_error(sub_id, "no_video", "平台尚未提供可播放的录播地址；将定期自动复查")
+            self._db.update_error(sub_id, "no_video", self._availability_message(sub_id, "平台尚未提供可播放的录播地址；将定期自动复查"))
             return None, None
 
         try:
@@ -372,29 +388,21 @@ class LectureRunner:
         return transcript, segments
 
     def _official_video_fallback(self, sub_id: str) -> tuple[Optional[str], Optional[list]]:
-        """Use the separately available official text when video is unavailable.
-
-        ASR remains preferred by default. This recovery path requires a PPT
-        duration hint and useful text. Interior gaps use the same 20-minute
-        tolerance as the normal official-transcript path (class breaks are
-        common); head/tail truncation is limited to 5 minutes.
-        """
+        """Accept independently readable text only with recording-length evidence."""
         try:
-            segments = self._client.get_transcript_segments(sub_id)
-            duration = self._db.get_max_ppt_created_sec(sub_id)
-            text = " ".join(s["text"] for s in (segments or []))
-            if (not duration or len(text.strip()) < 200
-                    or not self._official_transcript_usable(
-                        segments, duration_hint_s=duration)
-                    or segments[0]["start_ms"] > 5 * 60_000
-                    or duration * 1000 - max(s["end_ms"] for s in segments) > 5 * 60_000):
+            segments = self._checked_official_transcript(sub_id)
+            if not segments:
                 return None, None
-            self._db.update_transcript(sub_id, text)
-            self._reporter.info(f"    录播不可用，采用完整性校验通过的官方转录（{len(text)} 字）")
+            text = " ".join(s["text"] for s in segments)
+            self._db.update_transcript(sub_id, text, source="official")
+            self._reporter.info(f"    采用独立录制时长校验通过的官方转录（{len(text)} 字）")
             self._release_audio(sub_id)
             return text, segments
-        except Exception as e:
-            self._reporter.info(f"    官方转录补齐未成功（{type(e).__name__}），保留待复查状态")
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            self._official_failures[sub_id] = f"官方转录核验失败（{type(exc).__name__}）"
+            self._reporter.info(f"    {self._official_failures[sub_id]}，保留待复查状态")
             return None, None
 
     def _summarize(self, sub_id: str, course_title: str, transcript: str,

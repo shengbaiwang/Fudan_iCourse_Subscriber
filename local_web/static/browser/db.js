@@ -235,6 +235,8 @@ function _getLectures(courseId) {
     SELECT sub_id, sub_title, date, summary, processed_at,
            ${_queryAll("PRAGMA table_info(lectures)").some(row => row.name === "ai_title") ? "ai_title" : "NULL AS ai_title"},
            ${_queryAll("PRAGMA table_info(lectures)").some(row => row.name === "retry_after") ? "retry_after" : "NULL AS retry_after"},
+           ${_queryAll("PRAGMA table_info(lectures)").some(row => row.name === "ppt_warning") ? "ppt_warning" : "NULL AS ppt_warning"},
+           ${_queryAll("PRAGMA table_info(lectures)").some(row => row.name === "transcript_source") ? "transcript_source" : "NULL AS transcript_source"},
            error_stage, error_msg, summary_model, transcript
     FROM lectures WHERE course_id = ?
   `, [courseId]);

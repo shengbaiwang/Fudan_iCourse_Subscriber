@@ -8,6 +8,7 @@ import time
 
 from src.pipeline.lecture_runner import LectureRunner
 from src.api.icourse import VideoAccessError, VideoLookupError, VideoNotReadyError
+from src.runtime import config
 
 
 class StrictPPTClient:
@@ -23,7 +24,8 @@ class StrictPPTClient:
     def get_ppt_list(self, course_id, sub_id):
         sub_id = str(sub_id)
         with self.lock:
-            if self.runner.meta(self.db, sub_id, "ocr"):
+            proof = self.runner.meta(self.db, sub_id, "ocr")
+            if proof and proof.get("status", "checked") == "checked":
                 return []  # verified OCR rows already live in the database
             if sub_id in self.errors:
                 raise self.errors[sub_id]
@@ -38,6 +40,9 @@ class StrictPPTClient:
 
     def source_count(self, sub_id):
         with self.lock:
+            proof = self.runner.meta(self.db, sub_id, "ocr")
+            if proof and proof.get("status", "checked") == "checked":
+                return proof.get("source_pages", 0)
             if sub_id in self.errors:
                 raise self.errors[sub_id]
             if sub_id not in self.items:
@@ -164,11 +169,19 @@ class LocalLectureRunner(LectureRunner):
 
     def _needs_audio(self, sub_id):
         row = self._db.get_lecture(sub_id) or {}
-        return not (row.get("transcript") and self.local.meta(self._db, sub_id, "audio"))
+        if row.get("transcript") and self.local.meta(self._db, sub_id, "audio"):
+            return False
+        if config.USE_OFFICIAL_TRANSCRIPT and not row.get("transcript"):
+            return super()._needs_audio(sub_id)
+        return True
 
     def _get_transcript(self, existing, course_id, sub_id):
-        if not self._needs_audio(sub_id):
+        if (existing or {}).get("transcript") and self.local.meta(self._db, sub_id, "audio"):
             return existing["transcript"], self.local.meta(self._db, sub_id, "segments")
+        if config.USE_OFFICIAL_TRANSCRIPT:
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
         downloader = self._scheduler.audio_downloader
         downloader.schedule(self._client, course_id, sub_id)
         try:
@@ -178,25 +191,31 @@ class LocalLectureRunner(LectureRunner):
             if fallback[0] is not None:
                 return fallback
             stage = "video_access" if isinstance(exc, VideoAccessError) else "no_video"
-            self._db.update_error(sub_id, stage, str(exc))
+            self._db.update_error(sub_id, stage, self._availability_message(sub_id, str(exc)))
             self.checkpoint()
             return None, None
         except (VideoLookupError, TimeoutError) as exc:
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
             message = str(exc) if isinstance(exc, VideoLookupError) else "录播准备超时，稍后自动重试"
-            self._db.update_error(sub_id, "video", message)
+            self._db.update_error(sub_id, "video", self._availability_message(sub_id, message))
             self.checkpoint()
             return None, None
         except InterruptedError:
             raise
         except Exception as exc:
-            self._db.update_error(sub_id, "video", f"录播准备失败，稍后自动重试（{type(exc).__name__}）")
+            fallback = self._official_video_fallback(sub_id)
+            if fallback[0] is not None:
+                return fallback
+            self._db.update_error(sub_id, "video", self._availability_message(sub_id, f"录播准备失败，稍后自动重试（{type(exc).__name__}）"))
             self.checkpoint()
             return None, None
         if handle is None:
             fallback = self._official_video_fallback(sub_id)
             if fallback[0] is not None:
                 return fallback
-            self._db.update_error(sub_id, "no_video", "平台尚未提供可播放的录播地址；将定期自动复查")
+            self._db.update_error(sub_id, "no_video", self._availability_message(sub_id, "平台尚未提供可播放的录播地址；将定期自动复查"))
             self.checkpoint()
             return None, None
         text, segments = self._transcriber.transcribe_tail(handle.path, handle.process, handle.stderr_chunks)
@@ -227,25 +246,40 @@ class LocalLectureRunner(LectureRunner):
                 "asr_backend": "official",
                 "transcript_sha256": hashlib.sha256(text.encode()).hexdigest(),
                 "recovery": "video_unavailable",
+                "expected_seconds": self._db.get_lecture(sub_id)["recording_duration"],
+                "duration_source": self._db.get_lecture(sub_id)["recording_duration_source"],
             })
             self.checkpoint()
         return text, segments
 
-    def _summarize(self, sub_id, course_title, transcript, transcript_segments):
-        if not self.local.meta(self._db, sub_id, "ocr"):
+    def _record_ppt_status(self, sub_id):
+        """Checkpoint the optional material's outcome, including failures."""
+        proof = self.local.meta(self._db, sub_id, "ocr")
+        if proof and proof.get("status", "checked") == "checked":
+            return
+        warning = (self._db.get_lecture(sub_id) or {}).get("ppt_warning")
+        try:
             count = self._client.source_count(sub_id)
-            with self._db._lock:
-                failed = self._db.conn.execute("SELECT count(*) FROM ppt_pages WHERE sub_id=? AND ocr_status IN ('pending','failed')", (sub_id,)).fetchone()[0]
-            if failed:
-                self.checkpoint()
-                raise ValueError(f"仍有 {failed} 页课件未完成 OCR")
-            pages = self._db.get_done_ppt_pages(sub_id)
-            if count and not any(page.get("text", "").strip() for page in pages):
-                self.checkpoint()
-                raise ValueError("有课件截图但未得到有效 OCR 文字，需检查截图内容")
-            self.local.save_meta(self._db, sub_id, "ocr", {"source_pages": count, "kept_pages": len(pages)})
-            self._db.clear_error(sub_id)
-            self.checkpoint()
+        except Exception as exc:
+            count = None
+            warning = warning or f"课件清单读取失败（{type(exc).__name__}）"
+        failed = self._db.get_ppt_failure_count(sub_id)
+        pages = self._db.get_done_ppt_pages(sub_id)
+        if failed:
+            warning = warning or f"{failed} 页课件未完成 OCR"
+        if count and not any(page.get("text", "").strip() for page in pages):
+            warning = warning or "课件未得到有效 OCR 文字"
+        self._db.update_ppt_warning(sub_id, warning)
+        self.local.save_meta(self._db, sub_id, "ocr", {
+            "source_pages": count, "kept_pages": len(pages), "failed_pages": failed,
+            "status": "partial" if warning and pages else "unavailable" if warning else "checked",
+            "warning": warning,
+        })
+        self.checkpoint()
+
+    def _summarize(self, sub_id, course_title, transcript, transcript_segments):
+        self._record_ppt_status(sub_id)
+        self._db.clear_error(sub_id)
         self.local.write_summary_request(self._db, self.lecture)
         self.local.export_materials(self._db, self.lecture)
         self.summary_worker.schedule(self.lecture)
