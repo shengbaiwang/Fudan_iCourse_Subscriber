@@ -74,11 +74,11 @@ button[hidden], [data-capability][hidden] { display:none!important; }
 .course-list { gap:0; border-top:1px solid var(--line); }
 .course-card { border:0; border-bottom:1px solid var(--line); border-radius:0; padding:19px 6px 19px 0; background:transparent; box-shadow:none; transition:background .15s; }
 .course-card:hover { border-color:var(--line); background:var(--hover-bg); box-shadow:none; transform:none; }
-.course-row { grid-template-columns:minmax(0,1fr) auto; gap:8px 15px; }
+.course-row { gap:8px 15px; }
 .course-title { font-size:15px; font-weight:500; line-height:1.65; }
 .course-meta { font-size:11px; margin-top:5px; }
 .course-meta-teacher { font-weight:400; }
-.course-updated { display:none; }
+.course-updated { font-size:11px; }
 .course-aside { grid-template-columns:70px 28px 28px; gap:6px; }
 .course-aside .star-button,.course-more-button { width:28px; height:28px; }
 .course-card .course-drag-handle { width:14px; font-size:16px; opacity:0; }

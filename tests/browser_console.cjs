@@ -61,7 +61,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       return result;
     } finally { statement.free(); }
   };
-  const courses = rows("SELECT c.*,ac.term,ac.dept,COUNT(l.sub_id) total_count,SUM(l.summary IS NOT NULL) summary_count FROM courses c LEFT JOIN lectures l USING(course_id) LEFT JOIN all_courses ac USING(course_id) GROUP BY c.course_id");
+  const courses = rows("SELECT c.*,ac.term,ac.dept,COUNT(l.sub_id) total_count,SUM(l.summary IS NOT NULL) summary_count,MAX(l.processed_at) last_updated FROM courses c LEFT JOIN lectures l USING(course_id) LEFT JOIN all_courses ac USING(course_id) GROUP BY c.course_id");
   const lectures = rows("SELECT *,summary IS NOT NULL has_summary,transcript IS NOT NULL transcript_available FROM lectures WHERE course_id='1'");
   const lecture = {...rows("SELECT l.*,c.title course_title,c.teacher FROM lectures l JOIN courses c USING(course_id) WHERE sub_id='10'")[0],summary_versions:rows("SELECT * FROM summary_versions"),ppt_pages:rows("SELECT * FROM ppt_pages")};
   let sections = [{id:'study', name:'学习区'}];
@@ -230,6 +230,18 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       // out of the reading path until the menu is opened.
       const compactCourse = page.locator('.course-card[data-course-id="1"]');
       assert.match(await compactCourse.locator('.course-meta').innerText(), /陈老师.*历史学系.*2026 秋/s);
+      const updated = compactCourse.locator('.course-updated');
+      assert.match(await updated.textContent(), /更新$/);
+      assert.match(await updated.getAttribute('title'), /2026-09-08/);
+      assert.equal(await updated.isVisible(), true, `${mode}: recent update must remain visible under the Sea theme`);
+      const titleBounds = await compactCourse.locator('.course-title-row').boundingBox();
+      const updatedBounds = await updated.boundingBox();
+      const asideBounds = await compactCourse.locator('.course-aside').boundingBox();
+      assert.ok(titleBounds.x + titleBounds.width <= updatedBounds.x);
+      assert.ok(updatedBounds.x + updatedBounds.width <= asideBounds.x);
+      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      assert.equal(await updated.isVisible(), true);
+      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
       assert.equal(await compactCourse.locator('.course-archive-button,.count-badge').count(),0);
       assert.equal(await compactCourse.locator('.course-note-count.is-incomplete').count(),1);
       assert.equal(await page.locator('.course-card[data-course-id="2"] .course-note-count.is-incomplete').count(),0);
@@ -278,6 +290,10 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       const longMetadata = compactCourse.locator('.course-meta');
       assert.match(await longMetadata.innerText(),/一位姓名很长的教师及联合授课教师.*包含较长完整名称的历史与文化研究学院/s);
       assert.equal(await longMetadata.evaluate(node=>node.scrollWidth<=node.clientWidth&&node.scrollHeight<=node.clientHeight),true);
+      assert.equal(await updated.isVisible(), true, `${mode}: recent update must remain visible on mobile`);
+      const mobileUpdatedBounds = await updated.boundingBox();
+      const mobileTitleBounds = await compactCourse.locator('.course-title-row').boundingBox();
+      assert.ok(mobileUpdatedBounds.y >= mobileTitleBounds.y + mobileTitleBounds.height);
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
       await page.screenshot({path:`/tmp/icourse-${mode}-compact-mobile.png`,fullPage:true});
       await page.setViewportSize({width:1280,height:900});
