@@ -66,6 +66,16 @@ class Database:
             migrate_summary_versions_table(self.conn)
             backfill_summary_versions(self.conn)
 
+            # Release the old duration gate's cooldown once, so existing
+            # readable official transcripts get a chance on the next run.
+            migration = "official_transcript_independent_v1"
+            if not self.conn.execute("SELECT 1 FROM meta WHERE key=?", (migration,)).fetchone():
+                self.conn.execute(
+                    "UPDATE lectures SET retry_after=NULL, error_count=0 "
+                    "WHERE processed_at IS NULL AND error_stage IN ('video_access','video','no_video') "
+                    "AND error_msg LIKE '%缺少带明确单位的独立录制时长%'")
+                self.conn.execute("INSERT INTO meta (key,value) VALUES (?,?)", (migration, "1"))
+
             existing_ppt = {
                 row[1]
                 for row in self.conn.execute(
@@ -226,7 +236,7 @@ class Database:
             rows = self.conn.execute(
                 "SELECT sub_id FROM lectures WHERE course_id = ? "
                 "AND processed_at IS NULL AND error_count >= ? "
-                "AND COALESCE(error_stage, '') NOT IN ('no_video', 'video', 'video_access')",
+                "AND COALESCE(error_stage, '') NOT IN ('no_video', 'video', 'video_access', 'process_timeout')",
                 (course_id, max_errors),
             ).fetchall()
         return {row["sub_id"] for row in rows}
@@ -253,7 +263,7 @@ class Database:
             "SELECT * FROM lectures"
             " WHERE processed_at IS NULL"
             "   AND (error_count IS NULL OR error_count < ?"
-            "        OR error_stage IN ('no_video', 'video', 'video_access'))"
+            "        OR error_stage IN ('no_video', 'video', 'video_access', 'process_timeout'))"
         )
         params: tuple = (max_errors,)
         if not include_deferred:
@@ -314,7 +324,8 @@ class Database:
             # but avoid doing network/OCR work on every manual or daily run.
             delays = {"no_video": (6 * 3600, 86400, 7 * 86400),
                       "video": (3600, 4 * 3600, 86400),
-                      "video_access": (7 * 86400,) * 3}
+                      "video_access": (7 * 86400,) * 3,
+                      "process_timeout": (3600, 4 * 3600, 86400)}
             retry_after = (int(time.time()) + delays[stage][min(attempts - 1, 2)]
                            if stage in delays else None)
             self.conn.execute(

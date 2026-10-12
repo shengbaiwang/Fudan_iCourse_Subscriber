@@ -14,6 +14,9 @@ os.environ.setdefault('SILERO_VAD_PATH', str(RESOURCE_ROOT / 'silero_vad.onnx'))
 if '--capabilities' in sys.argv:
     modules = ['openai','sherpa_onnx','rapidocr_onnxruntime','psutil','imagehash','numpy','PIL','requests','curl_cffi','imageio_ffmpeg']
     print(json.dumps([name for name in modules if importlib.util.find_spec(name) is None]))
+elif '--lecture-worker' in sys.argv:
+    from scripts.run_lecture_job import worker_main
+    worker_main()
 elif '--worker' in sys.argv:
     from scripts.run_console_job import run
     raise SystemExit(run(json.loads(sys.stdin.readline())))

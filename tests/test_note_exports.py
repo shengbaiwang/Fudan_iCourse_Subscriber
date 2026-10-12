@@ -122,16 +122,14 @@ class PipelineWithoutMailTest(unittest.TestCase):
                 with patch.object(main.config, "COURSE_IDS", ["1"]), patch.object(main, "Database", return_value=db), \
                      patch.object(main, "Transcriber"), patch.object(main, "Summarizer"), \
                      patch.object(main, "login_with_retry"), patch.object(main, "ICourseClient"), \
-                     patch.object(main, "Scheduler") as scheduler, patch.object(main, "LectureRunner") as runner, \
+                     patch.object(main, "drive_supervised_lectures", side_effect=save_summary), \
                      patch.object(main, "_crawl_semester_catalog"), patch.object(main, "_enumerate_lectures", return_value=[("1", "课程", {"sub_id": "10"})]), \
                      patch("smtplib.SMTP_SSL", side_effect=AssertionError("Unexpected mail send")), redirect_stdout(io.StringIO()):
-                    runner.return_value.run.side_effect = save_summary
                     main.run()
                 row = db.get_lecture("10")
                 self.assertEqual(row["summary"], "**已保存的重点**")
                 self.assertTrue(row["processed_at"])
                 self.assertIsNone(row["emailed_at"])
-                scheduler.return_value.shutdown.assert_called_once()
             finally:
                 db.conn.close()
 

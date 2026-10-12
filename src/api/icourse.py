@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+import time
 import uuid
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -251,7 +252,12 @@ class ICourseClient:
         import json
         items = []
         page = 1
+        seen_pages = set()
+        deadline = time.monotonic() + 120
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or page > 1000:
+                raise TimeoutError("课件列表读取超时，未确认完整课件列表")
             url = f"{self.base_url}/pptnote/v1/schedule/search-ppt"
             resp = self.vpn.get(
                 url,
@@ -259,6 +265,7 @@ class ICourseClient:
                     "course_id": course_id, "sub_id": sub_id,
                     "page": page, "per_page": per_page,
                 },
+                timeout=min(30, remaining),
             )
             resp.raise_for_status()
             data = resp.json()
@@ -267,6 +274,12 @@ class ICourseClient:
             page_items = data.get("list", [])
             if not page_items:
                 break
+            # Some API failures return page 1 for every page number. Never
+            # let that response turn optional slides into an endless loop.
+            fingerprint = json.dumps(page_items, sort_keys=True, ensure_ascii=False)
+            if fingerprint in seen_pages:
+                raise RuntimeError("课件分页重复，未确认完整课件列表")
+            seen_pages.add(fingerprint)
             for raw in page_items:
                 try:
                     content = json.loads(raw.get("content", "{}"))
@@ -532,7 +545,12 @@ class ICourseClient:
         return payload
 
     def _remember_duration(self, course_id, sub_id, payload, source):
-        evidence = recording_duration(payload, source)
+        # get-sub-info's root duration is the recorded media length in
+        # seconds (often a numeric string), independent of can_watch and
+        # transcript timestamps. Other endpoints' unitless fields remain
+        # untrusted, as do nested room start/end times.
+        evidence = recording_duration(payload, source,
+                                      duration_unit="s" if source == "sub-info" else None)
         if evidence:
             key = (str(course_id), str(sub_id))
             previous = self._recording_durations.get(key)

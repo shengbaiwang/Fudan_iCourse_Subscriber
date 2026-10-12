@@ -102,8 +102,8 @@
       SUM(NULLIF(processed_at,'') IS NOT NULL AND TRIM(COALESCE(summary,''), char(9)||char(10)||char(13)||' ') != '') ready_count,
       MAX(date) latest_date,
       SUM(date(date) IS NULL OR date(date) != date) invalid_date_count,
-      SUM(processed_at IS NULL AND (COALESCE(error_count,0) < 3 OR error_stage IN ('no_video','video','video_access'))) pending_count,
-      SUM(processed_at IS NULL AND COALESCE(error_count,0) >= 3 AND COALESCE(error_stage,'') NOT IN ('no_video','video','video_access')) blocked_count
+      SUM(processed_at IS NULL AND (COALESCE(error_count,0) < 3 OR error_stage IN ('no_video','video','video_access','process_timeout'))) pending_count,
+      SUM(processed_at IS NULL AND COALESCE(error_count,0) >= 3 AND COALESCE(error_stage,'') NOT IN ('no_video','video','video_access','process_timeout')) blocked_count
       FROM lectures GROUP BY course_id`).map(row => [String(row.course_id), row]));
     const courses = db.getCoursesByIds(courseIds).map(course => {
       const id = String(course.course_id), status = progress.get(id) || {};

@@ -1,38 +1,9 @@
-"""Per-lecture state machine: prefetch → ASR → OCR drain → summarize → release.
+"""Read ASR/official text, add optional slides, summarize, and checkpoint.
 
-One ``LectureRunner`` instance drives one lecture from "started" to either
-"summary saved" or "deliberately skipped".  The class is single-use — make a
-new instance per lecture so error state can't leak across runs.
-
-Phases (named like the original ``main.process_lecture`` for diff-friendly
-log greps):
-
-  A  short-circuit ``summary already exists`` → mark processed, return.
-  B  ``PPTPipeline.submit`` with ``defer_ocr=True``: stages 1-3 (fetch,
-     register, dedup) run inline; the OCR jobs are held on the returned
-     ``PPTAsyncHandle`` and only enter the pool at drain time, so ASR in
-     Phase D gets the CPU to itself.
-  C  schedule **next** lecture's prefetch (images always; audio only when
-     the next lecture will actually be ASR-transcribed) so its download
-     overlaps with the current lecture's ASR.
-  D  transcript: cached → official iCourse transcript (config-gated,
-     completeness-checked) → ASR.  For ASR, ``Scheduler.audio_downloader
-     .get`` blocks for the ffmpeg spawn scheduled earlier, then
-     ``Transcriber.transcribe_tail`` reads PCM from the disk file with
-     tail-f semantics while ffmpeg keeps writing.
-  E  ``handle.drain()`` submits the deferred OCR jobs and blocks for them.
-  E2 ``PPTPipeline.prefetch_and_ocr`` spawns a background thread that
-     collects + dedups + OCRs the next lecture's pages, overlapping with
-     this lecture's LLM wait; leftovers are absorbed by the next
-     ``submit``.
-  F  ``bucketer.assemble`` builds the prompt; ``Summarizer.summarize``
-     calls the LLM round-robin until one succeeds.
-  G  persist ``update_summary``, ``mark_processed``, ``clear_error``.
-  H  ``audio_downloader.release`` kills ffmpeg + deletes scratch file.
-
-The runner never owns the WebVPN session check; the orchestrator
-(LectureRunner's caller) calls ``_check_session`` between lectures so all
-threads pick up refreshed cookies through the shared ``ICourseClient``.
+Primary material is read before bounded slide preparation/OCR. Official
+text is independently usable when video is absent or denied. The caller
+checks the session and supervises the lecture's entire process lifetime.
+Legacy local preparation can still overlap the next lecture via next_info.
 """
 
 from __future__ import annotations
@@ -47,6 +18,7 @@ from src.ai.transcriber import IncompleteAudioError, NoAudioStreamError
 from src.api.icourse import VideoAccessError, VideoLookupError, VideoNotReadyError
 from src.api.materials import transcript_problem
 from src.runtime import config
+from src.runtime.material_deadline import MaterialTimeout, material_deadline
 
 if TYPE_CHECKING:
     from src.data.database import Database
@@ -104,17 +76,6 @@ class LectureRunner:
             self._db.clear_error(sub_id)
             return existing["summary"]
 
-        # ── Phase B — submit PPT pipeline (fetch + dedup, no OCR yet) ──
-        # OCR is deferred (defer_ocr=True) so ASR in Phase D gets exclusive
-        # CPU.  OCR will be submitted in Phase E (handle.drain()).
-        try:
-            ppt_handle = self._ppt.submit(
-                self._client, course_id, sub_id, defer_ocr=True,
-            )
-        except Exception as exc:
-            ppt_handle = None
-            self._warn_ppt(sub_id, f"课件准备失败（{type(exc).__name__}）")
-
         # ── Phase C — schedule next lecture's prefetch ─────────────────
         # Done BEFORE ASR so the next audio download can start filling its
         # AudioDownloader slot while we transcribe.  Both audio + image
@@ -127,12 +88,21 @@ class LectureRunner:
         )
         if transcript is None:
             # _get_transcript already logged + persisted the skip reason.
-            # Still drain the PPT handle: with defer_ocr the OCR jobs are
-            # only submitted at drain() time, so skipping it would leave
-            # the pages 'pending' forever and force the retry run to redo
-            # download + dedup from scratch.
-            self._finish_ppt(sub_id, ppt_handle)
             return None
+
+        # Read the primary material first. Optional slides must not delay
+        # the official-transcript fallback or waste OCR on empty lectures.
+        try:
+            with material_deadline(180):
+                ppt_handle = self._ppt.submit(
+                    self._client, course_id, sub_id, defer_ocr=True,
+                )
+        except MaterialTimeout:
+            ppt_handle = None
+            self._warn_ppt(sub_id, "课件准备超时")
+        except Exception as exc:
+            ppt_handle = None
+            self._warn_ppt(sub_id, f"课件准备失败（{type(exc).__name__}）")
 
         # ── Phase E — drain remaining OCR work ─────────────────────────
         self._finish_ppt(sub_id, ppt_handle)
@@ -181,7 +151,8 @@ class LectureRunner:
         if handle is None:
             return
         try:
-            stats = handle.drain()
+            with material_deadline(300):
+                stats = handle.drain()
             failure_count = self._db.get_ppt_failure_count(sub_id)
             warning = getattr(stats, "list_error", None)
             if not isinstance(warning, str):
@@ -194,6 +165,8 @@ class LectureRunner:
                 self._warn_ppt(sub_id, warning)
             else:
                 self._db.update_ppt_warning(sub_id, None)
+        except MaterialTimeout:
+            self._warn_ppt(sub_id, "课件 OCR 超时")
         except Exception as exc:
             self._warn_ppt(sub_id, f"课件处理失败（{type(exc).__name__}）")
 
@@ -257,7 +230,18 @@ class LectureRunner:
         segments = self._official_cache.pop(sub_id, None)
         if segments is None:
             segments = self._client.get_transcript_segments(sub_id)
-        evidence = self._client.get_recording_duration(row.get("course_id", ""), sub_id)
+        problem = transcript_problem(segments)
+        if problem:
+            self._official_failures[sub_id] = problem
+            self._reporter.info(f"    [Official transcript] {problem}")
+            return None
+        try:
+            evidence = self._client.get_recording_duration(row.get("course_id", ""), sub_id)
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            evidence = None
+            self._reporter.info(f"    录播时长读取失败（{type(exc).__name__}），继续使用官方转录")
         if isinstance(evidence, dict):
             self._db.update_recording_duration(sub_id, evidence.get("seconds"), evidence.get("source"))
         row = self._db.get_lecture(sub_id) or {}
@@ -388,14 +372,16 @@ class LectureRunner:
         return transcript, segments
 
     def _official_video_fallback(self, sub_id: str) -> tuple[Optional[str], Optional[list]]:
-        """Accept independently readable text only with recording-length evidence."""
+        """Use readable official text independently of video availability."""
         try:
             segments = self._checked_official_transcript(sub_id)
             if not segments:
                 return None, None
             text = " ".join(s["text"] for s in segments)
             self._db.update_transcript(sub_id, text, source="official")
-            self._reporter.info(f"    采用独立录制时长校验通过的官方转录（{len(text)} 字）")
+            row = self._db.get_lecture(sub_id) or {}
+            check = "已核对录播时长" if row.get("recording_duration") else "平台未提供录播时长"
+            self._reporter.info(f"    采用官方转录（{len(text)} 字，{check}）")
             self._release_audio(sub_id)
             return text, segments
         except InterruptedError:

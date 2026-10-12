@@ -7,7 +7,7 @@ data = [(str(root / 'local_web/static'), 'local_web/static'),
         (str(root / 'silero_vad.onnx'), '.'), (str(root / model), model)]
 for package in ['rapidocr_onnxruntime', 'imageio_ffmpeg', 'certifi']:
     data += collect_data_files(package)
-hidden = ['main', 'scripts.run_console_job', 'scripts.resummarize',
+hidden = ['main', 'scripts.run_console_job', 'scripts.run_lecture_job', 'scripts.resummarize',
           'scripts.generate_titles', 'scripts.local_course', 'scripts.local_pipeline',
           'scripts.local_audio', 'uvicorn.logging', 'uvicorn.loops.auto',
           'uvicorn.loops.asyncio', 'uvicorn.protocols.http.h11_impl',

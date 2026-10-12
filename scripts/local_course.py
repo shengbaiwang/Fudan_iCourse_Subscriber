@@ -224,13 +224,13 @@ def meta(db, sub_id: str, stage: str):
     if stage == "audio" and proof:
         row = db.get_lecture(sub_id) or {}
         if proof.get("asr_backend") == "official" or row.get("transcript_source") == "official":
-            # Older official-text checkpoints used screenshot timestamps.
-            # Recheck every summary entry point against independent evidence.
+            # Validate the saved official text and its hash independently of
+            # video availability. Known recording lengths add a coverage check.
             from src.api.materials import transcript_problem
             segments = meta(db, sub_id, "segments")
             text = row.get("transcript") or ""
             source = row.get("recording_duration_source")
-            if (proof.get("asr_backend") != "official" or not source
+            if (proof.get("asr_backend") != "official"
                     or proof.get("duration_source") != source
                     or proof.get("expected_seconds") != row.get("recording_duration")
                     or proof.get("transcript_sha256") != hashlib.sha256(text.encode()).hexdigest()

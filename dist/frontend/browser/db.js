@@ -237,6 +237,7 @@ function _getLectures(courseId) {
            ${_queryAll("PRAGMA table_info(lectures)").some(row => row.name === "retry_after") ? "retry_after" : "NULL AS retry_after"},
            ${_queryAll("PRAGMA table_info(lectures)").some(row => row.name === "ppt_warning") ? "ppt_warning" : "NULL AS ppt_warning"},
            ${_queryAll("PRAGMA table_info(lectures)").some(row => row.name === "transcript_source") ? "transcript_source" : "NULL AS transcript_source"},
+           ${_queryAll("PRAGMA table_info(lectures)").some(row => row.name === "recording_duration") ? "recording_duration" : "NULL AS recording_duration"},
            error_stage, error_msg, summary_model, transcript
     FROM lectures WHERE course_id = ?
   `, [courseId]);

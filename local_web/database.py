@@ -364,6 +364,7 @@ class DatabaseManager:
                        {"retry_after" if has_retry_after else "NULL AS retry_after"},
                        {"ppt_warning" if "ppt_warning" in columns else "NULL AS ppt_warning"},
                        {"transcript_source" if "transcript_source" in columns else "NULL AS transcript_source"},
+                       {"recording_duration" if "recording_duration" in columns else "NULL AS recording_duration"},
                        CASE WHEN summary IS NOT NULL THEN 1 ELSE 0 END AS has_summary,
                        CASE WHEN TRIM(COALESCE(transcript, '')) != ''
                             THEN 1 ELSE 0 END AS transcript_available

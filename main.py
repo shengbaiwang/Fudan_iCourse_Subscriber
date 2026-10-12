@@ -4,10 +4,10 @@ The runtime is split across cooperating components — Scheduler (pools +
 resource monitor), Reporter (centralised logging), PPTPipeline, LectureRunner,
 AudioDownloader.  This file does only orchestration:
 
-  1. Build all components.
+  1. Open the checkpoint database.
   2. Login + enumerate.
-  3. Drive LectureRunner across the queued lectures.
-  4. Shutdown (each lecture persists its notes as it completes).
+  3. Supervise an isolated LectureRunner process for each queued lecture.
+  4. Publish each saved note and continue after per-lecture failures.
 
 Anything more interesting belongs in one of ``src/*`` modules.
 """
@@ -27,6 +27,7 @@ from src.runtime.reporter import Reporter
 from src.runtime.scheduler import Scheduler
 from src.runtime.run_order import ordered_lectures
 from src.runtime.progress import emit, note_saved
+from src.runtime.lecture_process import drive_lectures as drive_supervised_lectures
 from src.ai.summarizer import Summarizer
 from src.ai.transcriber import Transcriber
 from src.api.webvpn import WebVPNSession
@@ -72,11 +73,13 @@ def _check_session(client: ICourseClient) -> None:
 
 
 def _enumerate_lectures(client: ICourseClient, db: Database,
-                        reporter: Reporter, *, force_video_recheck: bool = False) -> list[tuple[str, str, dict]]:
+                        reporter: Reporter, *, force_video_recheck: bool = False,
+                        session_check=None) -> list[tuple[str, str, dict]]:
     """Sync, fast: list every (course_id, course_title, lecture) we'll
     process this run.  Done up-front so the prefetch loop can see across
     course boundaries when picking the "next" lecture."""
     out: list[tuple[str, str, dict]] = []
+    session_check = session_check or _check_session
     pause_scans = parse_auto_check_pauses(db.read_meta(PAUSE_SCANS_META))
     pause_scans = {cid: token for cid, token in pause_scans.items() if cid in config.AUTO_CHECK_PAUSES}
     automatic = config.AUTO_CHECK_ENABLED and not force_video_recheck
@@ -99,7 +102,7 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
                               + (f"，{len(blocked)} 节达到重试上限" if blocked else ""))
                 out.extend((course_id, title, lecture) for lecture in pending)
                 continue
-            _check_session(client)
+            session_check(client)
             detail = client.get_course_detail(course_id)
             course_title = detail["title"]
             teacher = detail["teacher"]
@@ -332,17 +335,7 @@ def run():
         reporter.info("没有待处理课次，本次检查完成。")
         reporter.run_footer()
         return
-    transcriber = Transcriber()
-    summarizer = Summarizer()
-    scheduler = Scheduler(reporter=reporter)
-    try:
-        _drive_lectures(
-            client, db, scheduler, transcriber, summarizer, reporter,
-            all_lectures,
-        )
-
-    finally:
-        scheduler.shutdown()
+    drive_supervised_lectures(client, db, reporter, all_lectures, _check_session)
 
     reporter.run_footer()
 

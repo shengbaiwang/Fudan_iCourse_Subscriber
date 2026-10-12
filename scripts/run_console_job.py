@@ -38,50 +38,26 @@ def run(payload):
     import main
     from local_web.state import RuntimeCredentials
     from scripts import local_course
-    from scripts.local_pipeline import LocalLectureRunner, StrictPPTClient
-    from scripts.local_audio import LocalAudioDownloader
-    from src.pipeline.lecture_runner import LectureRunner
-    from src.runtime.progress import emit
+    from src.runtime.lecture_process import drive_lectures
     # The console already has credentials; local login uses the native HTTPS
     # adapter required by the macOS WebVPN endpoint.
     creds = RuntimeCredentials("", credentials["stuid"], credentials["uispsw"])
     client = local_course.login(creds)
     from src.data.database import Database
     from src.runtime.reporter import Reporter
-    from src.runtime.scheduler import Scheduler
-    from src.ai.summarizer import Summarizer
-    from src.ai.transcriber import Transcriber
     db = Database()
     reporter = Reporter()
-    scheduler = Scheduler(reporter=reporter)
-    scheduler.audio_downloader.shutdown()
-    scheduler.audio_downloader = LocalAudioDownloader(
-        Path(payload["db_path"]).parent / "media", local_course.write_private,
-        reporter=reporter)
-    client = StrictPPTClient(client, db, local_course)
     def check_session(value):
         if not value.check_alive():
             refreshed = local_course.login(creds)
-            value.client.vpn.session.close()
-            value.client.vpn = refreshed.vpn
-            value.client._userinfo = None
-    main._check_session = check_session
-    summarizer = Summarizer()
-
-    class ConsoleLectureRunner(LocalLectureRunner):
-        def _summarize(self, sub_id, course_title, transcript, transcript_segments):
-            self._record_ppt_status(sub_id)
-            return LectureRunner._summarize(self, sub_id, course_title, transcript, transcript_segments)
-
-    runner = ConsoleLectureRunner(client, db, scheduler, Transcriber(), reporter,
-        checkpoint=lambda: emit("checkpoint", sub_id=str(runner.lecture["sub_id"])),
-        runner=local_course, summary_worker=None)
-    runner._summarizer = summarizer
+            value.vpn.session.close()
+            value.vpn = refreshed.vpn
+            value._userinfo = None
     try:
-        lectures = main._enumerate_lectures(client, db, reporter, force_video_recheck=True)
-        main._drive_lectures(client, db, scheduler, runner._transcriber, summarizer, reporter, lectures, runner=runner)
+        lectures = main._enumerate_lectures(client, db, reporter, force_video_recheck=True,
+                                           session_check=check_session)
+        drive_lectures(client, db, reporter, lectures, check_session, local=True)
     finally:
-        scheduler.shutdown()
         db.conn.close()
         client.vpn.session.close()
     return 0
