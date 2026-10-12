@@ -135,20 +135,24 @@ def test_restricted_video_uses_checked_official_text_with_asr_preferred(db, monk
     value._transcriber.transcribe_tail.assert_not_called()
 
 
-@pytest.mark.parametrize('kind', ['empty','short','tail','head','gap'])
-def test_recovery_rejects_incomplete_or_unverifiable_official_text(db, monkeypatch, kind):
+@pytest.mark.parametrize('kind', ['empty','blank','short','tail','head','gap'])
+def test_recovery_uses_any_nonempty_official_text(db, monkeypatch, kind):
     monkeypatch.setattr(config, 'USE_OFFICIAL_TRANSCRIPT', False)
     segments = full_segments()
     duration = 3600
     if kind == 'empty': segments = []
-    if kind == 'short': segments = [{**s, 'text':''} for s in segments]
+    if kind == 'blank': segments = [{**s, 'text':''} for s in segments]
+    if kind == 'short': segments = [{'start_ms':0,'end_ms':0,'text':'平台仅提供这段文字'}]
     if kind == 'tail': segments = segments[:30]
     if kind == 'head': segments = segments[10:]
     if kind == 'gap': segments = segments[:10] + segments[35:]
     value = make_runner(db, VideoAccessError('未选课'), segments, duration)
-    assert value._get_transcript(db.get_lecture('10'), '1', '10') == (None, None)
+    text, _ = value._get_transcript(db.get_lecture('10'), '1', '10')
     row = db.get_lecture('10')
-    assert not row['transcript'] and row['error_stage'] == 'video_access' and row['retry_after']
+    if kind in ('empty','blank'):
+        assert text is None and not row['transcript'] and row['error_stage'] == 'video_access' and row['retry_after']
+    else:
+        assert text == ' '.join(s['text'] for s in segments) and row['transcript_source'] == 'official'
 
 
 def test_api_failure_can_recover_with_independently_verified_official_text(db, monkeypatch):

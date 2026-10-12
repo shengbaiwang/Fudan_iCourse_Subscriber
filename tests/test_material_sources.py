@@ -7,7 +7,8 @@ from unittest.mock import Mock
 import pytest
 
 from src.api.icourse import ICourseClient, VideoAccessError
-from src.api.materials import recording_duration, transcript_problem
+from src.api.materials import recording_duration
+from src.ai import bucketer
 from src.data.database import Database
 from src.pipeline.lecture_runner import LectureRunner
 from src.runtime import config
@@ -128,8 +129,9 @@ def test_metadata_can_verify_text_when_video_is_denied_without_signing():
     value.sign_video_url.assert_not_called()
 
 
-@pytest.mark.parametrize('kind', ['tail', 'head', 'gap', 'beyond', 'negative', 'zero', 'unordered', 'nan'])
-def test_bad_official_timing_never_passes_independent_duration(kind):
+@pytest.mark.parametrize('kind', ['tail', 'head', 'gap', 'beyond', 'negative', 'zero', 'unordered', 'nan', 'short'])
+def test_official_text_generates_without_timing_or_length_gate(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(config, 'USE_OFFICIAL_TRANSCRIPT', True)
     segments = full_segments()
     if kind == 'tail': segments = segments[:30]
     if kind == 'head': segments = segments[10:]
@@ -139,7 +141,54 @@ def test_bad_official_timing_never_passes_independent_duration(kind):
     if kind == 'zero': segments[0]['end_ms'] = 0
     if kind == 'unordered': segments[0], segments[1] = segments[1], segments[0]
     if kind == 'nan': segments[0]['start_ms'] = float('nan')
-    assert transcript_problem(segments, 3600)
+    if kind == 'short': segments = [{'start_ms':0, 'end_ms':0, 'text':'只有这句平台文字'}]
+    db = Database(str(tmp_path/'test.db'))
+    try:
+        db.upsert_course('1','课','老师')
+        db.insert_lecture('10','1','第一讲','2026-09-01')
+        db.update_recording_duration('10', 3600, 'existing-metadata')
+        client = Mock()
+        client.get_transcript_segments.return_value = segments
+        client.get_recording_duration.side_effect = AssertionError('official text must not request recording metadata')
+        summarizer = Mock()
+        summarizer.summarize.return_value = ('# 标题\n\n平台文字生成的笔记', 'test/model')
+        value = LectureRunner(client, db, SimpleNamespace(audio_downloader=Mock()), Mock(), summarizer, Mock())
+        value._ppt = Mock()
+        assert value.run('1','课',{'sub_id':'10'}) == '平台文字生成的笔记'
+        text = ' '.join(s['text'] for s in segments)
+        assert db.get_lecture('10')['transcript'] == text
+        prompt = summarizer.summarize.call_args.args[1]
+        assert all(s['text'] in prompt for s in segments)
+        client.get_recording_duration.assert_not_called()
+        value._scheduler.audio_downloader.schedule.assert_not_called()
+    finally:
+        db.conn.close()
+
+
+def test_api_keeps_every_word_with_zero_length_missing_and_malformed_times():
+    raw = [
+        {'BeginSec':39,'EndSec':39,'Text':'同一秒的文字'},
+        {'BeginSec':39.125,'EndSec':39.25,'Text':'亚秒片段'},
+        {'Text':'没有时间的文字'},
+        {'BeginSec':'bad','EndSec':'nan','Text':'损坏时间的文字'},
+        {'BeginSec':1,'EndSec':2,'Text':'平台原文顺序'},
+    ]
+    vpn = Mock()
+    vpn.get.return_value.json.return_value = {'code':0,'list':[{'all_content':raw}]}
+    segments = ICourseClient(vpn).get_transcript_segments('10')
+    assert [s['text'] for s in segments] == [s['Text'] for s in raw]
+    assert segments[0]['start_ms'] == segments[0]['end_ms'] == 39000
+    assert segments[1]['start_ms'] == 39125
+    assert segments[2]['start_ms'] is None and segments[3]['end_ms'] is None
+    text = ' '.join(s['text'] for s in segments)
+    prompt, mode = bucketer.assemble(text, segments, [])
+    assert mode == 'flat' and text in prompt
+
+
+def test_zero_length_segments_are_kept_in_timed_prompt():
+    segments = [{'start_ms':39000,'end_ms':39000,'text':'这句也必须保留'}]
+    prompt, mode = bucketer.assemble(segments[0]['text'], segments, [])
+    assert mode == 'bucketed' and segments[0]['text'] in prompt
 
 
 def test_no_recording_duration_does_not_block_readable_official_text(tmp_path, monkeypatch):
@@ -226,7 +275,7 @@ def test_pending_legacy_text_is_refetched_before_using_official_material(tmp_pat
         db.conn.close()
 
 
-@pytest.mark.parametrize('kind', ['verified', 'no_duration', 'tail', 'changed_text'])
+@pytest.mark.parametrize('kind', ['verified', 'no_duration', 'tail', 'changed_duration', 'changed_text'])
 def test_local_official_checkpoint_guard_applies_to_summary_entry_points(tmp_path, kind):
     from scripts import local_course
     db = Database(str(tmp_path/'test.db'))
@@ -247,7 +296,9 @@ def test_local_official_checkpoint_guard_applies_to_summary_entry_points(tmp_pat
         local_course.save_meta(db, '10', 'ocr', {'status':'unavailable', 'warning':'无法读取课件'})
         if kind == 'changed_text':
             db.update_transcript('10', text+'更改内容', source=None)
-        if kind in ('verified', 'no_duration'):
+        if kind == 'changed_duration':
+            db.update_recording_duration('10', 7200, 'other-metadata')
+        if kind != 'changed_text':
             assert local_course.meta(db, '10', 'audio')
             assert local_course.summary_request(db, {'sub_id':'10'})
         else:

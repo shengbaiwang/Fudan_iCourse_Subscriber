@@ -46,8 +46,10 @@ def test_console_worker_honors_order_and_emits_each_note(tmp_path, monkeypatch, 
             if ppt_kind == "download_failure":
                 return [{"id":1, "created_sec":90, "pptimgurl":"https://example/1.png"}]
             return []
-        def get_transcript_segments(self, *_): return [{"start_ms": 0, "end_ms": 3600000, "text": "完整官方转录" * 80}]
-        def get_recording_duration(self, *_): return {"seconds":3600, "source":"sub-info.video_duration_seconds"}
+        def get_transcript_segments(self, *_):
+            return [{"start_ms":39000,"end_ms":39000,"text":"同一秒的官方文字"},
+                    {"start_ms":None,"end_ms":None,"text":"没有时间轴的官方文字"}]
+        def get_recording_duration(self, *_): raise AssertionError("official text must not check recording duration")
     class Audio:
         active_count = 0
         def __init__(self, *_args, **_kwargs): pass
@@ -60,6 +62,8 @@ def test_console_worker_honors_order_and_emits_each_note(tmp_path, monkeypatch, 
     calls = []
     class Summary:
         def summarize(self, title, text):
+            if not cached:
+                assert "同一秒的官方文字 没有时间轴的官方文字" in text
             calls.append(title)
             return "# 新标题\n\n处理完成的笔记", "test/model"
     monkeypatch.setattr(local_course, "login", lambda _: Client())
@@ -88,5 +92,5 @@ def test_console_worker_honors_order_and_emits_each_note(tmp_path, monkeypatch, 
             proof = local_course.meta(result, sid, "ocr")
             assert proof["status"] == ("checked" if ppt_kind == "none" else "unavailable")
             if not cached:
-                assert row["transcript_source"] == "official" and row["recording_duration"] == 3600
+                assert row["transcript_source"] == "official"
     finally: result.conn.close()

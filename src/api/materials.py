@@ -1,4 +1,4 @@
-"""Recording metadata and transcript checks independent of slides and speech.
+"""Recording metadata independent of slides and speech.
 
 Only explicit media duration fields with known units are trusted. Timetable
 lengths, screenshot offsets and the transcript's own last timestamp are not
@@ -77,39 +77,3 @@ def recording_duration(payload, source="metadata", *, media=False, duration_unit
                 if value:
                     values.append(value)
     return max(values, key=lambda v: v["seconds"], default=None)
-
-
-def transcript_problem(segments, duration_seconds=None):
-    """Validate official text; check recording coverage only when known.
-
-    Official transcripts are independent material. Missing/unplayable video
-    must not make a readable transcript unusable.
-    """
-    duration = _seconds(duration_seconds, "s")
-    if not isinstance(segments, list) or not segments:
-        return "官方转录为空或不可读取"
-    if any(not isinstance(s, dict) or not isinstance(s.get("text"), str) for s in segments):
-        return "官方转录格式异常"
-    if len(" ".join(s["text"] for s in segments).strip()) < 200:
-        return "官方转录文字不足"
-    end = 0
-    edge = min(300_000, max(3000, duration * 1000 * .05)) if duration else None
-    for i, segment in enumerate(segments):
-        start, stop = segment.get("start_ms"), segment.get("end_ms")
-        if (isinstance(start, bool) or isinstance(stop, bool)
-                or not isinstance(start, (int, float)) or not isinstance(stop, (int, float))
-                or not math.isfinite(start) or not math.isfinite(stop)
-                or start < 0 or stop <= start):
-            return "官方转录时间戳异常"
-        if i and start < segments[i - 1]["start_ms"]:
-            return "官方转录时间戳顺序异常"
-        if not i and edge is not None and start > edge:
-            return "官方转录缺少课程开头"
-        if i and start - end > 20 * 60_000:
-            return "官方转录中间存在超过 20 分钟的空段"
-        end = max(end, stop)
-    if duration and end > duration * 1000 + max(3000, duration * 1000 * .005):
-        return "官方转录时间戳超出独立录制时长"
-    if duration and duration * 1000 - end > edge:
-        return "官方转录缺少课程结尾"
-    return None

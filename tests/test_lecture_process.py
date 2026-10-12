@@ -141,6 +141,36 @@ def test_old_duration_rejection_cooldowns_are_released_once(tmp_path):
         db.conn.close()
 
 
+def test_removed_official_text_gate_releases_cooldown_once(tmp_path):
+    path = str(tmp_path/'old-text-gate.db')
+    db = Database(path)
+    db.upsert_course('1','课','老师')
+    for sid, message in [('10','未选课；官方转录时间戳异常'),
+                         ('11','官方转录文字不足'),
+                         ('12','官方转录为空或不可读取')]:
+        db.insert_lecture(sid,'1','第一讲','2026-09-01')
+        db.update_error(sid,'video_access',message)
+    unavailable_cooldown = db.get_lecture('12')['retry_after']
+    with db.conn:
+        db.conn.execute("DELETE FROM meta WHERE key='official_transcript_direct_v1'")
+    db.conn.close()
+    db = Database(path)
+    try:
+        assert db.get_lecture('10')['retry_after'] is None
+        assert db.get_lecture('11')['retry_after'] is None
+        assert db.get_lecture('12')['retry_after'] == unavailable_cooldown
+        assert {r['sub_id'] for r in db.get_unprocessed_lectures('1')} == {'10','11'}
+        db.update_error('10','video_access','官方转录为空或不可读取')
+        next_cooldown = db.get_lecture('10')['retry_after']
+    finally:
+        db.conn.close()
+    db = Database(path)
+    try:
+        assert db.get_lecture('10')['retry_after'] == next_cooldown
+    finally:
+        db.conn.close()
+
+
 def test_optional_ppt_timeout_still_generates_official_text_note(tmp_path, monkeypatch):
     from src.pipeline import lecture_runner
     from src.runtime.material_deadline import material_deadline

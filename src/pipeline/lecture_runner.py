@@ -16,7 +16,6 @@ from src.ai.title import build_title_material, split_generated_title
 from src.pipeline.ppt_pipeline import PPTPipeline
 from src.ai.transcriber import IncompleteAudioError, NoAudioStreamError
 from src.api.icourse import VideoAccessError, VideoLookupError, VideoNotReadyError
-from src.api.materials import transcript_problem
 from src.runtime import config
 from src.runtime.material_deadline import MaterialTimeout, material_deadline
 
@@ -45,7 +44,7 @@ class LectureRunner:
         self._ppt = PPTPipeline(db, scheduler, reporter)
         # Official-transcript segments fetched during the prefetch decision
         # (``_needs_audio``), keyed by sub_id, so ``_get_transcript`` doesn't
-        # re-fetch them one lecture later.
+        # re-fetch them one lecture later. Text is used as supplied by iCourse.
         self._official_cache: dict[str, list[dict]] = {}
         self._official_failures: dict[str, str] = {}
 
@@ -214,7 +213,7 @@ class LectureRunner:
             return False
         if config.USE_OFFICIAL_TRANSCRIPT or (existing or {}).get("transcript_source") == "official":
             try:
-                segments = self._checked_official_transcript(sub_id)
+                segments = self._read_official_transcript(sub_id)
                 if segments:
                     self._official_cache[sub_id] = segments
                     return False
@@ -225,31 +224,14 @@ class LectureRunner:
                 )
         return True
 
-    def _checked_official_transcript(self, sub_id):
-        row = self._db.get_lecture(sub_id) or {}
+    def _read_official_transcript(self, sub_id):
+        """Read available official text without judging its completeness."""
         segments = self._official_cache.pop(sub_id, None)
         if segments is None:
             segments = self._client.get_transcript_segments(sub_id)
-        problem = transcript_problem(segments)
-        if problem:
-            self._official_failures[sub_id] = problem
-            self._reporter.info(f"    [Official transcript] {problem}")
-            return None
-        try:
-            evidence = self._client.get_recording_duration(row.get("course_id", ""), sub_id)
-        except InterruptedError:
-            raise
-        except Exception as exc:
-            evidence = None
-            self._reporter.info(f"    录播时长读取失败（{type(exc).__name__}），继续使用官方转录")
-        if isinstance(evidence, dict):
-            self._db.update_recording_duration(sub_id, evidence.get("seconds"), evidence.get("source"))
-        row = self._db.get_lecture(sub_id) or {}
-        duration = row.get("recording_duration") if row.get("recording_duration_source") else None
-        problem = transcript_problem(segments, duration)
-        if problem:
-            self._official_failures[sub_id] = problem
-            self._reporter.info(f"    [Official transcript] {problem}")
+        if not segments or not any(s.get("text", "").strip() for s in segments):
+            self._official_failures[sub_id] = "官方转录为空或不可读取"
+            self._reporter.info("    [Official transcript] 官方转录为空或不可读取")
             return None
         self._official_failures.pop(sub_id, None)
         return segments
@@ -262,9 +244,8 @@ class LectureRunner:
                         sub_id: str) -> tuple[Optional[str], Optional[list]]:
         """Return (transcript, segments) or (None, None) on skip.
 
-        Tries the official iCourse transcript first — when available and
-        complete-enough (no >20 min silence gaps) it replaces the ASR
-        step entirely, saving ~5 min of CPU time per lecture.
+        The official-first preference and unavailable-video fallback both
+        use whatever official text iCourse supplies, without an integrity gate.
         """
         if existing and existing.get("transcript") and existing.get("transcript_source") == "asr":
             self._reporter.info(
@@ -274,7 +255,7 @@ class LectureRunner:
             )
             return existing["transcript"], None
 
-        # Explicit official-first preference uses the same integrity gate.
+        # Official text is usable independently of recording metadata.
         if config.USE_OFFICIAL_TRANSCRIPT or (existing or {}).get("transcript_source") == "official":
             fallback = self._official_video_fallback(sub_id)
             if fallback[0] is not None:
@@ -374,20 +355,18 @@ class LectureRunner:
     def _official_video_fallback(self, sub_id: str) -> tuple[Optional[str], Optional[list]]:
         """Use readable official text independently of video availability."""
         try:
-            segments = self._checked_official_transcript(sub_id)
+            segments = self._read_official_transcript(sub_id)
             if not segments:
                 return None, None
             text = " ".join(s["text"] for s in segments)
             self._db.update_transcript(sub_id, text, source="official")
-            row = self._db.get_lecture(sub_id) or {}
-            check = "已核对录播时长" if row.get("recording_duration") else "平台未提供录播时长"
-            self._reporter.info(f"    采用官方转录（{len(text)} 字，{check}）")
+            self._reporter.info(f"    直接采用官方转录（{len(text)} 字）")
             self._release_audio(sub_id)
             return text, segments
         except InterruptedError:
             raise
         except Exception as exc:
-            self._official_failures[sub_id] = f"官方转录核验失败（{type(exc).__name__}）"
+            self._official_failures[sub_id] = f"官方转录读取失败（{type(exc).__name__}）"
             self._reporter.info(f"    {self._official_failures[sub_id]}，保留待复查状态")
             return None, None
 

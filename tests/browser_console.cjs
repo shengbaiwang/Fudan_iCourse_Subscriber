@@ -713,7 +713,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       assert.equal(await page.getByText('暂无录播',{exact:true}).count(),1);
       assert.equal(await page.getByText('no playable video URL',{exact:true}).count(),0);
       assert.equal(await page.getByText(/尚未取得录播地址.*下次复查/).count(),1);
-      assert.equal(await page.getByText(/官方转录 · 已通过独立录制时长校验.*课件提示：课件清单读取失败/).count(),1);
+      assert.equal(await page.getByText(/官方转录 · 直接采用平台文字.*课件提示：课件清单读取失败/).count(),1);
       assert.equal(await page.evaluate(() => lectureStateLabel({error_stage:'video_access'})), '录播无权限');
       assert.equal(await page.evaluate(() => lectureStateLabel({error_stage:'video'})), '录播准备待重试');
       // Manual holiday labels keep the row, hide its failure and survive refresh.

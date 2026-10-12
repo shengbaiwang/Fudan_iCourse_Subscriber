@@ -7,6 +7,7 @@ and video downloads through WebVPN.
 
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -78,6 +79,17 @@ def _video_timestamp(value) -> int | None:
     except (ValueError, TypeError, OverflowError):
         return None
     return stamp if stamp > 0 else None
+
+
+def _transcript_timestamp(value) -> int | None:
+    """Optional timing for prompt layout; unreadable timing never drops text."""
+    try:
+        stamp = float(value) * 1000
+        if isinstance(value, bool) or not math.isfinite(stamp) or stamp < 0:
+            return None
+        return round(stamp)
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 def _extract_date_from_sub(sub_title: str) -> str | None:
@@ -456,8 +468,8 @@ class ICourseClient:
         """Get transcript as timed segments.  Returns None on API error,
         empty list if no transcript exists.
 
-        Each segment: {"start_ms": int, "end_ms": int, "text": str}
-        Sorted by start_ms ascending.
+        Each segment: {"start_ms": int | None, "end_ms": int | None, "text": str}.
+        Preserve the platform's text order, including zero-length segments.
         """
         url = f"{self.base_url}/courseapi/v3/web-socket/search-trans-result"
         resp = self.vpn.get(
@@ -477,18 +489,15 @@ class ICourseClient:
         if not all_content:
             return []
 
-        return sorted(
-            (
-                {
-                    "start_ms": int(seg.get("BeginSec", 0)) * 1000,
-                    "end_ms": int(seg.get("EndSec", seg.get("BeginSec", 0))) * 1000,
-                    "text": seg.get("Text", ""),
-                }
-                for seg in all_content
-                if seg.get("Text", "").strip()
-            ),
-            key=lambda s: s["start_ms"],
-        )
+        return [
+            {
+                "start_ms": _transcript_timestamp(seg.get("BeginSec")),
+                "end_ms": _transcript_timestamp(seg.get("EndSec")),
+                "text": seg["Text"],
+            }
+            for seg in all_content
+            if isinstance(seg, dict) and isinstance(seg.get("Text"), str) and seg["Text"].strip()
+        ]
 
     def get_sub_detail(self, course_id: str, sub_id: str) -> dict:
         """Get detailed info for a specific lecture (unsigned URL).

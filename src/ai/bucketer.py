@@ -12,6 +12,7 @@ the joined transcript string. This avoids doubling text storage.
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 
 from src.ai.ppt_dedup import clean_ppt_text, dedup_text_subset
@@ -117,7 +118,14 @@ def assemble(
         (assembled_text, mode) where mode is 'bucketed' or 'flat'.
     """
     pages = dedup_text_subset(ppt_pages or [])
-    if transcript_segments:
+    # Timing only selects the prompt layout. Keep every source word in flat
+    # order when timestamps are absent/unordered; never reject the transcript.
+    starts = [s.get("start_ms") for s in transcript_segments or []]
+    timed = bool(starts) and all(
+        isinstance(start, (int, float)) and not isinstance(start, bool)
+        and math.isfinite(start) and start >= 0 for start in starts
+    ) and all(a <= b for a, b in zip(starts, starts[1:]))
+    if timed:
         return assemble_bucketed(transcript_segments, pages), "bucketed"
     return assemble_flat(transcript or "", pages), "flat"
 

@@ -1806,7 +1806,7 @@ function renderLectureList() {
       const material = document.createElement("p");
       material.textContent = [
         lecture.transcript_source === "official"
-          ? (lecture.recording_duration > 0 ? "官方转录 · 已通过独立录制时长校验" : "官方转录 · 平台未提供录播时长") : "",
+          ? "官方转录 · 直接采用平台文字" : "",
         lecture.ppt_warning ? `课件提示：${lecture.ppt_warning}` : "",
       ].filter(Boolean).join(" · ");
       left.append(material);

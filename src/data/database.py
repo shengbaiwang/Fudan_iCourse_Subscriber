@@ -76,6 +76,19 @@ class Database:
                     "AND error_msg LIKE '%缺少带明确单位的独立录制时长%'")
                 self.conn.execute("INSERT INTO meta (key,value) VALUES (?,?)", (migration, "1"))
 
+            # Official text is now used directly. Release only cooldowns from
+            # the removed text/timing gate; genuinely unavailable sources wait.
+            migration = "official_transcript_direct_v1"
+            if not self.conn.execute("SELECT 1 FROM meta WHERE key=?", (migration,)).fetchone():
+                self.conn.execute(
+                    "UPDATE lectures SET retry_after=NULL, error_count=0 "
+                    "WHERE processed_at IS NULL AND error_stage IN ('video_access','video','no_video') "
+                    "AND (error_msg LIKE '%官方转录时间戳%' "
+                    "OR error_msg LIKE '%官方转录文字不足%' "
+                    "OR error_msg LIKE '%官方转录缺少课程%' "
+                    "OR error_msg LIKE '%官方转录中间存在%')")
+                self.conn.execute("INSERT INTO meta (key,value) VALUES (?,?)", (migration, "1"))
+
             existing_ppt = {
                 row[1]
                 for row in self.conn.execute(
