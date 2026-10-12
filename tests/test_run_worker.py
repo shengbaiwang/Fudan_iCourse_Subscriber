@@ -11,7 +11,8 @@ import pytest
 @pytest.mark.parametrize("prefer_official", [True, False])
 def test_console_worker_honors_order_and_emits_each_note(tmp_path, monkeypatch, capsys, cached, ppt_kind, prefer_official):
     import main
-    from scripts import local_course, local_audio, run_console_job
+    from scripts import local_course, local_audio, run_console_job, run_lecture_job
+    from src.runtime import lecture_process
     from src.ai import summarizer, transcriber
     from src.data import database
     from src.runtime import config
@@ -33,7 +34,8 @@ def test_console_worker_honors_order_and_emits_each_note(tmp_path, monkeypatch, 
     monkeypatch.setattr("src.api.icourse.fetch_ppt_image", lambda *_args, **_kwargs:None)
 
     class Client:
-        vpn = SimpleNamespace(session=SimpleNamespace(close=lambda: None))
+        import requests
+        vpn = SimpleNamespace(session=requests.Session())
         def check_alive(self): return True
         def get_course_detail(self, cid):
             ids = ["10", "11"] if cid == "1" else ["20"]
@@ -61,6 +63,8 @@ def test_console_worker_honors_order_and_emits_each_note(tmp_path, monkeypatch, 
             calls.append(title)
             return "# 新标题\n\n处理完成的笔记", "test/model"
     monkeypatch.setattr(local_course, "login", lambda _: Client())
+    monkeypatch.setattr(run_lecture_job, "restore_client", lambda _: Client())
+    monkeypatch.setattr(lecture_process, "run_lecture_process", lambda payload, _timeout: run_lecture_job.run(payload))
     monkeypatch.setattr(local_audio, "LocalAudioDownloader", Audio)
     monkeypatch.setattr(summarizer, "Summarizer", Summary)
     monkeypatch.setattr(transcriber, "Transcriber", lambda: SimpleNamespace())

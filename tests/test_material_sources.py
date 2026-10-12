@@ -42,6 +42,78 @@ def test_unknown_units_schedules_and_transcript_tail_are_not_duration(payload):
     assert recording_duration(payload) is None
 
 
+def test_real_sub_info_seconds_field_is_read_even_when_video_is_denied():
+    value = ICourseClient(Mock())
+    value.get_sub_info = Mock(return_value={'duration':'13252', 'can_watch':False,
+        'watch_rule':'not_student', 'video_list':{},
+        'content':{'start_at':1705551026, 'end_at':1863403826}})
+    value.get_sub_detail = Mock(return_value={})
+    value.sign_video_url = Mock()
+    with pytest.raises(VideoAccessError):
+        value.get_video_url('31305', '513512')
+    assert value.get_recording_duration('31305', '513512') == {
+        'seconds':13252, 'source':'sub-info.duration'}
+    value.sign_video_url.assert_not_called()
+    assert recording_duration({'content':{'duration':'13252'}}, duration_unit='s') is None
+    assert recording_duration({'duration':'0'}, duration_unit='s') is None
+
+
+@pytest.mark.parametrize('reason', ['no_duration', 'metadata_error'])
+def test_official_text_generates_and_saves_note_without_any_recording(tmp_path, monkeypatch, reason):
+    monkeypatch.setattr(config, 'USE_OFFICIAL_TRANSCRIPT', False)
+    db = Database(str(tmp_path/'test.db'))
+    try:
+        db.upsert_course('1','课','老师')
+        db.insert_lecture('10','1','第一讲','2026-09-01')
+        client = Mock()
+        client.get_transcript_segments.return_value = full_segments()
+        client.get_recording_duration.return_value = None
+        if reason == 'metadata_error':
+            client.get_recording_duration.side_effect = TimeoutError('private-url')
+        audio = Mock()
+        audio.get.side_effect = VideoAccessError('无录播权限')
+        summarizer = Mock()
+        summarizer.summarize.return_value = ('# 第一讲\n\n官方转录生成的笔记', 'test/model')
+        value = LectureRunner(client, db, SimpleNamespace(audio_downloader=audio), Mock(), summarizer, Mock())
+        value._ppt = Mock()
+        assert value.run('1','课',{'sub_id':'10'}) == '官方转录生成的笔记'
+        row = db.get_lecture('10')
+        assert row['summary'] and row['processed_at'] and row['transcript_source'] == 'official'
+        assert row['recording_duration'] is None and row['error_stage'] is None
+        summarizer.summarize.assert_called_once()
+        value._transcriber.transcribe_tail.assert_not_called()
+    finally:
+        db.conn.close()
+
+
+def test_repeated_slide_page_fails_promptly_instead_of_looping_forever():
+    vpn = Mock()
+    vpn.get.return_value.json.return_value = {'code':0, 'list':[
+        {'id':1, 'content':json.dumps({'pptimgurl':'https://example/1.png'})}]}
+    client = ICourseClient(vpn)
+    with pytest.raises(RuntimeError, match='分页重复'):
+        client.get_ppt_list('1', '10', per_page=1)
+    assert vpn.get.call_count == 2
+    assert all(call.kwargs['timeout'] <= 30 for call in vpn.get.call_args_list)
+
+
+def test_slide_pagination_returns_all_pages_and_has_a_total_time_budget(monkeypatch):
+    vpn = Mock()
+    def response(page):
+        return Mock(json=lambda:{'code':0, 'list':[{'id':page,
+            'content':json.dumps({'pptimgurl':f'https://example/{page}.png'}), 'created_sec':page}]})
+    vpn.get.side_effect = [response(1), response(2), Mock(json=lambda:{'code':0, 'list':[]})]
+    assert len(ICourseClient(vpn).get_ppt_list('1','10',per_page=1)) == 2
+    vpn.get.reset_mock()
+    vpn.get.side_effect = [response(1)]
+    import src.api.icourse as api
+    values = iter([0, 0, 121])
+    monkeypatch.setattr(api.time, 'monotonic', lambda:next(values))
+    with pytest.raises(TimeoutError, match='列表读取超时'):
+        ICourseClient(vpn).get_ppt_list('1','10',per_page=1)
+    assert vpn.get.call_count == 1
+
+
 def test_metadata_can_verify_text_when_video_is_denied_without_signing():
     value = ICourseClient(Mock())
     value.get_sub_info = Mock(return_value={'can_watch': False, 'watch_rule':'not_student',
@@ -70,7 +142,7 @@ def test_bad_official_timing_never_passes_independent_duration(kind):
     assert transcript_problem(segments, 3600)
 
 
-def test_screenshot_duration_cannot_rescue_unknown_recording_length(tmp_path, monkeypatch):
+def test_no_recording_duration_does_not_block_readable_official_text(tmp_path, monkeypatch):
     monkeypatch.setattr(config, 'USE_OFFICIAL_TRANSCRIPT', False)
     db = Database(str(tmp_path/'test.db'))
     try:
@@ -81,9 +153,10 @@ def test_screenshot_duration_cannot_rescue_unknown_recording_length(tmp_path, mo
         audio.get.side_effect = VideoAccessError('未选课')
         value = LectureRunner(SimpleNamespace(get_transcript_segments=lambda _:full_segments(),
             get_recording_duration=lambda *_:None), db, SimpleNamespace(audio_downloader=audio), Mock(), Mock(), Mock())
-        assert value._get_transcript(db.get_lecture('10'),'1','10') == (None,None)
+        text, segments = value._get_transcript(db.get_lecture('10'),'1','10')
         row = db.get_lecture('10')
-        assert row['transcript'] is None and '独立录制时长' in row['error_msg']
+        assert text and segments and row['transcript_source'] == 'official'
+        assert row['recording_duration'] is None
     finally:
         db.conn.close()
 
@@ -134,7 +207,7 @@ def test_available_video_prefers_asr_and_does_not_probe_official_text(tmp_path, 
 
 
 @pytest.mark.parametrize('source', ['official', None])
-def test_pending_legacy_text_cannot_skip_independent_validation(tmp_path, monkeypatch, source):
+def test_pending_legacy_text_is_refetched_before_using_official_material(tmp_path, monkeypatch, source):
     monkeypatch.setattr(config, 'USE_OFFICIAL_TRANSCRIPT', False)
     db = Database(str(tmp_path/'test.db'))
     try:
@@ -145,9 +218,10 @@ def test_pending_legacy_text_cannot_skip_independent_validation(tmp_path, monkey
         audio.get.side_effect = VideoAccessError('未选课')
         value = LectureRunner(SimpleNamespace(get_transcript_segments=lambda _:full_segments(),
             get_recording_duration=lambda *_:None), db, SimpleNamespace(audio_downloader=audio), Mock(), Mock(), Mock())
-        assert value._needs_audio('10')
-        assert value._get_transcript(db.get_lecture('10'),'1','10') == (None,None)
-        assert '独立录制时长' in db.get_lecture('10')['error_msg']
+        assert value._needs_audio('10') is (source is None)
+        text, segments = value._get_transcript(db.get_lecture('10'),'1','10')
+        assert text == ' '.join(s['text'] for s in full_segments()) and segments
+        assert db.get_lecture('10')['transcript_source'] == 'official'
     finally:
         db.conn.close()
 
@@ -167,12 +241,13 @@ def test_local_official_checkpoint_guard_applies_to_summary_entry_points(tmp_pat
             db.update_recording_duration('10', 3600, 'sub-info.video_duration_seconds')
         local_course.save_meta(db, '10', 'segments', segments)
         local_course.save_meta(db, '10', 'audio', {'asr_backend':'official',
-            'expected_seconds':3600, 'duration_source':'sub-info.video_duration_seconds',
+            'expected_seconds':None if kind == 'no_duration' else 3600,
+            'duration_source':None if kind == 'no_duration' else 'sub-info.video_duration_seconds',
             'transcript_sha256':hashlib.sha256(text.encode()).hexdigest()})
         local_course.save_meta(db, '10', 'ocr', {'status':'unavailable', 'warning':'无法读取课件'})
         if kind == 'changed_text':
             db.update_transcript('10', text+'更改内容', source=None)
-        if kind == 'verified':
+        if kind in ('verified', 'no_duration'):
             assert local_course.meta(db, '10', 'audio')
             assert local_course.summary_request(db, {'sub_id':'10'})
         else:

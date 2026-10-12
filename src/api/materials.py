@@ -21,11 +21,12 @@ def _seconds(value, unit: str):
     return seconds if math.isfinite(seconds) and seconds > 0 else None
 
 
-def recording_duration(payload, source="metadata", *, media=False):
+def recording_duration(payload, source="metadata", *, media=False, duration_unit=None):
     """Return {seconds, source} from recording fields, or None if uncertain.
 
-    Unitless numeric ``duration`` is deliberately ignored. A media object's
-    duration can instead declare duration_unit=s/ms, or use HH:MM:SS.
+    Unitless numeric ``duration`` is ignored unless the caller supplies an
+    endpoint's known unit. This hint applies only to the root object; nested
+    room metadata and timetable lengths must not inherit it.
     """
     if isinstance(payload, str):
         try:
@@ -41,6 +42,10 @@ def recording_duration(payload, source="metadata", *, media=False):
     if not isinstance(payload, dict):
         return None
     values = []
+    if duration_unit in ("s", "ms"):
+        seconds = _seconds(payload.get("duration"), duration_unit)
+        if seconds:
+            values.append({"seconds": seconds, "source": f"{source}.duration"})
     fields = {"video_duration_seconds": "s", "video_duration_ms": "ms",
               "recording_duration_seconds": "s", "recording_duration_ms": "ms"}
     if media:
@@ -74,11 +79,13 @@ def recording_duration(payload, source="metadata", *, media=False):
     return max(values, key=lambda v: v["seconds"], default=None)
 
 
-def transcript_problem(segments, duration_seconds):
-    """None means timing coverage passed; otherwise a safe, readable reason."""
+def transcript_problem(segments, duration_seconds=None):
+    """Validate official text; check recording coverage only when known.
+
+    Official transcripts are independent material. Missing/unplayable video
+    must not make a readable transcript unusable.
+    """
     duration = _seconds(duration_seconds, "s")
-    if not duration:
-        return "缺少带明确单位的独立录制时长，官方转录待核验"
     if not isinstance(segments, list) or not segments:
         return "官方转录为空或不可读取"
     if any(not isinstance(s, dict) or not isinstance(s.get("text"), str) for s in segments):
@@ -86,7 +93,7 @@ def transcript_problem(segments, duration_seconds):
     if len(" ".join(s["text"] for s in segments).strip()) < 200:
         return "官方转录文字不足"
     end = 0
-    edge = min(300_000, max(3000, duration * 1000 * .05))
+    edge = min(300_000, max(3000, duration * 1000 * .05)) if duration else None
     for i, segment in enumerate(segments):
         start, stop = segment.get("start_ms"), segment.get("end_ms")
         if (isinstance(start, bool) or isinstance(stop, bool)
@@ -96,13 +103,13 @@ def transcript_problem(segments, duration_seconds):
             return "官方转录时间戳异常"
         if i and start < segments[i - 1]["start_ms"]:
             return "官方转录时间戳顺序异常"
-        if not i and start > edge:
+        if not i and edge is not None and start > edge:
             return "官方转录缺少课程开头"
         if i and start - end > 20 * 60_000:
             return "官方转录中间存在超过 20 分钟的空段"
         end = max(end, stop)
-    if end > duration * 1000 + max(3000, duration * 1000 * .005):
+    if duration and end > duration * 1000 + max(3000, duration * 1000 * .005):
         return "官方转录时间戳超出独立录制时长"
-    if duration * 1000 - end > edge:
+    if duration and duration * 1000 - end > edge:
         return "官方转录缺少课程结尾"
     return None

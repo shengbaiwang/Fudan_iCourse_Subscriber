@@ -446,7 +446,7 @@ class Scheduler:
                 return fn(*args, **kwargs)
         return self.ocr_pool.submit(_wrapped)
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, wait=True) -> None:
         self.audio_downloader.shutdown()
-        self.image_pool.shutdown(wait=True)
-        self.ocr_pool.shutdown(wait=True)
+        self.image_pool.shutdown(wait=wait, cancel_futures=not wait)
+        self.ocr_pool.shutdown(wait=wait, cancel_futures=not wait)

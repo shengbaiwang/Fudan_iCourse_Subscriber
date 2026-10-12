@@ -135,7 +135,7 @@ def test_restricted_video_uses_checked_official_text_with_asr_preferred(db, monk
     value._transcriber.transcribe_tail.assert_not_called()
 
 
-@pytest.mark.parametrize('kind', ['empty','short','tail','head','gap','no_duration'])
+@pytest.mark.parametrize('kind', ['empty','short','tail','head','gap'])
 def test_recovery_rejects_incomplete_or_unverifiable_official_text(db, monkeypatch, kind):
     monkeypatch.setattr(config, 'USE_OFFICIAL_TRANSCRIPT', False)
     segments = full_segments()
@@ -145,7 +145,6 @@ def test_recovery_rejects_incomplete_or_unverifiable_official_text(db, monkeypat
     if kind == 'tail': segments = segments[:30]
     if kind == 'head': segments = segments[10:]
     if kind == 'gap': segments = segments[:10] + segments[35:]
-    if kind == 'no_duration': duration = 0
     value = make_runner(db, VideoAccessError('未选课'), segments, duration)
     assert value._get_transcript(db.get_lecture('10'), '1', '10') == (None, None)
     row = db.get_lecture('10')

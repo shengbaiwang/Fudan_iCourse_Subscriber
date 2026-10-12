@@ -1805,7 +1805,8 @@ function renderLectureList() {
     if (lecture.transcript_source === "official" || lecture.ppt_warning) {
       const material = document.createElement("p");
       material.textContent = [
-        lecture.transcript_source === "official" ? "官方转录 · 已通过独立录制时长校验" : "",
+        lecture.transcript_source === "official"
+          ? (lecture.recording_duration > 0 ? "官方转录 · 已通过独立录制时长校验" : "官方转录 · 平台未提供录播时长") : "",
         lecture.ppt_warning ? `课件提示：${lecture.ppt_warning}` : "",
       ].filter(Boolean).join(" · ");
       left.append(material);
@@ -1899,6 +1900,7 @@ function lectureStateLabel(lecture) {
   if (isLectureHoliday(lecture)) return "放假";
   if (lecture.error_stage === "video_access") return "录播无权限";
   if (lecture.error_stage === "video") return "录播准备待重试";
+  if (lecture.error_stage === "process_timeout") return "处理待重试";
   const state = lectureState(lecture);
   return state === "failed" ? `失败 · ${lecture.error_stage}` : {
     ready: "笔记已生成", novideo: "暂无录播", skipped: "已跳过", processing: "处理中", waiting: "等待处理",

@@ -13,7 +13,8 @@ class Summarizer:
         if not self.providers:
             raise ValueError("No model provider available. 请在模型与 API 中保存模型及 API Key。")
         self._clients = {
-            p["name"]: OpenAI(api_key=p["api_key"], base_url=p["base_url"])
+            p["name"]: OpenAI(api_key=p["api_key"], base_url=p["base_url"],
+                              timeout=600, max_retries=0)
             for p in self.providers
         }
 
