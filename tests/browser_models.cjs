@@ -66,6 +66,13 @@ const root = path.resolve(process.env.MODEL_STATIC_ROOT || path.join(__dirname, 
     assert.equal(await page.locator('.provider-card').count(),1);
     assert.equal(await page.locator('.provider-nav-item').count(),2);
     assert.equal(await page.locator('#model-save-button').isDisabled(),true);
+    await page.locator('.provider-advanced summary').click();
+    assert.equal(await page.getByLabel('笔记请求等待（秒）').inputValue(), '600');
+    await page.getByLabel('笔记请求等待（秒）').fill('900');
+    await page.getByLabel('临时故障重试次数').fill('4');
+    await page.getByLabel('初始输出预算（tokens）').fill('8192');
+    await page.getByLabel('截断扩容上限（tokens）').fill('16384');
+    await page.getByLabel('输出预算参数', {exact:true}).selectOption('max_completion_tokens');
     await page.getByLabel('Base URL', {exact:true}).fill('https://api.xiaomimimo.com');
     await page.locator('#model-provider-list').getByLabel('API Key', {exact:true}).fill('synthetic-key');
     assert.equal(await page.getByLabel('Base URL', {exact:true}).inputValue(), 'https://api.xiaomimimo.com/v1');
@@ -120,6 +127,13 @@ const root = path.resolve(process.env.MODEL_STATIC_ROOT || path.join(__dirname, 
     assert.deepEqual(saved.providers[1].models,['alpha-pro','alpha-new']);
     assert.equal(saved.providers[1].base_url,'https://api.xiaomimimo.com/v1');
     assert.equal(saved.providers[1].api_key,'synthetic-key');
+    assert.equal(saved.providers[1].generation.timeout_seconds,900);
+    assert.equal(saved.providers[1].generation.max_retries,4);
+    assert.equal(saved.providers[1].generation.output_tokens,8192);
+    assert.equal(saved.providers[1].generation.max_output_tokens,16384);
+    assert.equal(saved.providers[1].generation.token_parameter,'max_completion_tokens');
+    await page.locator('.provider-advanced summary').click();
+    assert.equal(await page.getByLabel('笔记请求等待（秒）').inputValue(), '900');
     assert.equal(await page.locator('#model-provider-list').getByLabel('API Key',{exact:true}).inputValue(),'');
     await page.locator('#message').waitFor({state:'hidden'});
     for (const theme of ['light','dark']) {

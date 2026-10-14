@@ -3,6 +3,7 @@
 import os
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 
 from src.runtime import config
@@ -13,6 +14,7 @@ from src.data.schema import (
     SCHEMA_SQL,
     backfill_summary_versions,
     migrate_summary_versions_table,
+    migrate_processing_backoff,
 )
 
 
@@ -88,9 +90,9 @@ class Database:
                     "OR error_msg LIKE '%官方转录中间存在%')")
                 self.conn.execute("INSERT INTO meta (key,value) VALUES (?,?)", (migration, "1"))
 
-            # Keep the legacy column for old snapshots, but discard their
-            # waiting times: every check can retry unavailable materials.
-            self.conn.execute("UPDATE lectures SET retry_after=NULL WHERE retry_after IS NOT NULL")
+            # Release legacy cooldowns/permanent exclusions once. New retry
+            # times must survive reopening the DB and progress checkpoints.
+            migrate_processing_backoff(self.conn)
 
             existing_ppt = {
                 row[1]
@@ -247,31 +249,34 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def get_exhausted_sub_ids(self, course_id: str, max_errors: int = 3) -> set[str]:
+    def get_deferred_sub_ids(self, course_id: str) -> set[str]:
+        """Temporarily delayed failures; no lecture is permanently excluded."""
         with self._lock:
             rows = self.conn.execute(
                 "SELECT sub_id FROM lectures WHERE course_id = ? "
-                "AND processed_at IS NULL AND error_count >= ? "
+                "AND processed_at IS NULL AND retry_after > ? "
                 "AND COALESCE(error_stage, '') NOT IN ('no_video', 'video', 'video_access', 'process_timeout')",
-                (course_id, max_errors),
+                (course_id, int(time.time())),
             ).fetchall()
         return {row["sub_id"] for row in rows}
 
-    def get_unprocessed_lectures(self, course_id: str | None = None,
-                                  max_errors: int = 3) -> list[dict]:
-        """Return lectures that need (re-)processing.
+    def get_exhausted_sub_ids(self, course_id: str, max_errors: int = 3) -> set[str]:
+        """Compatibility alias for callers using the former permanent gate."""
+        return self.get_deferred_sub_ids(course_id)
 
-        Processing failures stop after *max_errors*. Missing recordings and
-        video API failures retry on every check, including legacy
-        ``no_video`` rows that already exceeded the old three-attempt limit.
+    def get_unprocessed_lectures(self, course_id: str | None = None,
+                                  max_errors: int = 3, *, force: bool = False) -> list[dict]:
+        """Return due work, or all unfinished lectures for a manual recovery.
+
+        ``max_errors`` is ignored for compatibility. Material availability is
+        still checked on every discovery; other failures use a timed backoff.
         """
-        query = (
-            "SELECT * FROM lectures"
-            " WHERE processed_at IS NULL"
-            "   AND (error_count IS NULL OR error_count < ?"
-            "        OR error_stage IN ('no_video', 'video', 'video_access', 'process_timeout'))"
-        )
-        params: tuple = (max_errors,)
+        query = "SELECT * FROM lectures WHERE processed_at IS NULL"
+        params: tuple = ()
+        if not force:
+            query += (" AND (retry_after IS NULL OR retry_after <= ?"
+                      " OR error_stage IN ('no_video','video','video_access','process_timeout'))")
+            params = (int(time.time()),)
         if course_id:
             query += " AND course_id = ?"
             params += (course_id,)
@@ -323,13 +328,17 @@ class Database:
                 "SELECT error_count, error_stage FROM lectures WHERE sub_id = ?", (sub_id,),
             ).fetchone()
             attempts = (row[0] or 0) + 1 if row and row[1] == stage else 1
+            # 5 minutes, 10 minutes, ... up to one day. Cap the exponent too
+            # so old counters cannot produce huge intermediate integers.
+            delay = min(86400, 300 * 2 ** min(attempts - 1, 9))
+            retry_after = None if stage in {"no_video", "video", "video_access", "process_timeout"} else int(time.time()) + delay
             self.conn.execute(
                 """UPDATE lectures
                    SET error_stage = ?, error_msg = ?,
                        error_count = ?,
-                       retry_after = NULL
+                       retry_after = ?
                    WHERE sub_id = ?""",
-                (stage, error_msg, attempts, sub_id),
+                (stage, error_msg, attempts, retry_after, sub_id),
             )
 
     def clear_error(self, sub_id: str):

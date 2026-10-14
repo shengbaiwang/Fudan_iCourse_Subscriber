@@ -28,14 +28,24 @@ from src.ai.title import build_title_material, split_generated_title
 from src.data.database import Database
 from src.runtime.progress import emit, note_saved
 
+RERUN_BATCH_SIZE = 20
+
+
+def batched_lecture_ids(lecture_ids):
+    """Keep the whole ordered selection; persist notes within each batch."""
+    total_batches = (len(lecture_ids) + RERUN_BATCH_SIZE - 1) // RERUN_BATCH_SIZE
+    for start in range(0, len(lecture_ids), RERUN_BATCH_SIZE):
+        batch = lecture_ids[start:start + RERUN_BATCH_SIZE]
+        print(f"[Re-summarize] Batch {start // RERUN_BATCH_SIZE + 1}/{total_batches}: {len(batch)} lectures", flush=True)
+        emit("batch", index=start // RERUN_BATCH_SIZE + 1, total=total_batches, size=len(batch))
+        yield from enumerate(batch, start=start + 1)
+
 
 def _lecture_ids() -> list[str]:
     values = [item.strip() for item in os.environ.get("RESUMMARIZE_SUB_IDS", "").split(",")]
     result = list(dict.fromkeys(item for item in values if item))
     if not result:
         raise ValueError("RESUMMARIZE_SUB_IDS 必须包含至少一个课次 ID")
-    if len(result) > 20:
-        raise ValueError("一次最多重新生成 20 个课次")
     return result
 
 
@@ -46,8 +56,8 @@ def run() -> int:
     completed = 0
     emit("queue", total=len(lecture_ids))
 
-    for sub_id in lecture_ids:
-        emit("lecture", sub_id=sub_id, index=lecture_ids.index(sub_id) + 1,
+    for index, sub_id in batched_lecture_ids(lecture_ids):
+        emit("lecture", sub_id=sub_id, index=index,
              total=len(lecture_ids))
         lecture = db.get_lecture(sub_id)
         if lecture is None:

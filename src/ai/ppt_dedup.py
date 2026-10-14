@@ -6,8 +6,7 @@ tune patterns without touching this logic code.
 Pipeline (pre-OCR stages):
   1. ``match_garbage`` — compares each page's dhash against a pre-computed
      garbage catalog; matches are dropped before OCR (no text needed).
-  2. ``dedup_dhash`` — full pairwise dedup on survivors, with auto-escalating
-     threshold capped at ``DHASH_MAX_SURVIVORS``.
+  2. ``dedup_dhash`` — full pairwise dedup with a fixed similarity threshold.
 
 Post-OCR stages:
   3. ``is_invalid_page`` — text-based noise detection.
@@ -26,7 +25,6 @@ from PIL import Image
 
 from src.ai.ppt_dedup_config import (
     DHASH_THRESHOLD,
-    DHASH_MAX_SURVIVORS,
     GARBAGE_CATALOG,
     GARBAGE_THRESHOLD,
     INVALID_PAGE_PATTERNS,
@@ -121,31 +119,15 @@ def dedup_dhash(
     threshold: int | None = None,
     max_survivors: int | None = None,
 ) -> list[int]:
-    """Full pairwise dedup with auto-escalating threshold (Step 2).
+    """Drop near duplicates at a fixed threshold, regardless of page count.
 
-    Runs after ``match_garbage``.  Starts at ``DHASH_THRESHOLD`` (3),
-    drops near-duplicate pages via full pairwise anchor-based comparison,
-    then auto-raises the threshold in steps of 4 until survivors ≤
-    ``DHASH_MAX_SURVIVORS`` (150).
-
-    Returns sorted list of dropped indices (within the ``items`` list).
+    ``window`` and ``max_survivors`` are ignored legacy arguments. A long
+    lecture must meet the same similarity criterion as a short lecture.
     """
     if threshold is None:
         threshold = DHASH_THRESHOLD
-    if max_survivors is None:
-        max_survivors = DHASH_MAX_SURVIVORS
-    del window  # deprecated, kept for signature compatibility
-
-    n = len(items)
-    dropped = _dedup_full(items, threshold)
-    survivors = n - len(dropped)
-
-    while survivors > max_survivors and threshold < 50:
-        threshold += 4
-        dropped = _dedup_full(items, threshold)
-        survivors = n - len(dropped)
-
-    return sorted(dropped)
+    del window, max_survivors  # kept for signature compatibility
+    return sorted(_dedup_full(items, threshold))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

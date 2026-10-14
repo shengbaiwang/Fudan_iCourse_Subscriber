@@ -3,7 +3,7 @@ from openai import OpenAI
 
 from src.ai.summary_prompt import SYSTEM_PROMPT, summary_user_content
 from src.ai.title import clean_title
-from src.ai.model_policy import IncompleteSummaryError, request_options, check_response
+from src.ai.model_policy import IncompleteSummaryError, complete_with_recovery, check_response
 from src.runtime import config
 
 
@@ -27,23 +27,19 @@ class Summarizer:
             for model in provider["models"]:
                 model_id = f"{provider['name']}/{model}"
                 try:
-                    for budget in (32768, 65536):
-                        options = request_options(provider, model, title=title, budget=budget)
+                    def call(options):
                         print(f"[Summarizer] Trying {model_id}", flush=True)
                         response = self._clients[provider["name"]].chat.completions.create(
                             model=model, messages=messages, **options)
                         choice = response.choices[0] if response.choices else None
                         reason = choice.finish_reason if choice else "empty_choices"
-                        try:
-                            check_response(provider, model, getattr(response, "model", None),
-                                           choice.message.content if choice else None, reason)
-                        except IncompleteSummaryError:
-                            if reason == "length" and not title and budget == 32768 and "max_completion_tokens" in options:
-                                continue
-                            raise
+                        check_response(provider, model, getattr(response, "model", None),
+                                       choice.message.content if choice else None, reason)
                         if title and not clean_title(choice.message.content):
                             raise ValueError("模型没有返回可用标题")
-                        return response, provider, model, options
+                        return response
+                    response, options = complete_with_recovery(provider, model, call, title=title)
+                    return response, provider, model, options
                 except Exception as exc:
                     last_error = exc
                     failures.append(exc)

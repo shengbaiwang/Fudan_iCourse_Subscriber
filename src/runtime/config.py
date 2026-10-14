@@ -121,6 +121,8 @@ def resolve_model_providers() -> list[dict]:
             "base_url": base_url,
             "models": list(p["models"]),
         }
+        if "generation" in p:
+            entry["generation"] = dict(p["generation"])
         resolved.append(entry)
     return resolved
 

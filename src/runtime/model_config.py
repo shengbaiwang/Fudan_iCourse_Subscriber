@@ -13,7 +13,7 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlparse
 
-from src.ai.model_policy import check_model
+from src.ai.model_policy import check_model, generation_policy
 
 
 CONFIG_VERSION = 1
@@ -149,6 +149,8 @@ def validate_model_config(value: Any) -> dict[str, Any]:
             "models": models,
             "enabled": enabled,
         }
+        if "generation" in raw:
+            provider["generation"] = generation_policy(raw["generation"])
         for model in models:
             check_model(provider, model)
         base_url_env = str(raw.get("base_url_env") or "").strip().upper()

@@ -20,6 +20,7 @@ from src.data.schema import (
     SCHEMA_SQL,
     backfill_summary_versions,
     migrate_summary_versions_table,
+    migrate_processing_backoff,
 )
 
 
@@ -40,6 +41,7 @@ def _ensure_schema(conn: sqlite3.Connection):
     # then seed versionless lectures — both idempotent (src/data/schema.py).
     migrate_summary_versions_table(conn, "main")
     backfill_summary_versions(conn, "main")
+    migrate_processing_backoff(conn, "main")
 
 
 def _migrate_attached(conn: sqlite3.Connection, schema: str):
@@ -81,6 +83,7 @@ def _migrate_attached(conn: sqlite3.Connection, schema: str):
     # it so the union merge below keeps every rerun from both sides.
     migrate_summary_versions_table(conn, schema)
     backfill_summary_versions(conn, schema)
+    migrate_processing_backoff(conn, schema)
 
 
 def merge(local_path: str, remote_path: str):
@@ -130,7 +133,9 @@ def merge(local_path: str, remote_path: str):
                      recording_duration_source, transcript_source, ppt_warning)
                 SELECT sub_id, course_id, sub_title, date, transcript, summary,
                        processed_at, emailed_at, error_msg, error_count, error_stage,
-                       summary_model, ai_title, NULL, recording_duration,
+                       summary_model, ai_title, CASE
+                           WHEN processed_at IS NOT NULL OR error_stage IN ('no_video','video','video_access','process_timeout') THEN NULL
+                           ELSE retry_after END, recording_duration,
                        recording_duration_source, transcript_source, ppt_warning
                 FROM local.lectures
             """)
@@ -159,7 +164,13 @@ def merge(local_path: str, remote_path: str):
                         THEN COALESCE(NULLIF(l.processed_at, ''), NULLIF(main.lectures.processed_at, ''))
                         ELSE COALESCE(NULLIF(main.lectures.processed_at, ''), NULLIF(l.processed_at, '')) END,
                     emailed_at    = COALESCE(l.emailed_at,    main.lectures.emailed_at),
-                    retry_after = NULL,
+                    retry_after = CASE
+                        WHEN COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL
+                            OR COALESCE(l.error_stage, main.lectures.error_stage) IN ('no_video','video','video_access','process_timeout') THEN NULL
+                        WHEN l.error_stage IS NOT NULL AND l.error_stage IS NOT main.lectures.error_stage
+                            THEN l.retry_after
+                        ELSE NULLIF(MAX(COALESCE(l.retry_after, 0), COALESCE(main.lectures.retry_after, 0)), 0)
+                    END,
                     error_msg = CASE
                         WHEN COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL
                         THEN NULL

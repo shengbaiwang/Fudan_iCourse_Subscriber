@@ -182,18 +182,17 @@ def test_one_filtered_lecture_does_not_abort_other_lectures(tmp_path, monkeypatc
     assert len(calls) == 2  # remembered refusal is not called again after restart
 
 
-def test_connection_failure_retries_but_content_filter_does_not(monkeypatch):
+def test_worker_uses_summarizer_recovery_without_retrying_the_whole_chain(monkeypatch):
     from openai import APIConnectionError
     calls = []
     def generate(*_):
         calls.append(None)
-        if len(calls) == 1:
-            raise APIConnectionError(request=SimpleNamespace(url='https://chosen.test/v1'))
-        return {'finish_reason': 'stop'}
+        raise APIConnectionError(request=SimpleNamespace(url='https://chosen.test/v1'))
     monkeypatch.setattr(worker, 'generate_result', generate)
     monkeypatch.setattr(worker.time, 'sleep', lambda *_: None)
-    assert worker.generate_with_retry(None, {'sub_id': '101945'})['finish_reason'] == 'stop'
-    assert len(calls) == 2
+    with pytest.raises(APIConnectionError):
+        worker.generate_with_retry(None, {'sub_id': '101945'})
+    assert len(calls) == 1
     def filtered(*_):
         raise worker.IncompleteSummaryError('content_filter')
     monkeypatch.setattr(worker, 'generate_result', filtered)

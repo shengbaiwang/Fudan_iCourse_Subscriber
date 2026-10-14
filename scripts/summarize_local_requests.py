@@ -50,6 +50,9 @@ def generate_result(summarizer, request):
                             "reasoning_tokens": getattr(details, "reasoning_tokens", None)}
     if "max_completion_tokens" in options:
         receipt["max_completion_tokens"] = options["max_completion_tokens"]
+    if "max_tokens" in options:
+        receipt["max_tokens"] = options["max_tokens"]
+    if options.get("extra_body", {}).get("thinking", {}).get("type") == "disabled":
         receipt["thinking"] = "disabled"
     return receipt
 
@@ -62,22 +65,9 @@ def write_status(state, **details):
 
 
 def generate_with_retry(summarizer, request):
-    from openai import APIConnectionError, APIStatusError
-    for attempt in range(3):
-        try:
-            return generate_result(summarizer, request)
-        except (APIConnectionError, APIStatusError, RuntimeError) as exc:
-            failures = getattr(exc, "failures", [exc])
-            def transient(error):
-                status = getattr(error, "status_code", None)
-                return (isinstance(error, APIConnectionError) or isinstance(error, APIStatusError)
-                        and (status == 429 or status is not None and status >= 500))
-            if not failures or not all(transient(error) for error in failures) or attempt == 2:
-                raise
-            delay = 10 * (attempt + 1)
-            print(f"[{request['sub_id']}] 已配置模型均暂时不可用；"
-                  f"{delay} 秒后按保存顺序重试。", flush=True)
-            time.sleep(delay)
+    # Summarizer owns the shared per-model recovery policy. Do not retry the
+    # entire provider chain here or multiply its configured attempt count.
+    return generate_result(summarizer, request)
 
 
 def preparation_running():

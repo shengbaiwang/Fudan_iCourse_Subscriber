@@ -89,6 +89,7 @@ class ModelProviderRequest(BaseModel):
     api_key_env: str
     models: list[str]
     enabled: bool = True
+    generation: dict[str, Any] | None = None
     api_key: SecretStr | None = None
 
 
@@ -162,15 +163,15 @@ class SummaryRerunRequest(BaseModel):
 
 
 class SummaryBatchRerunRequest(SummaryRerunRequest):
-    sub_ids: list[str] = Field(default_factory=list, max_length=20)
-    course_ids: list[str] = Field(default_factory=list, max_length=20)
+    sub_ids: list[str] = Field(default_factory=list)
+    course_ids: list[str] = Field(default_factory=list, max_length=500)
 
 
 class RunRequest(BaseModel):
     target: Literal["local", "github"] = "github"
     kind: Literal["process", "rerun", "titles"] = "process"
     course_ids: list[str] = Field(default_factory=list, max_length=500)
-    sub_ids: list[str] = Field(default_factory=list, max_length=20)
+    sub_ids: list[str] = Field(default_factory=list)
     priority_course_ids: list[str] = Field(default_factory=list, max_length=500)
     lecture_order: Literal["oldest", "newest", "api"] = "newest"
     provider: str = Field(default="", max_length=50)
@@ -449,6 +450,7 @@ def create_app(
                     "api_key_env": item["api_key_env"],
                     "models": item["models"],
                     "enabled": item["enabled"],
+                    **({"generation": item["generation"]} if "generation" in item else {}),
                     "api_key_configured": item["api_key_env"] in secret_names,
                 }
             )
@@ -489,6 +491,7 @@ def create_app(
                     "api_key_env": provider.api_key_env,
                     "models": provider.models,
                     "enabled": provider.enabled,
+                    **({"generation": provider.generation} if provider.generation is not None else {}),
                 }
             )
             if provider.api_key is not None:
@@ -842,7 +845,7 @@ def create_app(
         provider_value: str,
         model_value: str,
     ) -> dict[str, Any]:
-        """Validate selected lectures and dispatch one bounded rerun workflow."""
+        """Validate the complete selection; the worker processes it in batches."""
         local_db = require_db()
         sub_ids: list[str] = []
         seen: set[str] = set()
@@ -869,11 +872,6 @@ def create_app(
 
         if not sub_ids:
             raise HTTPException(status_code=400, detail="请选择至少一个有转录的课次或课程")
-        if len(sub_ids) > 20:
-            raise HTTPException(
-                status_code=400,
-                detail=f"已选择 {len(sub_ids)} 个可重跑课次；一次最多 20 个，请分批提交",
-            )
 
         for sub_id in sub_ids:
             item = await run_in_threadpool(local_db.lecture, sub_id)
@@ -1008,8 +1006,8 @@ def create_app(
                 rows = ordered_lectures(rows, payload.lecture_order)
                 rows.sort(key=lambda row: rank.get(str(row["course_id"]), len(rank)))
                 selected = [str(row["sub_id"]) for row in rows]
-                if not selected or len(selected) > 20:
-                    raise ValueError("重新生成笔记需选择 1–20 个有转录的课次")
+                if not selected:
+                    raise ValueError("重新生成笔记需选择至少一个有转录的课次")
             elif not courses:
                 raise ValueError("请选择课程，或输入要运行的课程 ID")
             try:
@@ -1264,7 +1262,8 @@ def create_app(
             document = validate_model_config(raw or DEFAULT_MODEL_PROVIDERS)
             keys = local_generation_keys(document, payload)
             providers = [{"name": p["name"], "base_url": p["default_base_url"],
-                          "models": p["models"], "api_key": keys[p["api_key_env"]]}
+                          "models": p["models"], "api_key": keys[p["api_key_env"]],
+                          **({"generation": p["generation"]} if "generation" in p else {})}
                          for p in document["providers"] if p["enabled"] and p["api_key_env"] in keys]
         except HTTPException:
             raise

@@ -41,9 +41,9 @@ def load_auto_check_status(conn, pauses: dict[str, str] | None = None, *,
             SUM(l.sub_id IS NOT NULL
                 AND (date(l.date) IS NULL OR date(l.date) != l.date)) AS invalid_date_count,
             SUM(l.sub_id IS NOT NULL AND l.processed_at IS NULL
-                AND (COALESCE(l.error_count, 0) < 3
+                AND (l.retry_after IS NULL OR l.retry_after <= CAST(strftime('%s','now') AS INTEGER)
                      OR l.error_stage IN ('no_video', 'video', 'video_access', 'process_timeout'))) AS pending_count,
-            SUM(l.processed_at IS NULL AND COALESCE(l.error_count, 0) >= 3
+            SUM(l.processed_at IS NULL AND l.retry_after > CAST(strftime('%s','now') AS INTEGER)
                 AND COALESCE(l.error_stage, '') NOT IN ('no_video', 'video', 'video_access', 'process_timeout')) AS blocked_count
         FROM courses c LEFT JOIN lectures l ON l.course_id=c.course_id
     """ + (" WHERE c.course_id=?" if course_id is not None else "") + " GROUP BY c.course_id",

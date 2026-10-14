@@ -102,8 +102,8 @@
       SUM(NULLIF(processed_at,'') IS NOT NULL AND TRIM(COALESCE(summary,''), char(9)||char(10)||char(13)||' ') != '') ready_count,
       MAX(date) latest_date,
       SUM(date(date) IS NULL OR date(date) != date) invalid_date_count,
-      SUM(processed_at IS NULL AND (COALESCE(error_count,0) < 3 OR error_stage IN ('no_video','video','video_access','process_timeout'))) pending_count,
-      SUM(processed_at IS NULL AND COALESCE(error_count,0) >= 3 AND COALESCE(error_stage,'') NOT IN ('no_video','video','video_access','process_timeout')) blocked_count
+      SUM(processed_at IS NULL AND (retry_after IS NULL OR retry_after <= CAST(strftime('%s','now') AS INTEGER) OR error_stage IN ('no_video','video','video_access','process_timeout'))) pending_count,
+      SUM(processed_at IS NULL AND retry_after > CAST(strftime('%s','now') AS INTEGER) AND COALESCE(error_stage,'') NOT IN ('no_video','video','video_access','process_timeout')) blocked_count
       FROM lectures GROUP BY course_id`).map(row => [String(row.course_id), row]));
     const courses = db.getCoursesByIds(courseIds).map(course => {
       const id = String(course.course_id), status = progress.get(id) || {};
@@ -192,6 +192,7 @@
       if ((url.hostname === 'openrouter.ai' || name.toLowerCase() === 'openrouter') && models.some(model => ['openrouter/auto','openrouter/free','openrouter/bodybuilder','openrouter/auto-exacto'].includes(model.toLowerCase().split(':')[0]) || /^[@~]/.test(model) || model.includes('*'))) throw new Error('OpenRouter 只允许添加具体模型 ID，不能自动选模或使用预设');
       if (row.enabled !== undefined && typeof row.enabled !== 'boolean') throw new Error('enabled 必须是布尔值');
       const provider = {name, api_key_env: env, default_base_url: base, models, enabled: row.enabled !== false};
+      if (row.generation !== undefined) provider.generation = window.ICourseGenerationPolicy.normalize(row.generation);
       if (row.base_url_env) {
         const baseEnv = String(row.base_url_env).trim().toUpperCase();
         if (!['DASHSCOPE_BASE_URL', 'DEEPSEEK_BASE_URL', 'GEMINI_BASE_URL'].includes(baseEnv) && !/^LLM_[A-Z0-9_]{1,80}_BASE_URL$/.test(baseEnv)) throw new Error('Base URL 环境变量名称无效');
@@ -244,7 +245,7 @@
     for (const courseId of ids(payload.course_ids)) {
       for (const row of db.getLectures(courseId)) if (row.transcript_available && !subIds.includes(String(row.sub_id))) subIds.push(String(row.sub_id));
     }
-    if (!subIds.length || subIds.length > 20) throw new Error(`已选择 ${subIds.length} 个课次；一次请选择 1–20 个有转录的课次`);
+    if (!subIds.length) throw new Error('请选择至少一个有转录的课次');
     for (const id of subIds) {
       if (id.length > 100 || id.includes(',') || !db.getLecture(id)?.transcript?.trim()) throw new Error(`课次没有可用转录或 ID 无效：${id}`);
     }
@@ -271,7 +272,7 @@
       courseIds.forEach(cid => db.getLectures(cid).forEach(row => {
         if (row.transcript_available && !selected.includes(String(row.sub_id))) selected.push(String(row.sub_id));
       }));
-      if (!selected.length || selected.length > 20) throw new Error(`已选择 ${selected.length} 个可重跑课次；一次请选择 1–20 个`);
+      if (!selected.length) throw new Error('请选择至少一个有转录的课次');
       const rows = selected.map(id => {
         const row = db.getLecture(id);
         if (!row?.transcript?.trim() || id.length > 100 || /[,\s]/.test(id)) throw new Error(`课次没有可用转录：${id}`);

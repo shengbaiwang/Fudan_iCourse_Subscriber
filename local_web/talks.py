@@ -59,7 +59,7 @@ from uuid import uuid4
 import certifi
 
 from src.ai.summary_prompt import SYSTEM_PROMPT, summary_user_content
-from src.ai.model_policy import IncompleteSummaryError, request_options, check_response
+from src.ai.model_policy import request_options, check_response, complete_with_recovery
 from src.ai.title import build_title_material, clean_title, split_generated_title
 
 from .state import default_config_dir
@@ -332,14 +332,15 @@ def chat_complete(
     api_key: str,
     system: str,
     user: str,
-    timeout: int = 180,
-    *, provider: dict | None = None, title: bool = False, budget: int = 32768,
+    timeout: int | None = None,
+    *, provider: dict | None = None, title: bool = False, budget: int | None = None,
 ) -> str:
     """One OpenAI-compatible ``POST /chat/completions`` call (stdlib only)."""
     endpoint = base_url.rstrip("/") + "/chat/completions"
     provider = provider or {"base_url": base_url, "models": [model]}
     options = request_options(provider, model, title=title, budget=budget)
-    timeout = options.pop("timeout", timeout)
+    configured_timeout = options.pop("timeout")
+    timeout = configured_timeout if timeout is None else timeout
     extra = options.pop("extra_body", {})
     payload = json.dumps({"model": model, "messages": [
         {"role": "system", "content": system},
@@ -384,15 +385,10 @@ def complete_talk(providers: list[dict], system: str, user: str, *, title=False)
     for provider in providers:
         for model in provider["models"]:
             try:
-                for budget in (32768, 65536):
-                    try:
-                        raw = chat_complete(provider["base_url"], model, provider["api_key"], system, user,
-                                            provider=provider, title=title, budget=budget)
-                    except IncompleteSummaryError as exc:
-                        if (exc.finish_reason == "length" and not title and budget == 32768
-                                and "max_completion_tokens" in request_options(provider, model)):
-                            continue
-                        raise
+                def call(options):
+                    budget = options.get("max_tokens", options.get("max_completion_tokens"))
+                    raw = chat_complete(provider["base_url"], model, provider["api_key"], system, user,
+                                        provider=provider, title=title, budget=budget)
                     if title:
                         if not clean_title(raw):
                             raise ValueError("模型没有返回可用标题")
@@ -400,8 +396,10 @@ def complete_talk(providers: list[dict], system: str, user: str, *, title=False)
                         _, body = split_summary_output(raw)
                         if not body.strip() or (raw.strip().startswith("# ") and not raw.strip().partition("\n")[2].strip()):
                             raise ValueError("模型只返回标题，没有笔记正文")
-                    return raw, f"{provider['name']}/{model}"
-            except (TalkLLMError, ValueError) as exc:
+                    return raw
+                raw, _options = complete_with_recovery(provider, model, call, title=title)
+                return raw, f"{provider['name']}/{model}"
+            except Exception as exc:
                 errors.append(f"{provider['name']}/{model}: {_redact(str(exc), provider['api_key'])}")
     raise TalkLLMError("所有已配置模型均失败：\n" + "\n".join(errors))
 

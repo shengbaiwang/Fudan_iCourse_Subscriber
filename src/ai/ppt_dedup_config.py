@@ -52,9 +52,8 @@ GARBAGE_THRESHOLD: int = 8
 
 # ── DHASH dedup config (Step 2) ─────────────────────────────────────────────
 # Used by dedup_dhash() after garbage-catalog matching — drops near-duplicate
-# frames among survivors.  Auto-raises threshold until survivors ≤ MAX_SURVIVORS.
-DHASH_THRESHOLD: int = 3     # initial max Hamming-distance bits to consider "duplicate"
-DHASH_MAX_SURVIVORS: int = 150  # auto-raise threshold until survivors ≤ this
+# frames among survivors. Page count never changes the similarity criterion.
+DHASH_THRESHOLD: int = 3     # max Hamming-distance bits to consider "duplicate"
 
 # ── Text subset dedup config ────────────────────────────────────────────────
 # Used by dedup_text_subset() after OCR — removes pages whose text is a

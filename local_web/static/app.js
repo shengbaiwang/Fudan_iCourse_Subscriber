@@ -2927,7 +2927,7 @@ function renderSubscriptions() {
     status.className = `meta subscription-check-state${paused || stopped ? " paused" : ""}`;
     status.textContent = stopped ? "已结课 · 笔记齐全 · 自动停止检查" : paused
       ? course.pause_scan_pending ? "已暂停 · 下次核对并补齐已有课次"
-        : `已暂停${course.pending_count ? ` · 待补齐 ${course.pending_count} 节` : " · 已停止每日检查"}${course.blocked_count ? ` · ${course.blocked_count} 节达到重试上限` : ""}`
+        : `已暂停${course.pending_count ? ` · 待补齐 ${course.pending_count} 节` : " · 已停止新课次检查"}${course.blocked_count ? ` · ${course.blocked_count} 节等待重试` : ""}`
       : `自动检查${course.pending_count ? ` · 待处理 ${course.pending_count} 节` : ""}`;
     if (course.total_count) status.textContent += ` · ${course.summary_count || 0}/${course.total_count} 篇笔记`;
     row.firstElementChild.append(status);
@@ -3192,6 +3192,7 @@ function normalizeProvider(item) {
     base_url: String(item.base_url || item.default_base_url || ""),
     api_key_env: apiKeyEnv,
     models: Array.isArray(item.models) ? item.models.map(String) : [],
+    generation: window.ICourseGenerationPolicy.normalize(item.generation),
     api_key: "",
     api_key_configured: Boolean(item.api_key_configured),
     configured_api_key_env: item.api_key_configured ? apiKeyEnv.toUpperCase() : "",
@@ -3598,6 +3599,36 @@ function renderModelProviders() {
     const summary = document.createElement("summary");
     summary.textContent = "高级设置";
     advanced.append(summary, secretField);
+    const generationFields = [
+      ["timeout_seconds", "笔记请求等待（秒）", 1, 86400],
+      ["title_timeout_seconds", "标题请求等待（秒）", 1, 86400],
+      ["max_retries", "临时故障重试次数", 0, 10],
+      ["retry_delay_seconds", "初始重试间隔（秒）", 0, 3600],
+      ["retry_max_delay_seconds", "退避等待上限（秒）", 0, 3600],
+      ["output_tokens", "初始输出预算（tokens）", 1, 2147483647],
+      ["max_output_tokens", "截断扩容上限（tokens）", 1, 2147483647],
+    ];
+    for (const [key, label, minimum, maximum] of generationFields) {
+      const input = document.createElement("input");
+      input.type = "number"; input.min = minimum; input.max = maximum; input.step = 1;
+      input.setAttribute("aria-label", label);
+      input.value = provider.generation[key];
+      input.addEventListener("input", () => {
+        provider.generation[key] = input.value === "" ? null : Number(input.value);
+        markModelsDirty();
+      });
+      advanced.append(createField(label, input));
+    }
+    const tokenParameter = document.createElement("select");
+    tokenParameter.setAttribute("aria-label", "输出预算参数");
+    for (const [value, label] of [["auto", "自动选择"], ["max_tokens", "max_tokens"], ["max_completion_tokens", "max_completion_tokens"]]) {
+      const option = document.createElement("option"); option.value = value; option.textContent = label;
+      tokenParameter.append(option);
+    }
+    tokenParameter.value = provider.generation.token_parameter;
+    tokenParameter.addEventListener("change", () => { provider.generation.token_parameter = tokenParameter.value; markModelsDirty(); });
+    advanced.append(createField("输出预算参数", tokenParameter,
+      "按供应商支持的预算范围设置；遇到截断会扩大预算重新生成，仍不完整时保留原笔记。"));
 
     const apiKeyInput = document.createElement("input");
     apiKeyInput.setAttribute("aria-label", "API Key");
@@ -3647,6 +3678,7 @@ function addModelProvider() {
     base_url: "",
     api_key_env: `LLM_CUSTOM_${suffix}_API_KEY`,
     models: [],
+    generation: window.ICourseGenerationPolicy.normalize(),
     api_key: "",
     api_key_configured: false,
     configured_api_key_env: "",
@@ -3670,6 +3702,8 @@ async function saveModelProviders() {
     message("请补全服务商名称、API 地址，并至少添加一个模型。", true); return;
   }
   if (!modelProviders.some(item => item.enabled)) { message("至少需要启用一个服务商。", true); return; }
+  try { modelProviders.forEach(item => window.ICourseGenerationPolicy.normalize(item.generation)); }
+  catch (error) { message(error.message, true); return; }
   if (!confirm("保存会更新 GitHub Actions 的模型配置，并写入本次填写的 API Key。继续吗？")) return;
   const button = $("#model-save-button");
   modelsSaving = true;
@@ -3683,6 +3717,7 @@ async function saveModelProviders() {
         base_url: window.ICourseProviderURLs.normalize(provider.base_url),
         api_key_env: provider.api_key_env.trim().toUpperCase(),
         models: provider.models.map((item) => item.trim()).filter(Boolean),
+        generation: window.ICourseGenerationPolicy.normalize(provider.generation),
       };
       if (provider.api_key.trim()) result.api_key = provider.api_key.trim();
       return result;
@@ -5107,7 +5142,7 @@ function updateRunSettings() {
   }
   $("#run-kind-hint").textContent = {
     process: "检查选中课程，跳过已完成的课次，继续未完成的处理。",
-    rerun: "复用转录与 PPT 文字重新生成，保留历史版本。可展开课程选课次，单次最多 20 节。",
+    rerun: "复用转录与 PPT 文字重新生成，保留历史版本。可选择整门课程，后台每批处理 20 节并逐节保存。",
     titles: "只为选中课程中缺少标题的笔记补齐标题。",
   }[kind];
   $("#single-run-official").disabled = kind !== "process";

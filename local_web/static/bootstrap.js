@@ -23,6 +23,7 @@
   });
   try {
     await script('provider-urls.js');
+    await script('generation-policy.js');
     await script('departments.js');
     await script('terms.js');
     await script('organization.js');

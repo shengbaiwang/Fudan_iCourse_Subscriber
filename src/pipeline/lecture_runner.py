@@ -334,7 +334,7 @@ class LectureRunner:
             # Truncated download (ffmpeg may even exit 0 on a server-side
             # cut).  Don't persist the partial transcript — it would
             # short-circuit the retry — just record the error so the
-            # lecture is retried up to max_errors times.
+            # lecture is retried after backoff until it succeeds.
             self._reporter.info(
                 f"    [SKIP] Incomplete audio, will retry next run: {e}"
             )

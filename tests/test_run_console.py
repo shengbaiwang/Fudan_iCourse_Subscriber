@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from local_web.database import DatabaseManager
 from local_web.github_client import BlobEntry, DataManifest, GitHubAPIError
 from local_web.runs import LocalRuns, LocalRunBusy
-from local_web.server import ProviderTestRequest, AutoCheckRequest, RunPreferencesRequest, RunRequest, create_app
+from local_web.server import ProviderTestRequest, AutoCheckRequest, RunPreferencesRequest, RunRequest, SummaryBatchRerunRequest, ModelProvidersRequest, create_app
 from local_web.state import RuntimeCredentials, RuntimeState, SettingsStore
 from local_web.talks import TalkStore
 from scripts.publish_progress import publish_database, snapshot_database
@@ -96,6 +96,53 @@ class RunEndpointsTest(unittest.TestCase):
         self.call("/api/local/runs", "POST", RunRequest(kind="titles", course_ids=["2"], provider="test", model="model"))
         self.assertEqual(self.gh.dispatches[-1][1]["inputs"]["backfill_titles"], "true")
         self.assertEqual(self.gh.dispatches[-1][1]["inputs"]["course_ids"], "2")
+
+    def test_full_course_rerun_selection_reaches_both_cloud_endpoints(self):
+        ids = [str(100 + i) for i in range(45)]
+        db = Database(str(self.db.db_path))
+        try:
+            for sid in ids:
+                db.insert_lecture(sid, "1", sid, "2026-09-01")
+                db.update_transcript(sid, "课程转录")
+        finally:
+            db.conn.close()
+        self.call("/api/local/runs", "POST", RunRequest(kind="rerun", sub_ids=ids))
+        self.assertEqual(self.gh.dispatches[-1][1]["inputs"]["resummarize_sub_ids"].split(","), ids)
+        self.call("/api/local/summary-reruns", "POST", SummaryBatchRerunRequest(course_ids=["1"]))
+        self.assertEqual(set(self.gh.dispatches[-1][1]["inputs"]["resummarize_sub_ids"].split(",")), set(ids + ["10", "11"]))
+
+    def test_local_full_course_rerun_preserves_the_complete_selection(self):
+        ids = [str(100 + i) for i in range(45)]
+        db = Database(str(self.db.db_path))
+        try:
+            for sid in ids:
+                db.insert_lecture(sid, "1", sid, "2026-09-01")
+                db.update_transcript(sid, "课程转录")
+        finally:
+            db.conn.close()
+        runs = self.app.state.local_runs
+        with patch("local_web.server.LocalAPIKeychain.load", return_value="synthetic-key"), \
+             patch.object(runs, "capabilities", return_value={"process_ready": True, "summary_ready": True}), \
+             patch.object(runs, "start", return_value={"id": "job"}) as start:
+            self.call("/api/local/runs", "POST", RunRequest(kind="rerun", target="local", sub_ids=ids))
+        self.assertEqual(start.call_args.args[0]["sub_ids"], ids)
+
+    def test_generation_settings_are_saved_returned_and_passed_to_local_jobs(self):
+        policy = {"timeout_seconds": 900, "max_retries": 4, "output_tokens": 8192, "max_output_tokens": 16384}
+        payload = ModelProvidersRequest(providers=[{**PROVIDER, "generation": policy}])
+        self.call("/api/local/model-providers", "PUT", payload)
+        saved = json.loads(self.gh.variables["MODEL_PROVIDERS_JSON"])
+        self.assertEqual(saved["providers"][0]["generation"]["timeout_seconds"], 900)
+        self.gh.repository_variable = lambda name: json.dumps(saved) if name == "MODEL_PROVIDERS_JSON" else None
+        endpoint = next(r.endpoint for r in self.app.routes if getattr(r, "path", None) == "/api/local/model-providers" and "GET" in r.methods)
+        returned = asyncio.run(endpoint())
+        self.assertEqual(returned["providers"][0]["generation"], saved["providers"][0]["generation"])
+        runs = self.app.state.local_runs
+        with patch("local_web.server.LocalAPIKeychain.load", return_value="synthetic-key"), \
+             patch.object(runs, "capabilities", return_value={"process_ready": True, "summary_ready": True}), \
+             patch.object(runs, "start", return_value={"id": "job"}) as start:
+            self.call("/api/local/runs", "POST", RunRequest(kind="rerun", target="local", sub_ids=["10"]))
+        self.assertEqual(start.call_args.args[2]["providers"][0]["generation"]["timeout_seconds"], 900)
 
     def test_all_cloud_task_kinds_ignore_legacy_model_overrides(self):
         for kind in ("process", "rerun", "titles"):

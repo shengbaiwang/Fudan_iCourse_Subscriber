@@ -272,7 +272,7 @@ def test_new_processing_stage_gets_its_own_attempt_budget(db, tmp_path):
     assert db.get_lecture('10')['error_count'] == 1
     merge(db.db_path, str(remote))
     with sqlite3.connect(remote) as conn:
-        assert conn.execute('SELECT error_stage,error_count,retry_after FROM lectures').fetchone() == ('summarize',1,None)
+        assert conn.execute('SELECT error_stage,error_count,retry_after FROM lectures').fetchone() == ('summarize',1,db.get_lecture('10')['retry_after'])
 
 
 def test_resigning_retains_business_query_and_replaces_old_auth():

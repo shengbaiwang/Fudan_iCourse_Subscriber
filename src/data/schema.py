@@ -124,6 +124,19 @@ def _summary_versions_pk(conn, schema: str) -> list[str]:
     return [r[1] for r in sorted((r for r in rows if r[5]), key=lambda r: r[5])]
 
 
+def migrate_processing_backoff(conn, schema: str = "main") -> None:
+    """Release legacy exclusions once, then retain new retry times on disk."""
+    if schema not in {"main", "local"}:
+        raise ValueError("Invalid schema")
+    conn.execute(f"CREATE TABLE IF NOT EXISTS {schema}.meta (key TEXT PRIMARY KEY, value TEXT)")
+    key = "processing_backoff_v1"
+    if not conn.execute(f"SELECT 1 FROM {schema}.meta WHERE key=?", (key,)).fetchone():
+        conn.execute(f"UPDATE {schema}.lectures SET retry_after=NULL")
+        conn.execute(f"INSERT INTO {schema}.meta (key,value) VALUES (?,?)", (key, "1"))
+    conn.execute(f"UPDATE {schema}.lectures SET retry_after=NULL "
+                 "WHERE error_stage IN ('no_video','video','video_access','process_timeout')")
+
+
 def migrate_summary_versions_table(conn, schema: str = "main") -> None:
     """Rebuild ``summary_versions`` with the per-rerun primary key, in place.
 
