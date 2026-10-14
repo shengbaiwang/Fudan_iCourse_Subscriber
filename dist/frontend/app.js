@@ -1797,16 +1797,13 @@ function renderLectureList() {
       error.textContent = lecture.error_msg === "no playable video URL"
         ? "尚未取得录播地址；更新后将自动复查，并尝试可用的官方转录"
         : lecture.error_msg;
-      if (lecture.retry_after) {
-        error.textContent += ` · 下次复查：${new Date(lecture.retry_after * 1000).toLocaleString("zh-CN")}`;
-      }
       left.append(error);
     }
     if (lecture.transcript_source === "official" || lecture.ppt_warning) {
       const material = document.createElement("p");
       material.textContent = [
         lecture.transcript_source === "official"
-          ? (lecture.recording_duration > 0 ? "官方转录 · 已通过独立录制时长校验" : "官方转录 · 平台未提供录播时长") : "",
+          ? "官方转录 · 直接采用平台文字" : "",
         lecture.ppt_warning ? `课件提示：${lecture.ppt_warning}` : "",
       ].filter(Boolean).join(" · ");
       left.append(material);
@@ -4936,10 +4933,12 @@ async function openDataActions(course, subId = null, action = "all") {
   dataActionCourse = course;
   $("#data-actions-dialog").dataset.action = action;
   $("#data-actions-title").textContent = `${action === "export" ? "导出 · " : action === "delete" ? "删除 · " : ""}${course.title || course.course_id}`;
+  const deletionDescription = isPages ? "删除会清除远端对应资料；运行完成后检查更新。"
+    : "提交成功后立即清除本机对应资料，并在远端执行删除。";
   $("#data-actions-description").textContent = action === "delete"
-    ? "删除会清除远端对应资料；运行完成后检查更新。"
+    ? deletionDescription
     : action === "export" ? "选择整门课程或指定课次，导出为 PDF、Markdown 或 HTML。"
-      : "选择整门课程或指定课次导出或删除。删除会清除远端对应资料；运行完成后检查更新。";
+      : `选择整门课程或指定课次导出或删除。${deletionDescription}`;
   const root = $("#data-actions-lectures");
   root.replaceChildren();
   lectures.sort(compareLectures).forEach(lecture => {
@@ -4965,15 +4964,37 @@ async function submitDataAction(deleting) {
   const subIds = [...$("#data-actions-lectures").querySelectorAll("input:checked")].map(input => input.value);
   if (!all && !subIds.length) { message("请至少选择一个课次。", true); return; }
   const scope = all ? "整门课程" : `${subIds.length} 个课次`;
-  if (!confirm(`${deleting ? "删除" : "导出"}「${dataActionCourse.title || dataActionCourse.course_id}」的${scope}？${deleting ? "远端资料将被清除，无法通过本页面撤销。" : "完成后可在运行页打开运行记录，从 Artifacts 下载文件。"}`)) return;
+  const notice = deleting ? `${isPages ? "远端" : "本机和远端"}资料将被清除，无法通过本页面撤销。`
+    : "完成后可在运行页打开运行记录，从 Artifacts 下载文件。";
+  if (!confirm(`${deleting ? "删除" : "导出"}「${dataActionCourse.title || dataActionCourse.course_id}」的${scope}？${notice}`)) return;
   const buttons = [$("#data-delete-button"), $("#data-export-button")];
   buttons.forEach(button => { button.disabled = true; });
   try {
     const inputs = deleting ? {course_ids: String(dataActionCourse.course_id)} : {course_id: String(dataActionCourse.course_id), export_type: $("#data-export-type").value};
     inputs.sub_ids = all ? "" : subIds.join(",");
-    await api(`/api/local/workflows/${deleting ? "delete_course.yml" : "export.yml"}/dispatch`, {method: "POST", body: JSON.stringify({ref: "main", inputs})});
+    const result = await api(`/api/local/workflows/${deleting ? "delete_course.yml" : "export.yml"}/dispatch`, {method: "POST", body: JSON.stringify({ref: "main", inputs})});
     $("#data-actions-dialog").close();
-    message(deleting ? "已提交删除；可在运行页查看运行状态。" : "已提交导出；完成后在运行页打开运行记录，从 Artifacts 下载文件（保留 7 天）。");
+    if (deleting && result.local_deleted) {
+      const deletedIds = all ? [...$("#data-actions-lectures").querySelectorAll("input")].map(input => input.value) : subIds;
+      window.dispatchEvent(new CustomEvent("sea-course-data-deleted", {detail: {subIds: deletedIds}}));
+      if (deletedIds.includes(String(currentLecture?.sub_id))) currentLecture = null;
+      await loadCourses();
+      if (String(currentCourse?.course_id) === String(dataActionCourse.course_id)) {
+        const remaining = courseRows.find(course => String(course.course_id) === String(dataActionCourse.course_id));
+        if (!remaining) {
+          currentCourse = null;
+          currentLecture = null;
+          courseLectures = [];
+          showView("courses");
+        } else if (["lectures", "detail"].includes(activeView)) {
+          await openCourse(remaining);
+        }
+      }
+      await refreshStatus();
+    }
+    if (deleting) message(result.local_deleted ? "本机所选资料已删除；远端删除可在运行页查看状态。"
+      : "已提交删除；可在运行页查看运行状态。");
+    else message("已提交导出；完成后在运行页打开运行记录，从 Artifacts 下载文件（保留 7 天）。");
   } catch (error) { message(error.message, true); }
   finally { buttons.forEach(button => { button.disabled = false; }); }
 }

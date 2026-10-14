@@ -313,7 +313,7 @@ class LectureRunner:
             if fallback[0] is not None:
                 return fallback
             # Compatibility with downloaders that return None for a genuinely
-            # missing recording. Availability checks use a bounded cooldown.
+            # missing recording. Retry availability on the next check.
             self._reporter.lecture_skip_no_video(
                 existing.get("sub_title", sub_id) if existing else sub_id
             )

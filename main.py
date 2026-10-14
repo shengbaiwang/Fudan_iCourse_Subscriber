@@ -96,7 +96,7 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
             if pause_token and pause_scans.get(course_id) == pause_token:
                 course = db.get_course(course_id) or {}
                 title = course.get("title") or course_id
-                pending = ordered_lectures(db.get_unprocessed_lectures(course_id, include_deferred=force_video_recheck), config.LECTURE_ORDER)
+                pending = ordered_lectures(db.get_unprocessed_lectures(course_id), config.LECTURE_ORDER)
                 blocked = db.get_exhausted_sub_ids(course_id)
                 reporter.info(f"[Auto check] {title}: 已暂停新课次检查，待补齐 {len(pending)} 节"
                               + (f"，{len(blocked)} 节达到重试上限" if blocked else ""))
@@ -129,14 +129,12 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
 
             known_processed = db.get_processed_sub_ids(course_id)
             exhausted = db.get_exhausted_sub_ids(course_id)
-            deferred = set() if force_video_recheck else db.get_deferred_sub_ids(course_id)
             new_lectures = [
                 lec for lec in lectures
                 if str(lec["sub_id"]) not in known_processed
                 and str(lec["sub_id"]) not in exhausted
-                and str(lec["sub_id"]) not in deferred
             ]
-            unprocessed = db.get_unprocessed_lectures(course_id, include_deferred=force_video_recheck)
+            unprocessed = db.get_unprocessed_lectures(course_id)
             new_ids = {str(lec["sub_id"]) for lec in new_lectures}
             retry_only = [
                 {"sub_id": u["sub_id"], "sub_title": u["sub_title"],
@@ -170,7 +168,7 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
                     lec.get("date") and lec["date"] <= today.isoformat() for lec in lectures
                 ):
                     # A successful final discovery is retained. Completeness
-                    # is checked live, including deferred and exhausted rows.
+                    # is checked live, including unavailable and exhausted rows.
                     finished_terms[course_id] = status["term_end_date"]
                     db.write_meta(FINISHED_TERMS_META, json.dumps(finished_terms))
         except Exception:
@@ -311,7 +309,7 @@ def run():
     if config.COURSE_IDS and not needs_catalog and all(
         (statuses.get(cid, {}).get("auto_check_stopped")
          or cid in config.AUTO_CHECK_PAUSES and scans.get(cid) == config.AUTO_CHECK_PAUSES[cid])
-        and not db.get_unprocessed_lectures(cid, include_deferred=config.VIDEO_RECHECK_NOW) for cid in config.COURSE_IDS
+        and not db.get_unprocessed_lectures(cid) for cid in config.COURSE_IDS
     ):
         reporter.info("订阅课程均已暂停且没有可自动补齐的课次，跳过平台登录与检查。")
         reporter.run_footer()

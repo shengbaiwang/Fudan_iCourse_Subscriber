@@ -92,12 +92,13 @@ def db(tmp_path):
 
 
 @pytest.mark.parametrize('paused', [True, False])
-def test_legacy_no_video_backlog_revives_and_cooldown_cannot_be_bypassed(db, monkeypatch, paused):
+@pytest.mark.parametrize('stage', ['no_video', 'video', 'video_access', 'process_timeout'])
+def test_unavailable_backlog_retries_on_every_check(db, monkeypatch, paused, stage):
     monkeypatch.setattr(config, 'COURSE_IDS', ['1'])
     monkeypatch.setattr(config, 'AUTO_CHECK_PAUSES', {'1': 'paused'} if paused else {})
     monkeypatch.setattr(config, 'LECTURE_ORDER', 'api')
     with db.conn:
-        db.conn.execute("UPDATE lectures SET error_stage='no_video', error_count=78")
+        db.conn.execute("UPDATE lectures SET error_stage=?, error_count=78, retry_after=2000000000", (stage,))
     if paused:
         db.write_meta('auto_check_pause_scans', '{"1":"paused"}')
     value = Mock()
@@ -105,12 +106,31 @@ def test_legacy_no_video_backlog_revives_and_cooldown_cannot_be_bypassed(db, mon
     value.get_course_detail.return_value = {'title':'课程', 'teacher':'老师', 'lectures':[
         {'sub_id':'10', 'sub_title':'第一课', 'date':'2026-09-11', 'has_playback':True}]}
     assert [row[2]['sub_id'] for row in main._enumerate_lectures(value, db, Mock())] == ['10']
-    db.update_error('10', 'no_video', '等待发布')
-    retry_at = db.get_lecture('10')['retry_after']
+    db.update_error('10', stage, '来源仍不可用')
+    assert db.get_lecture('10')['retry_after'] is None
     assert db.get_exhausted_sub_ids('1') == set()
-    assert main._enumerate_lectures(value, db, Mock()) == []
-    monkeypatch.setattr('src.data.database.time.time', lambda: retry_at + 1)
+    assert [row['sub_id'] for row in db.get_unprocessed_lectures('1')] == ['10']
     assert [row[2]['sub_id'] for row in main._enumerate_lectures(value, db, Mock())] == ['10']
+    db.update_error('10', stage, '来源仍不可用')
+    assert [row[2]['sub_id'] for row in main._enumerate_lectures(value, db, Mock())] == ['10']
+
+
+@pytest.mark.parametrize('stage', ['no_video', 'video', 'video_access', 'process_timeout'])
+def test_opening_legacy_database_clears_waits_and_preserves_checkpoints(db, stage):
+    db.update_error('10', stage, '来源仍不可用')
+    db.update_transcript('10', '已保存的转录')
+    db.update_ppt_warning('10', '课件暂不可读')
+    with db.conn:
+        db.conn.execute("UPDATE lectures SET error_count=78, retry_after=2000000000 WHERE sub_id='10'")
+    reopened = Database(db.db_path)
+    try:
+        row = reopened.get_lecture('10')
+        assert row['retry_after'] is None
+        assert (row['error_stage'], row['error_count']) == (stage, 78)
+        assert row['transcript'] == '已保存的转录' and row['ppt_warning'] == '课件暂不可读'
+        assert [lecture['sub_id'] for lecture in reopened.get_unprocessed_lectures('1')] == ['10']
+    finally:
+        reopened.conn.close()
 
 
 def make_runner(db, error, segments, duration=3600):
@@ -150,7 +170,8 @@ def test_recovery_uses_any_nonempty_official_text(db, monkeypatch, kind):
     text, _ = value._get_transcript(db.get_lecture('10'), '1', '10')
     row = db.get_lecture('10')
     if kind in ('empty','blank'):
-        assert text is None and not row['transcript'] and row['error_stage'] == 'video_access' and row['retry_after']
+        assert text is None and not row['transcript'] and row['error_stage'] == 'video_access'
+        assert row['retry_after'] is None
     else:
         assert text == ' '.join(s['text'] for s in segments) and row['transcript_source'] == 'official'
 
@@ -162,27 +183,35 @@ def test_api_failure_can_recover_with_independently_verified_official_text(db, m
     assert db.get_lecture('10')['transcript_source'] == 'official'
 
 
-def test_cooldown_survives_shards_merge_and_success_clears_it(db, tmp_path):
+def test_legacy_waiting_times_do_not_return_from_shards_and_merge(db, tmp_path):
     db.update_error('10', 'no_video', '等待发布')
     db.update_recording_duration('10', 3600, 'sub-info.video_duration_seconds')
     db.update_ppt_warning('10', '课件清单读取失败（TimeoutError）')
-    retry_at = db.get_lecture('10')['retry_after']
+    with db.conn:
+        db.conn.execute("UPDATE lectures SET retry_after=2000000000 WHERE sub_id='10'")
     directory = tmp_path / 'shards'
     index = shard_database(db.db_path, str(directory), 'synthetic-password')
     restored = tmp_path / 'restored.db'
     reassemble_database(index, str(directory / 'shards'), str(restored), 'synthetic-password')
+    with sqlite3.connect(restored) as conn:
+        assert conn.execute('SELECT retry_after FROM lectures').fetchone()[0] == 2000000000
+    # Exercise both existing-row merges and inserts from old snapshots.
+    db.insert_lecture('11', '1', '第二课', '2026-09-18')
+    db.update_error('11', 'video_access', '等待权限')
+    with db.conn:
+        db.conn.execute("UPDATE lectures SET retry_after=2000000000 WHERE sub_id='11'")
     merge(db.db_path, str(restored))
     with sqlite3.connect(restored) as conn:
-        assert conn.execute('SELECT retry_after FROM lectures').fetchone()[0] == retry_at
+        assert conn.execute('SELECT sub_id, retry_after FROM lectures ORDER BY sub_id').fetchall() == [('10', None), ('11', None)]
     db.update_transcript('10', '完整转录', source='official')
     db.update_summary('10', '恢复笔记', 'test/model')
     db.mark_processed('10')
     db.clear_error('10')
     merge(db.db_path, str(restored))
     with sqlite3.connect(restored) as conn:
-        assert conn.execute('SELECT error_stage, error_count, retry_after FROM lectures').fetchone() == (None, 0, None)
-        assert conn.execute('SELECT summary FROM lectures').fetchone()[0] == '恢复笔记'
-        assert conn.execute('SELECT recording_duration, recording_duration_source, transcript_source, ppt_warning FROM lectures').fetchone() == (
+        assert conn.execute("SELECT error_stage, error_count, retry_after FROM lectures WHERE sub_id='10'").fetchone() == (None, 0, None)
+        assert conn.execute("SELECT summary FROM lectures WHERE sub_id='10'").fetchone()[0] == '恢复笔记'
+        assert conn.execute("SELECT recording_duration, recording_duration_source, transcript_source, ppt_warning FROM lectures WHERE sub_id='10'").fetchone() == (
             3600, 'sub-info.video_duration_seconds', 'official', '课件清单读取失败（TimeoutError）')
 
 
@@ -258,14 +287,16 @@ def test_resigning_retains_business_query_and_replaces_old_auth():
     assert query['clientUUID'] != ['old']
 
 
-def test_explicit_manual_processing_can_recheck_before_cooldown(db, monkeypatch):
+@pytest.mark.parametrize('manual', [False, True])
+def test_checks_ignore_legacy_waiting_times(db, monkeypatch, manual):
     monkeypatch.setattr(config, 'COURSE_IDS', ['1'])
     monkeypatch.setattr(config, 'AUTO_CHECK_PAUSES', {})
     monkeypatch.setattr(config, 'LECTURE_ORDER', 'api')
     db.update_error('10','video_access','等待观看权限')
+    with db.conn:
+        db.conn.execute("UPDATE lectures SET retry_after=2000000000 WHERE sub_id='10'")
     value = Mock()
     value.check_alive.return_value = True
     value.get_course_detail.return_value = {'title':'课程','teacher':'老师','lectures':[
         {'sub_id':'10','sub_title':'第一课','date':'2026-09-11','has_playback':True}]}
-    assert main._enumerate_lectures(value, db, Mock()) == []
-    assert [row[2]['sub_id'] for row in main._enumerate_lectures(value, db, Mock(), force_video_recheck=True)] == ['10']
+    assert [row[2]['sub_id'] for row in main._enumerate_lectures(value, db, Mock(), force_video_recheck=manual)] == ['10']

@@ -10,6 +10,7 @@ import webbrowser
 import json
 import os
 import secrets
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any, Literal
@@ -750,8 +751,9 @@ def create_app(
         # Secrets cannot be read back from GitHub.  Prefer the explicit local
         # save, otherwise use the non-secret snapshot embedded in the data DB.
         course_ids = list(runtime.subscription_ids)
-        source = "local-save" if course_ids else "data-snapshot"
-        if not course_ids and db.db_path.is_file():
+        saved_selection = runtime.subscriptions_saved or bool(course_ids)
+        source = "local-save" if saved_selection else "data-snapshot"
+        if not saved_selection and db.db_path.is_file():
             course_ids = await run_in_threadpool(db.subscription_ids)
         pauses = runtime.auto_check_pauses
         try:
@@ -1317,6 +1319,15 @@ def create_app(
     async def dispatch(workflow: str, payload: DispatchRequest):
         if workflow not in ALLOWED_WORKFLOWS:
             raise HTTPException(status_code=400, detail="不允许触发该 workflow")
+        course_ids, sub_ids = [], []
+        if workflow == "delete_course.yml":
+            course_ids = normalized_subscription_ids(payload.inputs.get("course_ids", "").split(","))
+            raw_sub_ids = payload.inputs.get("sub_ids", "").strip()
+            sub_ids = normalized_subscription_ids(raw_sub_ids.split(",")) if raw_sub_ids else []
+            if any(job["status"] in {"queued", "in_progress"} and
+                   set(job["course_ids"]).intersection(course_ids)
+                   for job in app.state.local_runs.list()):
+                raise HTTPException(status_code=409, detail="课程正在本机处理，请先停止任务再删除")
         try:
             await run_in_threadpool(
                 client().dispatch_workflow,
@@ -1326,7 +1337,13 @@ def create_app(
             )
         except GitHubAPIError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return {"ok": True}
+        local_deleted = workflow == "delete_course.yml" and db.db_path.is_file()
+        if local_deleted:
+            try:
+                await run_in_threadpool(db.delete_course_data, course_ids, sub_ids, runtime.credentials)
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                raise HTTPException(status_code=500, detail="远端删除已提交，本机资料清理失败；请稍后重试") from exc
+        return {"ok": True, "local_deleted": local_deleted}
 
     # ``create_app`` is called once by the local console process.  Start its
     # one background freshness check here, rather than from the status route

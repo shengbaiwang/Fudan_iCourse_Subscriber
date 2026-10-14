@@ -3,7 +3,6 @@
 import os
 import sqlite3
 import threading
-import time
 from datetime import datetime, timezone
 
 from src.runtime import config
@@ -76,8 +75,8 @@ class Database:
                     "AND error_msg LIKE '%缺少带明确单位的独立录制时长%'")
                 self.conn.execute("INSERT INTO meta (key,value) VALUES (?,?)", (migration, "1"))
 
-            # Official text is now used directly. Release only cooldowns from
-            # the removed text/timing gate; genuinely unavailable sources wait.
+            # Official text is now used directly. Reset errors from the removed
+            # text/timing gate once.
             migration = "official_transcript_direct_v1"
             if not self.conn.execute("SELECT 1 FROM meta WHERE key=?", (migration,)).fetchone():
                 self.conn.execute(
@@ -88,6 +87,10 @@ class Database:
                     "OR error_msg LIKE '%官方转录缺少课程%' "
                     "OR error_msg LIKE '%官方转录中间存在%')")
                 self.conn.execute("INSERT INTO meta (key,value) VALUES (?,?)", (migration, "1"))
+
+            # Keep the legacy column for old snapshots, but discard their
+            # waiting times: every check can retry unavailable materials.
+            self.conn.execute("UPDATE lectures SET retry_after=NULL WHERE retry_after IS NOT NULL")
 
             existing_ppt = {
                 row[1]
@@ -254,22 +257,12 @@ class Database:
             ).fetchall()
         return {row["sub_id"] for row in rows}
 
-    def get_deferred_sub_ids(self, course_id: str) -> set[str]:
-        """Recordings waiting for the next bounded availability check."""
-        with self._lock:
-            rows = self.conn.execute(
-                "SELECT sub_id FROM lectures WHERE course_id = ? "
-                "AND processed_at IS NULL AND retry_after > ?",
-                (course_id, int(time.time())),
-            ).fetchall()
-        return {row["sub_id"] for row in rows}
-
     def get_unprocessed_lectures(self, course_id: str | None = None,
-                                  max_errors: int = 3, *, include_deferred: bool = False) -> list[dict]:
+                                  max_errors: int = 3) -> list[dict]:
         """Return lectures that need (re-)processing.
 
         Processing failures stop after *max_errors*. Missing recordings and
-        video API failures keep retrying with a cooldown, including legacy
+        video API failures retry on every check, including legacy
         ``no_video`` rows that already exceeded the old three-attempt limit.
         """
         query = (
@@ -279,9 +272,6 @@ class Database:
             "        OR error_stage IN ('no_video', 'video', 'video_access', 'process_timeout'))"
         )
         params: tuple = (max_errors,)
-        if not include_deferred:
-            query += " AND (retry_after IS NULL OR retry_after <= ?)"
-            params += (int(time.time()),)
         if course_id:
             query += " AND course_id = ?"
             params += (course_id,)
@@ -333,21 +323,13 @@ class Database:
                 "SELECT error_count, error_stage FROM lectures WHERE sub_id = ?", (sub_id,),
             ).fetchone()
             attempts = (row[0] or 0) + 1 if row and row[1] == stage else 1
-            # Missing recordings may be published much later. Keep checking,
-            # but avoid doing network/OCR work on every manual or daily run.
-            delays = {"no_video": (6 * 3600, 86400, 7 * 86400),
-                      "video": (3600, 4 * 3600, 86400),
-                      "video_access": (7 * 86400,) * 3,
-                      "process_timeout": (3600, 4 * 3600, 86400)}
-            retry_after = (int(time.time()) + delays[stage][min(attempts - 1, 2)]
-                           if stage in delays else None)
             self.conn.execute(
                 """UPDATE lectures
                    SET error_stage = ?, error_msg = ?,
                        error_count = ?,
-                       retry_after = ?
+                       retry_after = NULL
                    WHERE sub_id = ?""",
-                (stage, error_msg, attempts, retry_after, sub_id),
+                (stage, error_msg, attempts, sub_id),
             )
 
     def clear_error(self, sub_id: str):

@@ -74,6 +74,8 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   const blockedRun = {id:42,name:'iCourse Check',status:'completed',conclusion:'action_required',
     event:'schedule',created_at:new Date().toISOString(),html_url:'https://github.com/alice/fork/actions/runs/42'};
   let autoCheckPauses = {};
+  let localDeleteRejected = false;
+  const deletedLocalCourses = new Set(), deletedLocalLectures = new Set();
   const server = http.createServer((req,res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     const relative = pathname.replace(/^\/(fork|local)\//, '') || 'index.html';
@@ -138,7 +140,8 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
           return json({jobs:localJobs});
         }
         if(p==='/runs/local-job/cancel') {localJobs[0].status='cancelled';return json(localJobs[0]);}
-        if (p==='/courses') return json(courses);
+        if (p==='/courses') return json(courses.filter(course => !deletedLocalCourses.has(course.course_id)).map(course => ({...course,
+          total_count:course.total_count - rows('SELECT sub_id FROM lectures WHERE course_id=?',[course.course_id]).filter(row=>deletedLocalLectures.has(row.sub_id)).length})));
         if (p.startsWith('/notebook')) return json([]);
         if (p==='/lecture-names') {if(request.method()==='PUT') {const body=request.postDataJSON();names[body.sub_id]=body.name;} return json({names});}
         if (p==='/lecture-holidays') {
@@ -160,7 +163,8 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
           return json({zones,sections,revision:sectionsRevision,default_zone:'unassigned'});
         }
         if (p==='/workflows') return json([blockedRun]);
-        if (p==='/courses/1/lectures') return json(lectures);
+        if (p==='/courses/1/lectures') return json(lectures.filter(row=>!deletedLocalLectures.has(row.sub_id)));
+        if (p==='/courses/2/lectures') return json(rows("SELECT * FROM lectures WHERE course_id='2'"));
         if (p==='/lectures/10') return json(lecture);
         if (p==='/model-providers') return json({source:'github-variable',providers:[provider]});
         if (p==='/search') {
@@ -190,7 +194,22 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
           return json({terms:['2026-秋','2026-春'],total,page,page_size:size,has_more:page*size<total,
             courses:rows(`SELECT course_id,term,title,teacher,dept FROM all_courses WHERE ${where} ORDER BY term DESC,title COLLATE NOCASE,course_id LIMIT ? OFFSET ?`,[...params,size,(page-1)*size])});
         }
-        if (p.endsWith('/dispatch')) {dispatches.push({path:p,body:request.postDataJSON()});return json({ok:true});}
+        if (p.endsWith('/dispatch')) {
+          const body = request.postDataJSON();
+          if (p==='/workflows/delete_course.yml/dispatch') {
+            if (localDeleteRejected) return route.fulfill({status:502,json:{detail:'合成删除提交失败'}});
+            const courseIds = body.inputs.course_ids.split(','), subIds = body.inputs.sub_ids.split(',').filter(Boolean);
+            courseIds.forEach(cid => {
+              if (!subIds.length) deletedLocalCourses.add(cid);
+              rows('SELECT sub_id FROM lectures WHERE course_id=?',[cid]).forEach(row => {
+                if (!subIds.length || subIds.includes(row.sub_id)) deletedLocalLectures.add(row.sub_id);
+              });
+            });
+            localRevision++;
+          }
+          dispatches.push({path:p,body});
+          return json({ok:true,local_deleted:p==='/workflows/delete_course.yml/dispatch'});
+        }
         throw new Error(`Unexpected local request: ${p}`);
       }
       if (url.origin===origin) return route.continue();
@@ -712,7 +731,8 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       assert.match(await page.locator('.lecture-open').first().innerText(), /第6-8节/);
       assert.equal(await page.getByText('暂无录播',{exact:true}).count(),1);
       assert.equal(await page.getByText('no playable video URL',{exact:true}).count(),0);
-      assert.equal(await page.getByText(/尚未取得录播地址.*下次复查/).count(),1);
+      assert.equal(await page.getByText(/尚未取得录播地址；更新后将自动复查/).count(),1);
+      assert.equal(await page.getByText(/下次.*复查/).count(),0);
       assert.equal(await page.getByText(/官方转录 · 直接采用平台文字.*课件提示：课件清单读取失败/).count(),1);
       assert.equal(await page.evaluate(() => lectureStateLabel({error_stage:'video_access'})), '录播无权限');
       assert.equal(await page.evaluate(() => lectureStateLabel({error_stage:'video'})), '录播准备待重试');
@@ -1155,6 +1175,37 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         await page.locator('#forget-credentials-button').click();
         await page.locator('#setup:not(.hidden)').waitFor();
         assert.equal(await page.locator('#detail-content').innerText(),'');
+      }
+      if (mode==='local') {
+        await page.setViewportSize({width:1280,height:900});
+        await page.locator('.desktop-nav [data-view="courses"]').click();
+        await page.locator('#course-sidebar [data-filter-kind="all"]').click();
+        await page.locator('.course-card[data-course-id="2"] .course-more-button').click();
+        await page.getByRole('menuitem',{name:'删除…',exact:true}).click();
+        localDeleteRejected = true;
+        await page.locator('#data-delete-button').click();
+        await page.waitForFunction(()=>document.querySelector('#message').textContent.includes('合成删除提交失败'));
+        assert.equal(await page.locator('#data-actions-dialog').isVisible(),true);
+        assert.equal(await page.locator('.course-card[data-course-id="2"]').count(),1);
+        localDeleteRejected = false;
+        await page.locator('#data-delete-button').click();
+        await page.waitForFunction(()=>!document.querySelector('.course-card[data-course-id="2"]'));
+        assert.equal(dispatches.at(-1).body.inputs.course_ids,'2');
+        assert.equal(dispatches.at(-1).body.inputs.sub_ids,'');
+        await page.waitForFunction(()=>document.querySelector('#message').textContent.includes('本机所选资料已删除'));
+        assert.match(await page.locator('#message').innerText(),/本机所选资料已删除/);
+        await page.reload();
+        await page.locator('.course-card[data-course-id="1"]').waitFor();
+        assert.equal(await page.locator('.course-card[data-course-id="2"]').count(),0);
+        await page.evaluate(()=>openLecture('10'));
+        await page.locator('#detail-data-actions').click();
+        await page.locator('#data-delete-button').click();
+        await page.waitForFunction(()=>document.querySelector('#view-lectures:not(.hidden)'));
+        assert.equal(dispatches.at(-1).body.inputs.sub_ids,'10');
+        assert.equal(await page.locator('.lecture-card[data-sub-id="10"]').count(),0);
+        assert.equal(await page.locator('.lecture-card[data-sub-id="11"]').count(),1);
+        assert.equal(await page.locator('#continue-reading').isVisible(),false);
+        deletedLocalCourses.clear(); deletedLocalLectures.clear();
       }
       assert.deepEqual(errors,[]);
       assert.deepEqual(approvalRequests,[]);

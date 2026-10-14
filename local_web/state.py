@@ -217,12 +217,15 @@ class SubscriptionSettingsStore:
         self.path = self.directory / "subscriptions.json"
 
     def load(self) -> list[str]:
+        return self.load_saved_selection() or []
+
+    def load_saved_selection(self) -> list[str] | None:
         try:
             raw = json.loads(self.path.read_text("utf-8"))
-            values = raw.get("course_ids") if isinstance(raw, dict) else []
-            return _normalize_course_ids(values if isinstance(values, list) else [])
+            values = raw.get("course_ids") if isinstance(raw, dict) else None
+            return _normalize_course_ids(values) if isinstance(values, list) else None
         except (OSError, ValueError, TypeError):
-            return []
+            return None
 
     def load_auto_check_pauses(self) -> dict[str, str] | None:
         try:
@@ -521,7 +524,9 @@ class RuntimeState:
         self.lecture_holiday_store = LectureHolidayStore(self.store.directory)
         self.lecture_holidays = self.lecture_holiday_store.load(self.settings)
         self.obsidian_settings = self.obsidian_store.load()
-        self.subscription_ids = self.subscription_store.load()
+        saved_selection = self.subscription_store.load_saved_selection()
+        self.subscription_ids = saved_selection or []
+        self.subscriptions_saved = saved_selection is not None
         self.auto_check_pauses = self.subscription_store.load_auto_check_pauses()
         organization = self.course_zone_store.load_state()
         self.course_zones = organization["zones"]
@@ -586,8 +591,9 @@ class RuntimeState:
     def save_subscription_ids(self, course_ids: list[str]) -> None:
         values = _normalize_course_ids(course_ids)
         with self.lock:
-            self.subscription_ids = values
             self.subscription_store.save(values)
+            self.subscription_ids = values
+            self.subscriptions_saved = True
 
     def save_auto_check_pauses(self, pauses: dict[str, str]) -> None:
         with self.lock:

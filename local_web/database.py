@@ -157,12 +157,13 @@ class DatabaseManager:
                 self.commit_sha = None
             return True
 
-    def _persist_encrypted(self, credentials: RuntimeCredentials) -> None:
-        if not self.db_path.is_file():
+    def _persist_encrypted(self, credentials: RuntimeCredentials, source: Path | None = None) -> None:
+        source = source or self.db_path
+        if not source.is_file():
             raise DatabaseNotReady("没有可持久化的数据库")
         self.library_dir.mkdir(parents=True, exist_ok=True)
         password = derive_new_password(credentials.stuid, credentials.uispsw)
-        encrypted = encrypt(self.db_path.read_bytes(), password)
+        encrypted = encrypt(source.read_bytes(), password)
         temporary = self.persistent_db_path.with_suffix(".next")
         temporary.write_bytes(encrypted)
         try:
@@ -196,6 +197,13 @@ class DatabaseManager:
         """Make a finished local note visible and durable before the next one."""
         from .note_merge import merge_note
         with self._lock:
+            with closing(sqlite3.connect(source)) as incoming:
+                row = incoming.execute(
+                    "SELECT course_id FROM lectures WHERE sub_id=?", (sub_id,)
+                ).fetchone()
+            if row and any(cid == row[0] and (not sid or sid == sub_id)
+                           for cid, sid in self._pending_deletions(self.db_path)):
+                return
             overlay = self._temp_dir / "local-notes.db"
             password = derive_new_password(credentials.stuid, credentials.uispsw)
             if not overlay.is_file() and self.overlay_path.is_file():
@@ -208,6 +216,66 @@ class DatabaseManager:
             os.chmod(temporary, 0o600)
             temporary.replace(self.overlay_path)
             self._persist_encrypted(credentials)
+            self.revision += 1
+
+    @staticmethod
+    def _pending_deletions(path: Path) -> list[tuple[str, str]]:
+        if not path.is_file():
+            return []
+        with closing(sqlite3.connect(path)) as conn:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='local_deletions'").fetchone():
+                return []
+            return conn.execute("SELECT course_id, sub_id FROM local_deletions").fetchall()
+
+    @staticmethod
+    def _delete_course_data(path: Path, selections: list[tuple[str, str]]) -> None:
+        """Delete dependent rows by course as well as sub_id, including old schemas."""
+        with closing(sqlite3.connect(path)) as conn, conn:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for course_id, sub_id in selections:
+                params = (course_id, sub_id) if sub_id else (course_id,)
+                where = "course_id=?" + (" AND sub_id=?" if sub_id else "")
+                lecture_ids = [row[0] for row in conn.execute(f"SELECT sub_id FROM lectures WHERE {where}", params)]
+                for table in ("ppt_pages", "summary_versions"):
+                    if table in tables:
+                        conn.execute(f"DELETE FROM {table} WHERE sub_id IN "
+                                     f"(SELECT sub_id FROM lectures WHERE {where})", params)
+                for sid in lecture_ids:
+                    for stage in ("audio", "segments", "ocr"):
+                        conn.execute("DELETE FROM meta WHERE key=?", (f"local:{sid}:{stage}",))
+                conn.execute(f"DELETE FROM lectures WHERE {where}", params)
+                # Explicit whole-course deletion also handles courses without lectures.
+                if not sub_id or lecture_ids:
+                    conn.execute("DELETE FROM courses WHERE course_id=? AND NOT EXISTS "
+                                 "(SELECT 1 FROM lectures WHERE course_id=?)", (course_id, course_id))
+
+    def delete_course_data(self, course_ids: list[str], sub_ids: list[str],
+                           credentials: RuntimeCredentials) -> None:
+        """Apply an accepted cloud deletion locally and keep stale syncs from undoing it."""
+        from scripts.publish_progress import snapshot_database
+        selections = ([(cid, sid) for cid in course_ids for sid in sub_ids]
+                      if sub_ids else [(cid, "") for cid in course_ids])
+        with self._lock:
+            next_db = self._temp_dir / "icourse.delete.db"
+            snapshot_database(self.db_path, next_db)
+            self._delete_course_data(next_db, selections)
+            with closing(sqlite3.connect(next_db)) as conn, conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS local_deletions "
+                             "(course_id TEXT NOT NULL, sub_id TEXT NOT NULL, PRIMARY KEY(course_id,sub_id))")
+                conn.executemany("INSERT OR IGNORE INTO local_deletions VALUES (?,?)", selections)
+            password = derive_new_password(credentials.stuid, credentials.uispsw)
+            if self.overlay_path.is_file():
+                overlay = self._temp_dir / "local-notes.delete.db"
+                overlay.write_bytes(decrypt(self.overlay_path.read_bytes(), password))
+                self._delete_course_data(overlay, selections)
+                temporary = self.overlay_path.with_suffix(".next")
+                temporary.write_bytes(encrypt(overlay.read_bytes(), password))
+                os.chmod(temporary, 0o600)
+                temporary.replace(self.overlay_path)
+                # accept_run_note must not reuse the pre-delete plaintext overlay.
+                (self._temp_dir / "local-notes.db").unlink(missing_ok=True)
+            self._persist_encrypted(credentials, next_db)
+            next_db.replace(self.db_path)
             self.revision += 1
 
     def sync(
@@ -250,6 +318,18 @@ class DatabaseManager:
 
             next_db = self._temp_dir / "icourse.next.db"
             reassemble_database(index, str(shard_dir), str(next_db), password)
+            # Retain deletion markers until the remote snapshot confirms removal.
+            # Later explicit runs can then add fresh material for the same course.
+            pending = []
+            with closing(sqlite3.connect(next_db)) as conn:
+                for cid, sid in self._pending_deletions(self.db_path):
+                    if sid:
+                        exists = conn.execute("SELECT 1 FROM lectures WHERE course_id=? AND sub_id=?",
+                                              (cid, sid)).fetchone()
+                    else:
+                        exists = conn.execute("SELECT 1 FROM courses WHERE course_id=?", (cid,)).fetchone()
+                    if exists:
+                        pending.append((cid, sid))
             # Local results survive future cloud refreshes and restarts.
             # Newer remote summaries still win; historical versions are unioned.
             if self.overlay_path.is_file():
@@ -257,6 +337,12 @@ class DatabaseManager:
                 overlay = self._temp_dir / "local-notes.db"
                 overlay.write_bytes(decrypt(self.overlay_path.read_bytes(), password))
                 merge_local_notes(overlay, next_db)
+            if pending:
+                self._delete_course_data(next_db, pending)
+                with closing(sqlite3.connect(next_db)) as conn, conn:
+                    conn.execute("CREATE TABLE local_deletions "
+                                 "(course_id TEXT NOT NULL, sub_id TEXT NOT NULL, PRIMARY KEY(course_id,sub_id))")
+                    conn.executemany("INSERT INTO local_deletions VALUES (?,?)", pending)
             next_db.replace(self.db_path)
             self.revision += 1
             self.commit_sha = manifest.commit_sha
@@ -353,15 +439,11 @@ class DatabaseManager:
             has_ai_title = db.execute(
                 "SELECT 1 FROM pragma_table_info('lectures') WHERE name = 'ai_title'"
             ).fetchone()
-            has_retry_after = db.execute(
-                "SELECT 1 FROM pragma_table_info('lectures') WHERE name = 'retry_after'"
-            ).fetchone()
             columns = {row[1] for row in db.execute("PRAGMA table_info(lectures)")}
             sql = f"""
                 SELECT sub_id, course_id, sub_title, date, processed_at,
                        error_stage, error_msg, summary_model, summary,
                        {"ai_title" if has_ai_title else "NULL AS ai_title"},
-                       {"retry_after" if has_retry_after else "NULL AS retry_after"},
                        {"ppt_warning" if "ppt_warning" in columns else "NULL AS ppt_warning"},
                        {"transcript_source" if "transcript_source" in columns else "NULL AS transcript_source"},
                        {"recording_duration" if "recording_duration" in columns else "NULL AS recording_duration"},

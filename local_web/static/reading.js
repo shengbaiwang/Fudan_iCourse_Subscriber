@@ -36,6 +36,13 @@
     updateContinue();
   });
   window.addEventListener('beforeunload',savePosition);
+  window.addEventListener('sea-course-data-deleted', event => {
+    const deleted = row => row?.kind === 'course' && event.detail.subIds.includes(String(row.id));
+    if (deleted(current)) { clearTimeout(timer); current = null; position = null; }
+    if (deleted(lastReading())) localStorage.removeItem('sea-last-reading');
+    event.detail.subIds.forEach(id => localStorage.removeItem(storageKey({kind:'course',id})));
+    updateContinue();
+  });
   $('#course-query').oninput=()=>renderCourses({keepSidebar:true});
   $('#library-home').onclick=()=>showView('courses');
 })();

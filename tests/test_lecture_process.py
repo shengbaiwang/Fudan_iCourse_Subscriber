@@ -43,7 +43,7 @@ else:
             [('1','课',{'sub_id':'10'}), ('1','课',{'sub_id':'11'})], lambda _:None) == (1,1)
         first, second = db.get_lecture('10'), db.get_lecture('11')
         assert first['transcript'] == '已提交材料' and first['error_stage'] == 'process_timeout'
-        assert first['retry_after'] and not first['processed_at']
+        assert first['retry_after'] is None and not first['processed_at']
         assert second['summary'] == '后续课次笔记' and second['processed_at']
         events = [json.loads(line.removeprefix('ICOURSE_EVENT ')) for line in capsys.readouterr().out.splitlines() if line.startswith('ICOURSE_EVENT ')]
         assert [e['sub_id'] for e in events if e['kind']=='note'] == ['11']
@@ -53,7 +53,7 @@ else:
         assert heartbeat.read_text() == frozen
         for _ in range(4): db.update_error('10','process_timeout','超时')
         assert '10' not in db.get_exhausted_sub_ids('1')
-        assert [row['sub_id'] for row in db.get_unprocessed_lectures('1',include_deferred=True)] == ['10']
+        assert [row['sub_id'] for row in db.get_unprocessed_lectures('1')] == ['10']
     finally:
         db.conn.close()
 
@@ -114,7 +114,7 @@ run_lecture_job.worker_main()
         db.conn.close()
 
 
-def test_old_duration_rejection_cooldowns_are_released_once(tmp_path):
+def test_old_duration_rejection_error_counts_are_reset_once(tmp_path):
     path = str(tmp_path/'old.db')
     db = Database(path)
     db.upsert_course('1','课','老师')
@@ -122,26 +122,26 @@ def test_old_duration_rejection_cooldowns_are_released_once(tmp_path):
         db.insert_lecture(sid,'1','第一讲','2026-09-01')
     db.update_error('10','video_access','未选课；缺少带明确单位的独立录制时长，官方转录待核验')
     db.update_error('11','video_access','官方转录为空或不可读取')
-    untouched = db.get_lecture('11')['retry_after']
+    untouched = db.get_lecture('11')['error_count']
     with db.conn:
         db.conn.execute("DELETE FROM meta WHERE key='official_transcript_independent_v1'")
     db.conn.close()
     db = Database(path)
     try:
-        assert db.get_lecture('10')['retry_after'] is None
-        assert db.get_lecture('11')['retry_after'] == untouched
+        assert db.get_lecture('10')['error_count'] == 0
+        assert db.get_lecture('11')['error_count'] == untouched
         db.update_error('10','video_access','仍未提供转录')
-        cooldown = db.get_lecture('10')['retry_after']
+        attempts = db.get_lecture('10')['error_count']
     finally:
         db.conn.close()
     db = Database(path)
     try:
-        assert db.get_lecture('10')['retry_after'] == cooldown
+        assert db.get_lecture('10')['error_count'] == attempts
     finally:
         db.conn.close()
 
 
-def test_removed_official_text_gate_releases_cooldown_once(tmp_path):
+def test_removed_official_text_gate_resets_error_counts_once(tmp_path):
     path = str(tmp_path/'old-text-gate.db')
     db = Database(path)
     db.upsert_course('1','课','老师')
@@ -150,23 +150,23 @@ def test_removed_official_text_gate_releases_cooldown_once(tmp_path):
                          ('12','官方转录为空或不可读取')]:
         db.insert_lecture(sid,'1','第一讲','2026-09-01')
         db.update_error(sid,'video_access',message)
-    unavailable_cooldown = db.get_lecture('12')['retry_after']
+    unavailable_attempts = db.get_lecture('12')['error_count']
     with db.conn:
         db.conn.execute("DELETE FROM meta WHERE key='official_transcript_direct_v1'")
     db.conn.close()
     db = Database(path)
     try:
-        assert db.get_lecture('10')['retry_after'] is None
-        assert db.get_lecture('11')['retry_after'] is None
-        assert db.get_lecture('12')['retry_after'] == unavailable_cooldown
-        assert {r['sub_id'] for r in db.get_unprocessed_lectures('1')} == {'10','11'}
+        assert db.get_lecture('10')['error_count'] == 0
+        assert db.get_lecture('11')['error_count'] == 0
+        assert db.get_lecture('12')['error_count'] == unavailable_attempts
+        assert {r['sub_id'] for r in db.get_unprocessed_lectures('1')} == {'10','11','12'}
         db.update_error('10','video_access','官方转录为空或不可读取')
-        next_cooldown = db.get_lecture('10')['retry_after']
+        next_attempts = db.get_lecture('10')['error_count']
     finally:
         db.conn.close()
     db = Database(path)
     try:
-        assert db.get_lecture('10')['retry_after'] == next_cooldown
+        assert db.get_lecture('10')['error_count'] == next_attempts
     finally:
         db.conn.close()
 
