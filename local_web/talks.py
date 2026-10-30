@@ -453,10 +453,13 @@ class TalkStore:
                 ("cloud_request_id", "TEXT NOT NULL DEFAULT ''"),
                 ("cloud_requested_at", "TEXT NOT NULL DEFAULT ''"),
                 ("cloud_result_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("upload_token", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if col not in existing:
                     db.execute(f"ALTER TABLE talks ADD COLUMN {col} {typedef}")
             db.commit()
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS talks_upload_token "
+                       "ON talks(upload_token) WHERE upload_token != ''")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)
@@ -481,22 +484,26 @@ class TalkStore:
         return item
 
     def create_audio_talk(self, title: str, ext: str, audio_bytes: int,
-                          remote_path: str, total_chunks: int = 0) -> dict[str, Any]:
+                          remote_path: str, total_chunks: int = 0, upload_token: str = "") -> dict[str, Any]:
         """Register an uploaded recording awaiting cloud transcription."""
         now = datetime.now(timezone.utc).isoformat()
         talk_id = f"t{uuid4().hex[:12]}"
         with self._lock, closing(self._connect()) as db:
+            if upload_token:
+                existing = db.execute("SELECT id FROM talks WHERE upload_token=?", (upload_token,)).fetchone()
+                if existing:
+                    return self.get_talk(existing["id"])
             with db:
                 db.execute(
                     """INSERT INTO talks
                             (id, title, source, status, audio_ext,
                              audio_bytes, remote_audio_path,
-                             upload_total_chunks,
+                             upload_total_chunks, upload_token,
                              created_at, updated_at)
                         VALUES (?, ?, 'upload', 'uploading',
-                                ?, ?, ?, ?, ?, ?)""",
+                                ?, ?, ?, ?, ?, ?, ?)""",
                     (talk_id, title, ext, audio_bytes, remote_path,
-                     total_chunks, now, now),
+                     total_chunks, upload_token, now, now),
                 )
         item = self.get_talk(talk_id)
         assert item is not None
@@ -666,7 +673,7 @@ class TalkStore:
                           LENGTH(transcript) AS transcript_chars,
                           LENGTH(summary) AS summary_chars,
                           summary_model, ai_title, error, error_stage,
-                          audio_ext, audio_bytes,
+                          audio_ext, audio_bytes, upload_total_chunks, uploaded_chunks,
                           created_at, updated_at
                    FROM talks ORDER BY created_at DESC, id DESC"""
             ).fetchall()
@@ -682,6 +689,15 @@ class TalkStore:
                 item["display_title"] = item["id"]
             items.append(item)
         return items
+
+    def note_summaries(self) -> list[dict[str, Any]]:
+        """Read current notes in one snapshot without loading audio or versions."""
+        with self._lock, closing(self._connect()) as db:
+            rows = db.execute(
+                """SELECT id, title, ai_title, summary, summary_model, updated_at
+                   FROM talks WHERE TRIM(COALESCE(summary, '')) != ''"""
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_talk(self, talk_id: str) -> dict[str, Any] | None:
         with self._lock, closing(self._connect()) as db:
@@ -827,12 +843,37 @@ class TalkUploadQueue:
         self._make_client = make_client
         self._max_workers = max(1, max_workers)
         self._lock = threading.RLock()
+        self._intake_lock = threading.Lock()
         self._queued: list[str] = []
         self._active: set[str] = set()
         self._stopping = threading.Event()
+        self._paused: set[str] = set()
         self.directory = store.directory.parent / "talk_uploads"
 
     # ── intake ──────────────────────────────────────────────────────
+    def enqueue_blob(self, encrypted: bytes, ext: str, title: str,
+                     audio_bytes: int, upload_token: str = "") -> dict:
+        # An intake retry may overlap a request whose HTTP receipt was lost.
+        # Serialize registration + staging so it cannot replace active chunks.
+        with self._intake_lock:
+            created = self._store.create_audio_talk(title, ext, audio_bytes, "", 0, upload_token)
+            talk_id = created["id"]
+            if created["status"] in {"ready", "transcribing", "transcribed", "dispatching", "summarizing", "paused"} or (
+                self.directory / f"{talk_id}.enc"
+            ).is_file():
+                return {**created, **self.describe(talk_id), "upload_progress": self._store.upload_progress(talk_id)}
+            try:
+                total = self.stage_blob(talk_id, encrypted, ext, title)
+            except OSError:
+                self._store.set_status(talk_id, "failed", "本地保存录音失败，请检查磁盘空间并重新上传", "upload")
+                raise
+            self._store.note_audio_pushed(talk_id, audio_bytes, talk_audio_remote_path(talk_id, ext))
+            self._store.bump_upload_attempts(talk_id)
+            self._store.note_chunk_uploaded(talk_id, 0, total)
+            self.submit(talk_id)
+            item = self._store.get_talk(talk_id)
+            return {**item, **self.describe(talk_id), "upload_progress": self._store.upload_progress(talk_id)}
+
     def stage_blob(self, talk_id: str, encrypted: bytes,
                    ext: str, title: str) -> int:
         """Persist ciphertext + sidecar; returns the chunk count."""
@@ -878,11 +919,9 @@ class TalkUploadQueue:
         """Queue a talk for background upload.  False if already queued."""
         with self._lock:
             if talk_id in self._queued or talk_id in self._active:
+                self._pump_locked()
                 return False
-            if len(self._active) + len(self._queued) >= self._max_workers:
-                # Single worker today: extras wait in order rather than
-                # failing — uploads are cheap to serialize, unlike LLM jobs.
-                pass
+            self._paused.discard(talk_id)
             self._queued.append(talk_id)
             self._pump_locked()
             return True
@@ -891,9 +930,45 @@ class TalkUploadQueue:
         with self._lock:
             return talk_id in self._active or talk_id in self._queued
 
+    def describe(self, talk_id: str) -> dict:
+        with self._lock:
+            if talk_id in self._queued:
+                return {"queue_state": "queued", "queue_position": self._queued.index(talk_id) + 1}
+            return {"queue_state": "active" if talk_id in self._active else "", "queue_position": 0}
+
+    def pause(self, talk_id: str) -> bool:
+        with self._lock:
+            item = self._store.get_talk(talk_id)
+            if not item or item["status"] != "uploading":
+                return False
+            self._paused.add(talk_id)
+            if talk_id in self._queued:
+                self._queued.remove(talk_id)
+            self._store.set_status(talk_id, "paused")
+            return True
+
+    def _check_running(self, talk_id: str) -> None:
+        if self._stopping.is_set() or talk_id in self._paused:
+            raise InterruptedError("任务已暂停，已完成分片会保留")
+
     def _pump_locked(self) -> None:
         while not self._stopping.is_set() and self._queued and len(self._active) < self._max_workers:
-            talk_id = self._queued.pop(0)
+            # Bound the whole upload → cloud pipeline, not just chunk PUTs.
+            rows = {row["id"]: row for row in self._store.list_talks()}
+            cloud_states = {"dispatching", "transcribing", "summarizing"}
+            reserved = sum(row["source"] == "upload" and row["status"] in cloud_states
+                           for row in rows.values())
+            reserved += sum(rows.get(talk_id, {}).get("status") not in cloud_states
+                            for talk_id in self._active)
+            index = 0
+            if reserved >= 2:
+                # A dispatch interrupted by app exit already owns a cloud slot.
+                # Resume it even when new uploads must wait for a free slot.
+                index = next((i for i, talk_id in enumerate(self._queued)
+                              if rows.get(talk_id, {}).get("status") == "dispatching"), -1)
+                if index < 0:
+                    break
+            talk_id = self._queued.pop(index)
             self._active.add(talk_id)
             thread = threading.Thread(
                 target=self._run, args=(talk_id,),
@@ -903,7 +978,7 @@ class TalkUploadQueue:
 
     def resume_pending(self) -> int:
         resumed = 0
-        for row in self._store.list_talks():
+        for row in sorted(self._store.list_talks(), key=lambda row: row["created_at"]):
             if row["source"] == "upload" and row["status"] in {"uploading", "dispatching"}:
                 resumed += int(self.submit(row["id"]))
         return resumed
@@ -919,9 +994,11 @@ class TalkUploadQueue:
             )
         return branch
 
-    def _retry(self, operation, attempts: int, delay: float = 2):
+    def _retry(self, operation, attempts: int, delay: float = 2, *, talk_id: str = ""):
         from .github_client import GitHubAPIError
         for attempt in range(attempts):
+            if talk_id:
+                self._check_running(talk_id)
             if self._stopping.is_set():
                 raise InterruptedError("服务正在退出，重启后继续")
             try:
@@ -936,6 +1013,7 @@ class TalkUploadQueue:
         import time
         stage = "upload"
         try:
+            self._check_running(talk_id)
             item = self._store.get_talk(talk_id)
             if item is None:
                 return
@@ -950,6 +1028,7 @@ class TalkUploadQueue:
                 done = self._store.parse_uploaded_chunks(talk_id)
                 deadline = time.monotonic() + TALK_UPLOAD_DEADLINE_SECONDS
                 for index in range(1, total + 1):
+                    self._check_running(talk_id)
                     if self._store.get_talk(talk_id) is None:
                         return
                     if index in done:
@@ -961,10 +1040,11 @@ class TalkUploadQueue:
                     try:
                         self._retry(lambda: client.write_branch_file(
                             TALK_AUDIO_BRANCH, talk_audio_chunk_path(talk_id, index), piece,
-                            message=f"talk audio {talk_id} part {index}/{total}"), TALK_CHUNK_ATTEMPTS)
+                            message=f"talk audio {talk_id} part {index}/{total}"), TALK_CHUNK_ATTEMPTS, talk_id=talk_id)
                     finally:
                         client.reset_timeout()
                     self._store.note_chunk_uploaded(talk_id, index, total)
+                    self._check_running(talk_id)
                 manifest = build_talk_audio_manifest(
                     talk_id, item["audio_ext"], total, len(blob), title=item["custom_title"])
                 manifest["sha256"] = hashlib.sha256(blob).hexdigest()
@@ -978,26 +1058,31 @@ class TalkUploadQueue:
                 self._retry(lambda: client.write_branch_file(
                     TALK_AUDIO_BRANCH, talk_audio_manifest_path(talk_id),
                     json.dumps(manifest, ensure_ascii=False).encode(),
-                    message=f"talk audio {talk_id} manifest"), TALK_CHUNK_ATTEMPTS)
+                    message=f"talk audio {talk_id} manifest"), TALK_CHUNK_ATTEMPTS, talk_id=talk_id)
                 self._store.note_audio_pushed(talk_id, len(blob), talk_audio_remote_path(talk_id, item["audio_ext"]))
             elif client.read_branch_file(TALK_AUDIO_BRANCH, talk_audio_manifest_path(talk_id)) is None:
                 raise TalkTranscribeError("本地暂存与云端录音均不存在，请重新选择录音上传")
             stage = "dispatch"
             # Preserve request identity if an accepted dispatch lost its reply.
-            request_id = item.get("cloud_request_id") if item["status"] == "dispatching" else ""
-            request_id = request_id or self._store.begin_cloud_request(talk_id)
+            with self._lock:
+                self._check_running(talk_id)
+                request_id = item.get("cloud_request_id") if item["status"] == "dispatching" else ""
+                request_id = request_id or self._store.begin_cloud_request(talk_id)
             self._retry(lambda: client.dispatch_workflow(
                 TALK_TRANSCRIBE_WORKFLOW, ref=branch,
                 inputs={"talk_id": talk_id, "request_id": request_id}),
-                TALK_DISPATCH_ATTEMPTS, TALK_DISPATCH_RETRY_SECONDS)
+                TALK_DISPATCH_ATTEMPTS, TALK_DISPATCH_RETRY_SECONDS, talk_id=talk_id)
             self._store.mark_transcribing(talk_id)
             # Retain staged audio until a complete result is safely in SQLite.
         except InterruptedError:
             pass  # durable state is resumed at the next service startup
         except Exception as exc:
-            self._store.set_status(talk_id, "failed", str(exc), error_stage=stage)
+            if talk_id not in self._paused:
+                self._store.set_status(talk_id, "failed", str(exc), error_stage=stage)
         finally:
             with self._lock:
+                if talk_id in self._paused:
+                    self._store.set_status(talk_id, "paused")
                 self._active.discard(talk_id)
                 self._pump_locked()
 

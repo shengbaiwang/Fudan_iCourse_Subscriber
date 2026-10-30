@@ -39,7 +39,21 @@ class Notebook:
                     title TEXT NOT NULL, body TEXT NOT NULL, saved_at TEXT NOT NULL,
                     PRIMARY KEY(note_id, revision)
                 );
+                CREATE TABLE IF NOT EXISTS note_topics (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE
+                );
+                CREATE TABLE IF NOT EXISTS note_topic_memberships (
+                    reference TEXT NOT NULL, topic_id TEXT NOT NULL,
+                    PRIMARY KEY(reference, topic_id)
+                );
+                CREATE TABLE IF NOT EXISTS source_note_stars (
+                    reference TEXT PRIMARY KEY
+                );
             """)
+            from .note_folders import initialize
+            initialize(db)
+            from .note_edits import initialize as initialize_edits
+            initialize_edits(db)
         os.chmod(self.path, 0o600)
 
     def connect(self):
@@ -61,9 +75,9 @@ class Notebook:
         return dict(row)
 
     def save(self, note_id: str | None, title: str, body: str, revision: int = 0, **flags):
-        title = title.strip()[:200] or "未命名手记"
+        title = title.strip()[:200] or "未命名笔记"
         if len(body) > 2_000_000:
-            raise ValueError("手记最多支持 200 万字")
+            raise ValueError("笔记最多支持 200 万字（含嵌入图片）")
         now = datetime.now(timezone.utc).isoformat()
         with self.lock, self.connect() as db, db:
             if note_id is None:
@@ -74,7 +88,7 @@ class Notebook:
                 if row is None:
                     raise KeyError(note_id)
                 if row["revision"] != revision:
-                    raise NoteConflict("这篇手记已在另一窗口修改，当前草稿已保留，请重新打开后合并")
+                    raise NoteConflict("这篇笔记已在另一窗口修改，当前草稿已保留，请重新打开后合并")
                 starred = int(flags.get("starred", row["starred"]))
                 deleted = int(flags.get("deleted", row["deleted"]))
                 if title == row["title"] and body == row["body"] and starred == row["starred"] and deleted == row["deleted"]:
@@ -92,16 +106,25 @@ class Notebook:
 
     def backup(self):
         with self.lock, self.connect() as db:
+            db.execute("BEGIN")
             notes = [dict(row) for row in db.execute("SELECT * FROM notes ORDER BY created_at")]
             versions = [dict(row) for row in db.execute("SELECT * FROM versions")]
+            folders = [dict(row) for row in db.execute("SELECT * FROM note_folders")]
+            locations = [dict(row) for row in db.execute("SELECT * FROM note_locations")]
+            candidates = [dict(row) for row in db.execute("SELECT * FROM note_folder_candidates")]
+            stars = [row[0] for row in db.execute("SELECT reference FROM source_note_stars")]
+            source_edits = [dict(row) for row in db.execute("SELECT * FROM source_note_edits")]
+            source_versions = [dict(row) for row in db.execute("SELECT * FROM source_note_edit_versions")]
         stream = BytesIO()
         with ZipFile(stream, "w", ZIP_DEFLATED) as archive:
-            archive.writestr("丰饶之海.json", json.dumps({"format": "sea-notebook", "version": 1, "notes": notes, "versions": versions}, ensure_ascii=False, indent=2))
+            archive.writestr("丰饶之海.json", json.dumps({"format": "sea-notebook", "version": 2, "notes": notes, "versions": versions,
+                                                      "folders": folders, "locations": locations, "folder_candidates": candidates, "source_stars": stars,
+                                                      "source_edits": source_edits, "source_edit_versions": source_versions}, ensure_ascii=False, indent=2))
             for row in notes:
                 if row["deleted"]:
                     continue
-                name = re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", row["title"]).strip(". ")[:100] or "未命名手记"
-                archive.writestr(f"手记/{name}-{row['id'][:8]}.md", f"# {row['title']}\n\n{row['body']}\n")
+                name = re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", row["title"]).strip(". ")[:100] or "未命名笔记"
+                archive.writestr(f"个人笔记/{name}-{row['id'][:8]}.md", f"# {row['title']}\n\n{row['body']}\n")
         return stream.getvalue()
 
     def restore(self, data: bytes):
@@ -113,7 +136,7 @@ class Notebook:
                 if info.file_size > 40_000_000:
                     raise ValueError("备份内容过大")
                 document = json.loads(archive.read(info))
-            if document.get("format") != "sea-notebook" or document.get("version") != 1:
+            if document.get("format") != "sea-notebook" or document.get("version") not in (1, 2):
                 raise ValueError("不支持这个备份格式")
             notes, versions = document["notes"], document["versions"]
             if not isinstance(notes, list) or not isinstance(versions, list) or len(notes) > 10000 or len(versions) > 500000:
@@ -127,6 +150,7 @@ class Notebook:
                     datetime.fromisoformat(row[name])
             count = 0
             with self.lock, self.connect() as db, db:
+                db.execute("BEGIN IMMEDIATE")
                 ids = {}
                 for row in notes:
                     existing = db.execute("SELECT * FROM notes WHERE id=?", (row["id"],)).fetchone()
@@ -141,6 +165,24 @@ class Notebook:
                         if not isinstance(row["title"], str) or not isinstance(row["body"], str):
                             raise ValueError("备份历史版本无效")
                         db.execute("INSERT OR IGNORE INTO versions VALUES (?,?,?,?,?)", (ids[row["note_id"]], int(row["revision"]), row["title"], row["body"], row["saved_at"]))
+                from .note_library import reference
+                from .note_folders import import_folders, import_legacy
+                if document["version"] == 2:
+                    import_folders(db, document, ids)
+                else:
+                    import_legacy(db, document.get("topics", []), document.get("memberships", []), ids)
+                stars = document.get("source_stars", [])
+                if not isinstance(stars, list) or len(stars) > 100000:
+                    raise ValueError("备份收藏无效")
+                for key in stars:
+                    if not isinstance(key, str):
+                        raise ValueError("备份收藏来源无效")
+                    kind, source_id = key.split(":", 1)
+                    if kind == "personal":
+                        raise ValueError("备份收藏来源无效")
+                    db.execute("INSERT OR IGNORE INTO source_note_stars VALUES (?)", (reference(kind, source_id),))
+                from .note_edits import restore as restore_edits
+                count += restore_edits(db, document)
             return count
-        except (KeyError, TypeError, OverflowError, sqlite3.Error, json.JSONDecodeError) as exc:
-            raise ValueError("备份内容不完整，未导入任何手记") from exc
+        except (KeyError, TypeError, AttributeError, OverflowError, sqlite3.Error, json.JSONDecodeError) as exc:
+            raise ValueError("备份内容不完整，未导入任何笔记") from exc

@@ -161,8 +161,7 @@ main { min-height:calc(100vh - 56px); }
 .summary h1,.summary h2 { color:var(--note-title); }
 .summary h2 { padding-bottom:.35em; border-bottom:2px solid var(--accent-border); }
 .summary h3 { color:var(--note-subtitle); }
-.summary strong { color:var(--note-emphasis); font-weight:750; }
-.summary :is(h1,h2,h3,h4,h5,h6) strong { color:inherit; }
+.summary :is(strong,b) { color:var(--note-emphasis); font-weight:400; }
 .summary blockquote { padding:.55em 1em; border-left-color:var(--link); border-radius:0 6px 6px 0; background:var(--blue-soft); color:var(--note-quote); }
 .summary blockquote p { text-indent:0; margin:.35em 0; }
 
@@ -564,6 +563,24 @@ mark.user-highlight:hover { background:var(--hl-hover); }
 .blind-generate-row select,
 .blind-generate-row input { margin:0; min-width:0; }
 .blind-generate-row button { white-space:nowrap; }
+.blind-model-list { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
+.blind-model-choice { display:flex; align-items:center; gap:7px; max-width:100%; padding:8px 10px; margin:0; border:1px solid var(--line); border-radius:8px; overflow-wrap:anywhere; cursor:pointer; }
+.blind-model-choice:has(input:checked) { border-color:var(--accent-border); background:var(--blue-soft); }
+.blind-model-choice input,.blind-history input { width:auto; margin:0; flex-shrink:0; }
+.blind-job { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; font-size:12px; overflow-wrap:anywhere; }
+.blind-job p { width:100%; }
+.blind-job button { padding:5px 8px; font-size:12px; }
+.blind-history { margin:0 0 14px; font-size:12px; }
+.blind-history summary { cursor:pointer; padding:8px 0; }
+#blind-history-list { display:grid; gap:8px; }
+#blind-history-list label { display:flex; gap:8px; align-items:center; margin:0; overflow-wrap:anywhere; }
+#blind-generate .blind-generate-row { display:flex; flex-wrap:wrap; }
+.talk-row-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; flex-shrink:0; max-width:130px; }
+.talk-row-actions button { padding:5px 8px; font-size:12px; }
+.talk-intake-content { flex:1; min-width:0; overflow-wrap:anywhere; }
+#talk-list progress { display:block; width:100%; height:6px; margin-top:10px; accent-color:var(--accent); }
+.file-drag-over { outline:2px dashed var(--accent-border); outline-offset:8px; }
+@media(max-width:700px) { .talk-row-actions { max-width:72px; } .blind-model-choice { width:100%; } }
 
 .run-layout { display:grid; grid-template-columns:300px minmax(0,1fr); gap:16px; align-items:start; }
 .run-config { display:grid; gap:12px; position:sticky; top:80px; }

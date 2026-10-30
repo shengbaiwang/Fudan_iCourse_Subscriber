@@ -218,6 +218,29 @@ class DatabaseManager:
             self._persist_encrypted(credentials)
             self.revision += 1
 
+    def save_comparison(self, sub_id: str, body: str, title: str, model: str,
+                        credentials: RuntimeCredentials) -> None:
+        """Keep comparison versions in the existing encrypted local overlay."""
+        from scripts.publish_progress import snapshot_database
+        from src.data.database import Database
+        with self._lock:
+            if self.lecture(sub_id) is None:
+                raise ValueError("原课次已删除，无法保存对比结果")
+            source = self._temp_dir / "comparison.db"
+            try:
+                snapshot_database(self.db_path, source)
+                incoming = Database(str(source))
+                try:
+                    incoming.update_summary(sub_id, body, model)
+                    incoming.mark_processed(sub_id)
+                    if title:
+                        incoming.update_ai_title(sub_id, title)
+                finally:
+                    incoming.conn.close()
+                self.accept_run_note(source, sub_id, credentials)
+            finally:
+                source.unlink(missing_ok=True)
+
     @staticmethod
     def _pending_deletions(path: Path) -> list[tuple[str, str]]:
         if not path.is_file():
@@ -516,6 +539,12 @@ class DatabaseManager:
                 )
             ]
             return result
+
+    def note_course_ids(self) -> dict[str, str]:
+        """Resolve stored lecture references even before their summaries exist."""
+        with closing(self._connect()) as db:
+            return {str(row["sub_id"]): str(row["course_id"])
+                    for row in db.execute("SELECT sub_id, course_id FROM lectures")}
 
     def obsidian_notes(
         self,

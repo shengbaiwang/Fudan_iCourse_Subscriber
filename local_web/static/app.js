@@ -251,10 +251,10 @@ function activateMath(element) {
 }
 
 function renderMarkdown(value) {
-  const stashed = _stashFormulas(value);
   if (window.ICS?.render && window.marked && window.DOMPurify) {
-    return _restoreFormulas(window.ICS.render.renderMarkdown(stashed.text || "暂无摘要"), stashed.formulas);
+    return window.ICS.render.renderMarkdown(String(value || "暂无摘要"));
   }
+  const stashed = _stashFormulas(value);
   const lines = stashed.text.replace(/\r\n?/g, "\n").split("\n");
   const html = [];
   let paragraph = [];
@@ -2359,47 +2359,132 @@ function openBlindCompare() {
     message("请先打开一篇课次或讲座笔记。", true);
     return;
   }
-  // 单版本也可进入：按保存顺序重新生成，然后比较历史版本。
+  // 单版本也可进入：选择模型生成新版本，再与历史笔记比较。
   blindCompare = {
     ...payload,
     revealed: new Set(),
     preferredKey: null,
     mode: "blind",
     generating: false,
+    selectedModels: new Set(),
+    includedKeys: new Set(payload.versions.map(version => version.key)),
+    jobs: [],
     order: shuffleKeys(payload.versions.map((version) => version.key)),
   };
   renderBlindCompare();
   showView("blindCompare");
   ensureBlindModelOptions().catch((error) => {
-    const hint = $("#blind-generate-hint");
-    if (hint) hint.textContent = error.message;
+    if (blindCompare) blindCompare.modelError = error.message;
   }).finally(() => renderBlindGeneratePanel());
   scheduleBlindRefresh();
+  refreshBlindVersions().catch(error => message(error.message, true));
 }
 
 async function ensureBlindModelOptions() {
-  await loadGenerationOrder("#blind-model-list", true);
+  if (blindCompare) blindCompare.modelError = "";
+  if (isPages) {
+    await loadGenerationOrder("#blind-model-list", true);
+    $("#blind-generate-description").textContent = "网页版按已保存的模型顺序生成；桌面版可选择本轮对比模型。";
+  } else {
+    const result = await api("/api/local/model-providers");
+    rerunModelOptions = (result.providers || []).filter(p => p.enabled)
+      .flatMap(p => (p.models || []).map(model => ({provider: String(p.name), model: String(model)})));
+    if (!rerunModelOptions.length) throw new Error("请先在模型与 API 中添加并启用模型。");
+    if (blindCompare) {
+      const available = new Set(rerunModelOptions.map(option => JSON.stringify(option)));
+      blindCompare.selectedModels = new Set([...blindCompare.selectedModels].filter(key => available.has(key)));
+    }
+    renderBlindModelChoices();
+  }
   renderBlindGeneratePanel();
+}
+
+function renderBlindModelChoices() {
+  if (!blindCompare || isPages) return;
+  const list = $("#blind-model-list");
+  list.replaceChildren();
+  rerunModelOptions.forEach(option => {
+    const key = JSON.stringify(option);
+    const label = document.createElement("label");
+    label.className = "blind-model-choice";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = blindCompare.selectedModels.has(key);
+    check.onchange = () => {
+      if (check.checked) blindCompare.selectedModels.add(key);
+      else blindCompare.selectedModels.delete(key);
+      renderBlindGeneratePanel();
+    };
+    label.append(check, document.createTextNode(`${option.provider} / ${option.model}`));
+    list.append(label);
+  });
+}
+
+function blindJobsBusy() {
+  return Boolean(blindCompare?.jobs.some(job => ["queued", "running"].includes(job.status)));
 }
 
 function renderBlindGeneratePanel() {
   const button = $("#blind-generate-button");
   const talkBusy = blindCompare?.source === "talk" && currentTalk
     && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
-  button.disabled = !rerunModelOptions.length || Boolean(blindCompare?.generating) || talkBusy;
-  button.textContent = blindCompare?.generating || talkBusy ? "生成中…" : "按模型顺序重新生成";
-  $("#blind-api-keys").classList.toggle("hidden", blindCompare?.source !== "talk");
+  const busy = Boolean(blindCompare?.generating) || talkBusy || blindJobsBusy();
+  const selected = blindCompare?.selectedModels.size || 0;
+  button.disabled = !rerunModelOptions.length || (!isPages && !selected) || busy;
+  button.textContent = busy ? "生成中…" : isPages ? "按模型顺序重新生成" : `生成所选模型的笔记${selected ? `（${selected}）` : ""}`;
+  $("#blind-api-keys").classList.toggle("hidden", isPages);
+  const first = blindCompare && [...blindCompare.selectedModels][0];
+  $("#blind-key-label").textContent = `${first ? JSON.parse(first).provider : "所选首个供应商"} API Key（可选，仅本轮使用）`;
   $("#blind-refresh-versions").disabled = Boolean(blindCompare?.generating);
-  $("#blind-generate-hint").textContent = talkBusy
+  $("#blind-generate-hint").textContent = blindCompare?.modelError || (talkBusy
     ? "正在按模型设置顺序生成，完成后自动载入。"
-    : "每次生成一份笔记；失败后按保存顺序尝试下一模型，历史版本会保留。";
+    : isPages ? "每次生成一份笔记，历史版本会保留。" : blindJobsBusy()
+      ? "正在后台生成。本轮完成后统一匿名洗牌，可切换页面继续使用。"
+      : "勾选本轮模型；在「模型与 API」保存新模型后，点击「刷新模型」即可选择。本轮使用本机 Key。");
+  const jobs = $("#blind-job-list");
+  jobs.replaceChildren();
+  (blindCompare?.jobs || []).forEach(job => {
+    const row = document.createElement("div");
+    row.className = "blind-job";
+    const text = document.createElement("span");
+    text.textContent = `${job.provider} / ${job.model} · ${{queued:"排队中",running:"生成中",completed:"已完成",failed:"失败",cancelled:"已停止"}[job.status] || job.status}`;
+    row.append(text);
+    if (job.status === "failed") {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "重试此模型";
+      retry.disabled = busy;
+      retry.onclick = () => submitBlindGenerate([{provider:job.provider, model:job.model}]);
+      row.append(retry);
+      const error = document.createElement("p");
+      error.className = "meta";
+      error.textContent = job.error;
+      row.append(error);
+    }
+    jobs.append(row);
+  });
 }
 
 async function refreshBlindVersions(options = {}) {
   if (!blindCompare) return null;
+  const session = blindCompare;
+  const refresh = session.refreshSerial = (session.refreshSerial || 0) + 1;
+  const stale = () => blindCompare !== session || session.refreshSerial !== refresh;
+  if (!isPages) {
+    const result = await api(`/api/local/comparisons/${session.source}/${encodeURIComponent(session.sourceId)}`);
+    if (stale()) return null;
+    session.jobs = result.jobs || [];
+    if (blindJobsBusy()) {
+      renderBlindCompare();
+      scheduleBlindRefresh();
+      return session;
+    }
+  }
   const previousCount = blindCompare.versions.length;
   if (blindCompare.source === "lecture") {
-    currentLecture = await api(`/api/local/lectures/${encodeURIComponent(blindCompare.sourceId)}`);
+    const lecture = await api(`/api/local/lectures/${encodeURIComponent(session.sourceId)}`);
+    if (stale()) return null;
+    currentLecture = lecture;
     if (!currentCourse || String(currentCourse.course_id) !== String(currentLecture.course_id)) {
       currentCourse = courseRows.find((course) => String(course.course_id) === String(currentLecture.course_id)) || {
         course_id: currentLecture.course_id,
@@ -2409,12 +2494,18 @@ async function refreshBlindVersions(options = {}) {
     }
     blindCompare.versions = summaryVersions();
   } else {
-    currentTalk = await api(`/api/local/talks/${encodeURIComponent(blindCompare.sourceId)}`);
+    const talk = await api(`/api/local/talks/${encodeURIComponent(session.sourceId)}`);
+    if (stale()) return null;
+    currentTalk = talk;
     blindCompare.versions = talkVersions();
     blindCompare.subtitle = currentTalk.custom_title && currentTalk.ai_title && currentTalk.custom_title !== currentTalk.ai_title
       ? `AI 标题：${currentTalk.ai_title}` : "";
   }
   const nextKeys = new Set(blindCompare.versions.map((version) => version.key));
+  blindCompare.versions.forEach(version => {
+    if (!blindCompare.order.includes(version.key)) blindCompare.includedKeys.add(version.key);
+  });
+  blindCompare.includedKeys = new Set([...blindCompare.includedKeys].filter(key => nextKeys.has(key)));
   blindCompare.revealed = new Set([...blindCompare.revealed].filter((key) => nextKeys.has(key)));
   if (blindCompare.preferredKey && !nextKeys.has(blindCompare.preferredKey)) {
     blindCompare.preferredKey = null;
@@ -2446,18 +2537,29 @@ function scheduleBlindRefresh() {
   const talkBusy = blindCompare.source === "talk" && currentTalk
     && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
   // 讲座生成由此轮询；课次由资料库自动同步后更新版本。
-  if (!talkBusy) return;
+  if (!talkBusy && !blindJobsBusy()) return;
   blindRefreshTimer = setTimeout(() => {
-    refreshBlindVersions().catch(() => {});
-  }, currentTalk?.status === "transcribing" ? 15000 : 4000);
+    refreshBlindVersions().catch(() => scheduleBlindRefresh());
+  }, talkBusy && currentTalk?.status === "transcribing" ? 15000 : 2000);
 }
 
-async function submitBlindGenerate() {
+async function submitBlindGenerate(retryModels = null) {
   if (!blindCompare || !rerunModelOptions.length) return;
+  const session = blindCompare;
+  const selected = retryModels || [...session.selectedModels].map(key => JSON.parse(key));
+  if (!isPages && !selected.length) return;
+  session.refreshSerial = (session.refreshSerial || 0) + 1;
   blindCompare.generating = true;
   renderBlindGeneratePanel();
   try {
-    if (blindCompare.source === "talk") {
+    if (!isPages) {
+      const result = await api(`/api/local/comparisons/${session.source}/${encodeURIComponent(session.sourceId)}`, {
+        method: "POST", body: JSON.stringify({models:selected, api_key:$("#blind-api-key").value.trim()}),
+      });
+      if (blindCompare !== session) return;
+      session.jobs = result.jobs || [];
+      $("#blind-api-key").value = "";
+    } else if (blindCompare.source === "talk") {
       await api(`/api/local/talks/${encodeURIComponent(blindCompare.sourceId)}/summarize`, {
         method: "POST", body: JSON.stringify({api_key: $("#blind-api-key").value.trim()}),
       });
@@ -2467,11 +2569,12 @@ async function submitBlindGenerate() {
         sub_ids: [blindCompare.sourceId], course_ids: [],
       })});
     }
-    message("已提交，将按模型设置的顺序生成；新笔记会自动载入。");
+    message(isPages ? "已提交，新笔记会自动载入。" : "已加入后台任务，每个所选模型各生成一份笔记。");
     await refreshBlindVersions();
   } catch (error) { message(error.message, true); }
   finally {
-    blindCompare.generating = false;
+    session.generating = false;
+    if (blindCompare !== session) return;
     renderBlindGeneratePanel();
     scheduleBlindRefresh();
   }
@@ -2502,7 +2605,7 @@ function revealBlindVersion(key) {
 
 function revealAllBlindVersions() {
   if (!blindCompare) return;
-  blindCompare.versions.forEach((version) => blindCompare.revealed.add(version.key));
+  blindCompare.includedKeys.forEach(key => blindCompare.revealed.add(key));
   renderBlindCompare();
 }
 
@@ -2516,10 +2619,10 @@ function blindVersionByKey(key) {
   return blindCompare?.versions.find((version) => version.key === key);
 }
 
-function renderBlindCompare() {
+function renderBlindCompare(keepHistory = false) {
   if (!blindCompare) return;
   const isBlind = blindCompare.mode === "blind";
-  const versionCount = blindCompare.versions.length;
+  const versionCount = blindCompare.includedKeys.size;
   $("#blind-compare-course").textContent = blindCompare.course || "";
   $("#blind-compare-title").textContent = isBlind ? "盲测对比" : "公开对比";
   $("#blind-compare-back").textContent = blindCompare.backLabel || "返回";
@@ -2536,17 +2639,41 @@ function renderBlindCompare() {
   const revealAll = $("#blind-reveal-all");
   revealAll.classList.toggle("hidden", !isBlind || versionCount < 2);
   $("#blind-reshuffle").classList.toggle("hidden", !isBlind || versionCount < 2);
-  revealAll.disabled = !isBlind || versionCount < 1 || blindCompare.revealed.size >= versionCount;
+  const revealedCount = [...blindCompare.includedKeys].filter(key => blindCompare.revealed.has(key)).length;
+  revealAll.disabled = !isBlind || versionCount < 1 || revealedCount >= versionCount;
 
   renderBlindGeneratePanel();
+  $("#blind-history").classList.toggle("hidden", !blindCompare.versions.length);
+  const history = $("#blind-history-list");
+  if (!keepHistory) {
+    history.replaceChildren();
+    blindCompare.order.forEach((key, index) => {
+      const version = blindVersionByKey(key);
+      if (!version) return;
+      const label = document.createElement("label");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = blindCompare.includedKeys.has(version.key);
+      check.onchange = () => {
+        if (check.checked) blindCompare.includedKeys.add(version.key);
+        else blindCompare.includedKeys.delete(version.key);
+        if (!check.checked && blindCompare.preferredKey === version.key) blindCompare.preferredKey = null;
+        renderBlindCompare(true);
+      };
+      const identity = !isBlind || blindCompare.revealed.has(version.key)
+        ? `${version.model} · ${formatVersionDate(version.generated_at)}` : "模型未揭示";
+      label.append(check, document.createTextNode(`方案 ${BLIND_SLOT_LABELS[index] || index + 1} · ${identity}`));
+      history.append(label);
+    });
+  }
 
   const hint = $("#blind-hint");
   if (versionCount < 2 && isBlind) {
     hint.textContent = versionCount === 0
-      ? "还没有可对比的笔记。可在下方按保存顺序重新生成；有 ≥2 个版本后即可随机盲测。"
-      : "目前只有 1 个版本。可在下方按保存顺序重新生成，凑齐 ≥2 份后再盲测（模型名默认隐藏，点「揭示模型」才显示）。";
+      ? "还没有选中可对比的笔记。可选择历史版本，或生成新的对照笔记。"
+      : "目前选中 1 个版本。可选择其他历史版本，或生成新的对照笔记后再盲测。";
   } else if (isBlind) {
-    const left = versionCount - blindCompare.revealed.size;
+    const left = versionCount - revealedCount;
     hint.textContent = left > 0
       ? `同一课堂的 ${versionCount} 份笔记已随机匿名排布。先盲读对比，点「揭示模型」才能看到生成模型（还有 ${left} 份未揭示）。`
       : "全部模型已揭示。可点「重新洗牌」再测一轮，或切换到公开对比。";
@@ -2582,15 +2709,22 @@ function renderBlindCompare() {
 
   const grid = $("#blind-grid");
   grid.replaceChildren();
+  if (blindJobsBusy()) {
+    hint.textContent = "正在生成本轮对照笔记；完成后统一随机排列并隐藏模型身份。可以离开页面，稍后回来。";
+    $("#blind-history").classList.add("hidden");
+    $("#blind-preference").classList.add("hidden");
+    return;
+  }
   grid.classList.toggle("compare", versionCount > 1);
   if (!versionCount) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "暂无笔记版本。按模型顺序生成后，新版本会自动载入。";
+    empty.textContent = "请选择历史版本，或勾选模型生成对照笔记。";
     grid.append(empty);
     return;
   }
   blindCompare.order.forEach((key, index) => {
+    if (!blindCompare.includedKeys.has(key)) return;
     const version = blindVersionByKey(key);
     if (!version) return;
     const slot = BLIND_SLOT_LABELS[index] || String(index + 1);
@@ -3154,7 +3288,7 @@ function showView(view, options = {}) {
   };
   Object.entries(paneIds).forEach(([name, id]) => $("#" + id).classList.toggle("hidden", name !== view));
   const title = {
-    notes: "手记", courses: "课程", lectures: currentCourse?.title || "课程", detail: currentLecture ? lectureDisplayName(currentLecture) : "笔记",
+    notes: "笔记", courses: "课程", lectures: currentCourse?.title || "课程", detail: currentLecture ? lectureDisplayName(currentLecture) : "笔记",
     talks: "讲座", talkDetail: currentTalk ? talkDisplayName(currentTalk) : "讲座",
     search: "搜索", subscriptions: "订阅",
     run: "运行", settings: "设置", models: "模型与 API", obsidian: "同步到 Obsidian",
@@ -4055,8 +4189,14 @@ $("#model-save-button").onclick = saveModelProviders;
 $("#obsidian-button").onclick = async () => {
   const button = $("#obsidian-button");
   button.disabled = true;
-  setObsidianView(true);
   try {
+    const shared = await api("/api/local/shared-notes/status");
+    if (shared.enabled) {
+      showView("notes");
+      message(shared.error || `共享目录：${shared.path} · 两端修改自动更新`, Boolean(shared.error));
+      return;
+    }
+    setObsidianView(true);
     await loadObsidianSettings();
   } catch (error) {
     message(`无法读取 Obsidian 设置：${error.message}`, true);
@@ -4407,6 +4547,8 @@ $("#search-retry").onclick = () => runSearch(searchFailedPage);
    独立于课程库（课程库是 data 分支的只读镜像）；转写文本只在本机
    SQLite 与本次摘要请求中出现，不上 GitHub。 */
 let talkRows = [];
+const talkIntake = [];
+let talkIntakeWork = null;
 let currentTalk = null;
 let talkTab = "summary";
 let talkDetailTimer = null;
@@ -4417,6 +4559,8 @@ function talkDisplayName(talk) {
 }
 
 function talkStateLabel(talk) {
+  if (talk?.status === "paused") return "已暂停";
+  if (talk?.queue_state === "queued") return `排队中 · ${talk.queue_position}`;
   if (talk?.error_stage === "approval") return "等待 GitHub 批准";
   if (talk?.status === "ready") return "已生成";
   if (talk?.status === "summarizing") return "生成中";
@@ -4440,14 +4584,54 @@ function talkStateClass(talk) {
 
 async function loadTalks() {
   talkRows = await api("/api/local/talks");
+  renderTalkList();
+}
+
+function renderTalkList() {
   const list = $("#talk-list");
   list.replaceChildren();
   list.classList.remove("empty");
-  if (!talkRows.length) {
+  if (!talkRows.length && !talkIntake.length) {
     list.textContent = "还没有讲座。点击「上传录音」开始，也可以粘贴已有转写。";
     list.classList.add("empty");
     return;
   }
+  talkIntake.forEach(item => {
+    const card = document.createElement("article");
+    card.className = "lecture-card talk-intake-card";
+    const content = document.createElement("div");
+    content.className = "talk-intake-content";
+    const title = document.createElement("strong");
+    title.textContent = item.title;
+    const status = document.createElement("p");
+    status.textContent = item.error || (item.state === "staging" ? "正在本机加密暂存，完成后可退出应用" : "等待本机暂存");
+    content.append(title, status);
+    if (item.state === "staging") {
+      const progress = document.createElement("progress");
+      progress.setAttribute("aria-label", `${item.title} 本机暂存中`);
+      content.append(progress);
+    }
+    const actions = document.createElement("div");
+    actions.className = "talk-row-actions";
+    if (item.state === "failed") {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "重试暂存";
+      retry.onclick = () => { item.state = "queued"; item.error = ""; startTalkIntake(); renderTalkList(); };
+      actions.append(retry);
+    }
+    // Once the HTTP request has started, its durable server receipt must be
+    // allowed to finish; aborting it could leave an unnoticed uploaded copy.
+    if (item.state !== "staging") {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "取消";
+      cancel.onclick = () => { talkIntake.splice(talkIntake.indexOf(item), 1); renderTalkList(); };
+      actions.append(cancel);
+    }
+    card.append(content, actions);
+    list.append(card);
+  });
   talkRows.forEach((talk) => {
     const card = document.createElement("article");
     card.className = "lecture-card";
@@ -4466,7 +4650,8 @@ async function loadTalks() {
       parts.push(`录音 ${(talk.audio_bytes / 1024 / 1024).toFixed(1)} MB`);
     }
     if (talk.source === "upload" && talk.status === "uploading") {
-      parts.push("后台分片上传中，打开详情查看进度");
+      const done = String(talk.uploaded_chunks || "").split(",").filter(Boolean).length;
+      parts.push(talk.queue_state === "queued" ? "已安全暂存，等待后台处理" : uploadProgressText({done, total:talk.upload_total_chunks}));
     }
     if (talk.source === "upload" && talk.status === "failed" && talk.error_stage === "upload") {
       parts.push("上传中断，可一键断点续传");
@@ -4484,6 +4669,13 @@ async function loadTalks() {
     state.textContent = talkStateLabel(talk);
     row.append(left, state);
     open.append(row);
+    if (talk.status === "uploading") {
+      const progress = document.createElement("progress");
+      progress.max = Math.max(1, Number(talk.upload_total_chunks || 0));
+      progress.value = String(talk.uploaded_chunks || "").split(",").filter(Boolean).length;
+      progress.setAttribute("aria-label", `${talkDisplayName(talk)} 上传进度`);
+      open.append(progress);
+    }
     open.onclick = () => openTalk(talk.id);
     const remove = document.createElement("button");
     remove.type = "button";
@@ -4501,7 +4693,25 @@ async function loadTalks() {
         message(error.message, true);
       }
     };
-    card.append(open, remove);
+    const actions = document.createElement("div");
+    actions.className = "talk-row-actions";
+    if (talk.source === "upload" && ["uploading", "paused", "failed"].includes(talk.status)) {
+      const control = document.createElement("button");
+      control.type = "button";
+      control.textContent = talk.status === "uploading" ? "暂停" : talk.status === "paused" ? "继续" : "重试";
+      control.onclick = async () => {
+        control.disabled = true;
+        try {
+          await api(`/api/local/talks/${encodeURIComponent(talk.id)}/${talk.status === "uploading" ? "pause-upload" : "retry-upload"}`, {method:"POST", body:"{}"});
+          await loadTalks();
+        } catch (error) { message(error.message, true); }
+        finally { control.disabled = false; }
+      };
+      actions.append(control);
+    }
+    remove.disabled = ["uploading", "dispatching", "transcribing", "summarizing"].includes(talk.status);
+    actions.append(remove);
+    card.append(open, actions);
     list.append(card);
   });
 }
@@ -4615,9 +4825,9 @@ function renderTalkDetail() {
         if (fill) fill.style.width = `${uploadPercent(progress)}%`;
         if (text) text.textContent = uploadProgressText(progress);
       }).catch(() => {});
-    } else if (currentTalk.status === "failed" && currentTalk.source === "upload") {
+    } else if (["failed", "paused"].includes(currentTalk.status) && currentTalk.source === "upload") {
       controls.classList.add("hidden");
-      root.innerHTML = `<div class="summary"><p>${escapeHtml(currentTalk.error || "处理失败，请重试")}</p><p>录音与已完成的转写会被复用，无需重新选择文件。</p><p><button id="talk-detail-retry-upload" class="primary" type="button">继续处理</button></p></div>`;
+      root.innerHTML = `<div class="summary"><p>${escapeHtml(currentTalk.status === "paused" ? "录音已暂停" : currentTalk.error || "处理失败，请重试")}</p><p>录音与已完成的转写会被复用，无需重新选择文件。</p><p><button id="talk-detail-retry-upload" class="primary" type="button">继续处理</button></p></div>`;
       $("#talk-detail-retry-upload").onclick = retryCurrentTalkUpload;
     } else if (currentTalk.status === "dispatching") {
       controls.classList.add("hidden");
@@ -4759,59 +4969,72 @@ async function fetchTalkUploadProgress(talkId) {
   return api(`/api/local/talks/${encodeURIComponent(talkId)}/upload-progress`);
 }
 
-function renderTalkUploadProgress(progress) {
-  const wrap = $("#talk-upload-progress");
-  const fill = $("#talk-upload-progress-fill");
-  const text = $("#talk-upload-progress-text");
-  const retry = $("#talk-upload-retry");
-  if (!progress || !Number(progress.total || 0)) {
-    wrap.classList.add("hidden");
-    retry.classList.add("hidden");
-    return;
+function enqueueTalkFiles(files, title = "") {
+  const accepted = Array.from(files || []);
+  if (!accepted.length) return false;
+  const invalid = accepted.find(file => !/\.(mp3|m4a|aac|wav|flac|ogg|opus|mp4|mov)$/i.test(file.name) || file.size > 500 * 1024 * 1024 || !file.size);
+  if (invalid) {
+    message(`「${invalid.name}」格式不支持、内容为空或超过 500 MB，请调整选择。`, true);
+    return false;
   }
-  wrap.classList.remove("hidden");
-  fill.style.width = `${uploadPercent(progress)}%`;
-  if (progress.status === "failed") {
-    text.textContent = `${progress.error || "处理失败"}。已传 ${progress.done}/${progress.total} 片，点击继续处理可恢复。`;
-    retry.textContent = "继续处理";
-    retry.classList.remove("hidden");
-  } else {
-    text.textContent = `${uploadProgressText(progress)}，完成后自动触发云端转写。`;
-    retry.classList.add("hidden");
-  }
+  accepted.forEach(file => talkIntake.push({file, token:crypto.randomUUID(), title: accepted.length === 1 && title ? title : file.name.replace(/\.[^.]+$/, ""), state:"queued", error:""}));
+  showView("talks");
+  renderTalkList();
+  message(`已加入 ${accepted.length} 个录音，可继续浏览；本机暂存和上传进度见讲座列表。`);
+  startTalkIntake();
+  return true;
 }
 
-let talkUploadPollTimer = null;
-let talkUploadPollId = null;
-
-function stopTalkUploadPoll() {
-  clearInterval(talkUploadPollTimer);
-  talkUploadPollTimer = null;
-  talkUploadPollId = null;
-}
-
-function startTalkUploadPoll(talkId) {
-  stopTalkUploadPoll();
-  talkUploadPollId = talkId;
-  const tick = async () => {
-    if (!$("#talk-upload").open || talkUploadPollId !== talkId) return;
-    try {
-      const progress = await fetchTalkUploadProgress(talkId);
-      renderTalkUploadProgress(progress);
-      if (["transcribing", "summarizing", "transcribed", "ready"].includes(progress.status)) {
-        stopTalkUploadPoll();
-        $("#talk-upload").close();
-        await loadTalks();
-        await openTalk(talkId, {tab: "transcript"});
-        message("录音已上传，云端转写中（约 15 秒刷新一次）");
+function startTalkIntake() {
+  if (talkIntakeWork) return;
+  talkIntakeWork = (async () => {
+    for (let item; (item = talkIntake.find(row => row.state === "queued"));) {
+      item.state = "staging";
+      renderTalkList();
+      try {
+        const form = new FormData();
+        form.append("title", item.title);
+        form.append("file", item.file, item.file.name);
+        form.append("upload_token", item.token);
+        const response = await fetch("/api/local/talks/upload", {method:"POST", body:form});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : "本机暂存失败，请重试");
+        talkRows = [payload, ...talkRows.filter(row => row.id !== payload.id)];
+        talkIntake.splice(talkIntake.indexOf(item), 1);
+      } catch (error) {
+        item.state = "failed";
+        item.error = error.message;
+        message(`「${item.title}」暂存失败，可在讲座列表重试。`, true);
       }
-    } catch (_) {
-      // 轮询失败不打扰用户，下一次继续。
+      renderTalkList();
     }
-  };
-  talkUploadPollTimer = setInterval(tick, 2000);
-  tick().catch(() => {});
+  })().finally(() => { talkIntakeWork = null; });
 }
+
+window.SeaTalkUploads = {
+  async flush() {
+    await talkIntakeWork;
+    if (talkIntake.length) throw new Error("还有录音尚未保存到本机");
+  },
+};
+window.addEventListener("beforeunload", event => {
+  if (talkIntake.length) { event.preventDefault(); event.returnValue = ""; }
+});
+const talkDropTarget = $("#view-talks");
+talkDropTarget.addEventListener("dragover", event => {
+  if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  talkDropTarget.classList.add("file-drag-over");
+});
+talkDropTarget.addEventListener("dragleave", event => {
+  if (!talkDropTarget.contains(event.relatedTarget)) talkDropTarget.classList.remove("file-drag-over");
+});
+talkDropTarget.addEventListener("drop", event => {
+  event.preventDefault();
+  talkDropTarget.classList.remove("file-drag-over");
+  enqueueTalkFiles(event.dataTransfer.files);
+});
 
 $("#talk-title").ondblclick = renameCurrentTalk;
 document.querySelectorAll(".talk-detail-tab").forEach((button) => {
@@ -4855,76 +5078,22 @@ $("#talk-editor-form").onsubmit = async (event) => {
     save.disabled = false;
   }
 };
-$("#talk-upload-cancel").onclick = () => { stopTalkUploadPoll(); $("#talk-upload").close(); };
-$("#talk-upload-retry").onclick = async () => {
-  if (!talkUploadPollId) return;
-  const retry = $("#talk-upload-retry");
-  retry.disabled = true;
-  try {
-    await api(`/api/local/talks/${encodeURIComponent(talkUploadPollId)}/retry-upload`, {method: "POST", body: "{}"});
-    $("#talk-upload-error").textContent = "";
-    startTalkUploadPoll(talkUploadPollId);
-  } catch (error) {
-    $("#talk-upload-error").textContent = error.message;
-  } finally {
-    retry.disabled = false;
-  }
-};
+$("#talk-upload-cancel").onclick = () => $("#talk-upload").close();
 $("#talk-upload-button").onclick = () => {
   $("#talk-upload-title-input").value = "";
   $("#talk-upload-file").value = "";
   $("#talk-upload-error").textContent = "";
-  $("#talk-upload-progress").classList.add("hidden");
-  $("#talk-upload-progress-fill").style.width = "0%";
-  $("#talk-upload-progress-text").textContent = "";
-  $("#talk-upload-retry").classList.add("hidden");
-  stopTalkUploadPoll();
   $("#talk-upload").showModal();
-  $("#talk-upload-title-input").focus();
+  $("#talk-upload-file").focus();
 };
-$("#talk-upload-form").onsubmit = async (event) => {
+$("#talk-upload-form").onsubmit = event => {
   event.preventDefault();
-  $("#talk-upload-error").textContent = "";
-  const file = $("#talk-upload-file").files[0];
-  if (!file) {
+  const files = $("#talk-upload-file").files;
+  if (!files?.length) {
     $("#talk-upload-error").textContent = "请选择录音文件";
     return;
   }
-  if (file.size > 500 * 1024 * 1024) {
-    $("#talk-upload-error").textContent = "文件超过 500MB 上限";
-    return;
-  }
-  const save = $("#talk-upload-save");
-  save.disabled = true;
-  save.textContent = "加密暂存中…";
-  try {
-    const form = new FormData();
-    form.append("title", $("#talk-upload-title-input").value.trim());
-    form.append("file", file, file.name);
-    // 服务端只做校验+加密+暂存（秒回），真正的分片上传在后台跑，
-    // 这里不再长按请求等待全部完成。
-    const response = await fetch("/api/local/talks/upload", {method: "POST", body: form});
-    if (!response.ok) {
-      let detail = `${response.status} ${response.statusText}`;
-      try {
-        const payload = await response.json();
-        detail = typeof payload.detail === "string" ? payload.detail : JSON.stringify(payload.detail || payload);
-      } catch (_) {}
-      throw new Error(detail);
-    }
-    const created = await response.json();
-    $("#talk-upload-error").textContent = "";
-    renderTalkUploadProgress(created.upload_progress || null);
-    // 切到后台轮询：用户可关闭对话框去做别的事，上传继续。
-    startTalkUploadPoll(created.id);
-    message("录音已暂存，后台分片上传中（约 4MB/片），进度见对话框");
-  } catch (error) {
-    $("#talk-upload-error").textContent = error.message;
-    if (!$("#talk-upload").open) message(error.message, true);
-  } finally {
-    save.disabled = false;
-    save.textContent = "上传并转写";
-  }
+  if (enqueueTalkFiles(files, $("#talk-upload-title-input").value.trim())) $("#talk-upload").close();
 };
 $("#talk-generate-button").onclick = async () => {
   if (!currentTalk) return;
@@ -5046,6 +5215,11 @@ $("#blind-compare-back").onclick = () => {
 $("#blind-reshuffle").onclick = () => reshuffleBlindCompare();
 $("#blind-reveal-all").onclick = () => revealAllBlindVersions();
 $("#blind-generate-button").onclick = () => submitBlindGenerate();
+$("#blind-refresh-models").onclick = async () => {
+  try { await ensureBlindModelOptions(); }
+  catch (error) { if (blindCompare) blindCompare.modelError = error.message; }
+  renderBlindGeneratePanel();
+};
 $("#blind-refresh-versions").onclick = async () => {
   try {
     await refreshBlindVersions();

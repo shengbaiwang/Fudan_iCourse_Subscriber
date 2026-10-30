@@ -1,0 +1,216 @@
+/* 丰饶之海: shared reading fonts, eye-friendly colors and red emphasis.
+   The installer prepends the app's current light/dark
+   palette and typography from styles.css and sea.css as --sea-* variables. */
+body.theme-light,
+body.theme-dark {
+  --font-interface: var(--sea-sans);
+  --font-text: var(--sea-serif);
+  --font-monospace: var(--sea-mono);
+  /* Obsidian writes its default font size directly on body at startup. */
+  --font-text-size: var(--sea-reading-font-size) !important;
+  --line-height-normal: var(--sea-reading-line-height);
+  --font-weight: var(--sea-reading-weight);
+  --bold-weight: var(--sea-emphasis-weight);
+  --bold-modifier: 0;
+  --h1-font: var(--sea-serif);
+  --h2-font: var(--sea-serif);
+  --h3-font: var(--sea-serif);
+  --h4-font: var(--sea-serif);
+  --h5-font: var(--sea-serif);
+  --h6-font: var(--sea-serif);
+  --inline-title-font: var(--sea-serif);
+
+  --accent-h: var(--sea-accent-h);
+  --accent-s: var(--sea-accent-s);
+  --accent-l: var(--sea-accent-l);
+  --color-accent: var(--sea-blue);
+  --color-accent-1: var(--sea-link-strong);
+  --color-accent-2: var(--sea-link-strong);
+
+  --color-base-00: var(--sea-paper);
+  --color-base-05: var(--sea-card);
+  --color-base-10: var(--sea-hover-bg);
+  --color-base-20: var(--sea-panel);
+  --color-base-25: var(--sea-subtle-bg);
+  --color-base-30: var(--sea-line);
+  --color-base-35: var(--sea-field-border);
+  --color-base-40: var(--sea-accent-border);
+  --color-base-50: var(--sea-text-faint);
+  --color-base-60: var(--sea-muted);
+  --color-base-70: var(--sea-text-sub);
+  --color-base-100: var(--sea-ink);
+
+  --background-primary: var(--sea-paper);
+  --background-primary-alt: var(--sea-card);
+  --background-secondary: var(--sea-panel);
+  --background-secondary-alt: var(--sea-subtle-bg);
+  --background-modifier-hover: var(--sea-hover-bg);
+  --background-modifier-active-hover: var(--sea-blue-soft);
+  --background-modifier-border: var(--sea-line);
+  --background-modifier-border-hover: var(--sea-field-border);
+  --background-modifier-border-focus: var(--sea-focus-border);
+  --background-modifier-form-field: var(--sea-card);
+
+  --text-normal: var(--sea-text-strong);
+  --text-muted: var(--sea-text-sub);
+  --text-faint: var(--sea-text-faint);
+  --text-accent: var(--sea-link);
+  --text-accent-hover: var(--sea-link-strong);
+  --text-on-accent: var(--sea-paper);
+  --text-on-accent-inverted: var(--sea-blue);
+  --text-error: var(--sea-danger);
+  --text-success: var(--sea-success);
+  --text-warning: var(--sea-pending-text);
+  --text-selection: var(--sea-accent-border);
+  --text-highlight-bg: var(--sea-mark-bg);
+  --text-highlight-bg-active: var(--sea-hl-hover);
+  --caret-color: var(--sea-blue);
+
+  --interactive-normal: var(--sea-card);
+  --interactive-hover: var(--sea-hover-bg);
+  --interactive-accent: var(--sea-blue);
+  --interactive-accent-hover: var(--sea-link-strong);
+  --interactive-accent-hsl: var(--sea-accent-h), var(--sea-accent-s), var(--sea-accent-l);
+  --icon-color: var(--sea-text-sub);
+  --icon-color-hover: var(--sea-blue);
+  --icon-color-active: var(--sea-blue);
+  --icon-color-focused: var(--sea-blue);
+
+  --nav-item-color: var(--sea-text-sub);
+  --nav-item-color-hover: var(--sea-ink);
+  --nav-item-color-active: var(--sea-blue);
+  --nav-item-color-selected: var(--sea-blue);
+  --nav-item-color-highlighted: var(--sea-blue);
+  --nav-item-background-hover: var(--sea-hover-bg);
+  --nav-item-background-active: var(--sea-blue-soft);
+  --nav-item-background-selected: var(--sea-blue-soft);
+  --nav-collapse-icon-color: var(--sea-text-sub);
+  --nav-collapse-icon-color-collapsed: var(--sea-text-sub);
+  --indentation-guide-color: var(--sea-line);
+  --indentation-guide-color-active: var(--sea-accent-border);
+
+  --titlebar-background: var(--sea-panel);
+  --titlebar-background-focused: var(--sea-panel);
+  --titlebar-text-color: var(--sea-text-sub);
+  --titlebar-text-color-focused: var(--sea-ink);
+  --tab-container-background: var(--sea-panel);
+  --tab-background-active: var(--sea-paper);
+  --tab-text-color: var(--sea-text-sub);
+  --tab-text-color-active: var(--sea-ink);
+  --tab-text-color-focused-active: var(--sea-blue);
+  --tab-text-color-focused-active-current: var(--sea-blue);
+  --tab-outline-color: var(--sea-line);
+  --divider-color: var(--sea-line);
+  --divider-color-hover: var(--sea-blue);
+
+  --h1-color: var(--sea-blue);
+  --h2-color: var(--sea-blue);
+  --h3-color: var(--sea-blue);
+  --h4-color: var(--sea-blue);
+  --h5-color: var(--sea-blue);
+  --h6-color: var(--sea-blue);
+  --inline-title-color: var(--sea-blue);
+  --bold-color: var(--sea-note-emphasis);
+  --italic-color: var(--sea-text-strong);
+  --blockquote-color: var(--sea-note-quote);
+  --blockquote-border-color: var(--sea-field-border);
+  --blockquote-background-color: transparent;
+  --link-color: var(--sea-link);
+  --link-color-hover: var(--sea-link-strong);
+  --link-external-color: var(--sea-link);
+  --link-external-color-hover: var(--sea-link-strong);
+  --link-unresolved-color: var(--sea-link);
+  --link-unresolved-decoration-color: var(--sea-accent-border);
+  --tag-color: var(--sea-blue);
+  --tag-color-hover: var(--sea-link-strong);
+  --tag-background: var(--sea-blue-soft);
+  --tag-background-hover: var(--sea-accent-border);
+  --tag-border-color: var(--sea-accent-border);
+
+  --code-normal: var(--sea-code-text);
+  --code-background: var(--sea-subtle-bg);
+  --code-comment: var(--sea-text-sub);
+  --code-function: var(--sea-link-strong);
+  --code-keyword: var(--sea-blue);
+  --code-operator: var(--sea-text-strong);
+  --code-property: var(--sea-link-strong);
+  --code-punctuation: var(--sea-text-sub);
+  --code-string: var(--sea-success);
+  --code-tag: var(--sea-blue);
+  --code-value: var(--sea-pending-text);
+  --table-border-color: var(--sea-line);
+  --table-header-background: var(--sea-panel);
+  --table-header-background-hover: var(--sea-hover-bg);
+  --table-row-alt-background: var(--sea-stripe-bg);
+  --table-row-background-hover: var(--sea-hover-bg);
+  --search-result-background: var(--sea-card);
+  --search-result-background-hover: var(--sea-hover-bg);
+  --search-result-background-active: var(--sea-blue-soft);
+  --search-result-match-color: var(--sea-ink);
+  --search-result-match-background: var(--sea-hl-bg);
+  --checkbox-color: var(--sea-blue);
+  --checkbox-color-hover: var(--sea-link-strong);
+  --checkbox-marker-color: var(--sea-paper);
+  --checklist-done-color: var(--sea-text-sub);
+  --graph-line: var(--sea-field-border);
+  --graph-node: var(--sea-text-sub);
+  --graph-node-focused: var(--sea-blue);
+  --graph-node-tag: var(--sea-blue);
+  --graph-node-unresolved: var(--sea-text-faint);
+}
+
+body:is(.theme-light, .theme-dark) {
+  -webkit-font-smoothing: antialiased;
+}
+
+body:is(.theme-light, .theme-dark) :is(.markdown-rendered, .markdown-source-view) {
+  letter-spacing: var(--sea-reading-letter-spacing);
+}
+
+/* Keep Markdown semantics; emphasize in red without adding font weight in
+   reading view, Live Preview and source mode. Headings keep their blue. */
+body:is(.theme-light, .theme-dark) .markdown-rendered :is(strong, b),
+body:is(.theme-light, .theme-dark) .markdown-source-view .cm-strong {
+  color: var(--sea-note-emphasis);
+  font-weight: var(--sea-emphasis-weight);
+}
+
+body:is(.theme-light, .theme-dark) .markdown-rendered :is(strong, b) a,
+body:is(.theme-light, .theme-dark) .markdown-rendered a :is(strong, b),
+body:is(.theme-light, .theme-dark) .markdown-source-view .cm-strong :is(a, .cm-hmd-internal-link) {
+  color: var(--sea-note-emphasis);
+  font-weight: var(--sea-emphasis-weight);
+}
+
+body:is(.theme-light, .theme-dark) .markdown-rendered :is(h1,h2,h3,h4,h5,h6),
+body:is(.theme-light, .theme-dark) .markdown-rendered :is(h1,h2,h3,h4,h5,h6) *,
+body:is(.theme-light, .theme-dark) .markdown-rendered :is(h1,h2,h3,h4,h5,h6) :is(strong,b) a,
+body:is(.theme-light, .theme-dark) .markdown-rendered :is(h1,h2,h3,h4,h5,h6) a :is(strong,b),
+body:is(.theme-light, .theme-dark) .markdown-source-view .cm-header,
+body:is(.theme-light, .theme-dark) .markdown-source-view .cm-header *,
+body:is(.theme-light, .theme-dark) .markdown-source-view .cm-header.cm-strong :is(a,.cm-hmd-internal-link),
+body:is(.theme-light, .theme-dark) .markdown-source-view .cm-header .cm-strong :is(a,.cm-hmd-internal-link),
+body:is(.theme-light, .theme-dark) .inline-title {
+  color: var(--sea-blue);
+}
+
+/* The narrow tool ribbon shares the app's navy navigation colors. */
+body:is(.theme-light, .theme-dark) .workspace-ribbon {
+  --icon-color: var(--sea-sea-rail-text);
+  --icon-color-hover: var(--sea-sea-rail-active);
+  --icon-color-active: var(--sea-sea-rail-active);
+  --icon-color-focused: var(--sea-sea-rail-active);
+  --background-modifier-hover: var(--sea-sea-rail-hover);
+  --ribbon-background: var(--sea-sea-rail);
+  --ribbon-background-collapsed: var(--sea-sea-rail);
+  background: var(--sea-sea-rail);
+  border-color: var(--sea-sea-rail-line);
+}
+
+body:is(.theme-light, .theme-dark) .nav-file-title.is-active {
+  box-shadow: inset 2px 0 var(--sea-blue);
+}
+
+body:is(.theme-light, .theme-dark) :is(input, textarea, button, select):focus-visible {
+  outline-color: var(--sea-focus-border);
+}

@@ -151,9 +151,9 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
         app.addItem(NSMenuItem.separator())
         app.addItem(withTitle:"退出" + applicationName,action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q")
         let file = NSMenu(title:"文件"); let fileItem = NSMenuItem(title:"文件",action:nil,keyEquivalent:""); fileItem.submenu = file; main.addItem(fileItem)
-        file.addItem(withTitle:"新建手记",action:#selector(newNote),keyEquivalent:"n").target = self
+        file.addItem(withTitle:"新建笔记",action:#selector(newNote),keyEquivalent:"n").target = self
         file.addItem(withTitle:"导入 Markdown…",action:#selector(importNotes),keyEquivalent:"o").target = self
-        file.addItem(withTitle:"导出手记备份…",action:#selector(backup),keyEquivalent:"").target = self
+        file.addItem(withTitle:"导出笔记备份…",action:#selector(backup),keyEquivalent:"").target = self
         file.addItem(NSMenuItem.separator())
         file.addItem(withTitle:"关闭窗口",action:#selector(NSWindow.performClose(_:)),keyEquivalent:"w")
         let edit = NSMenu(title:"编辑"); let editItem = NSMenuItem(title:"编辑",action:nil,keyEquivalent:""); editItem.submenu = edit; main.addItem(editItem)
@@ -182,13 +182,13 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
     @objc private func search() { js("showView('search');document.getElementById('search').focus()") }
     @objc private func reading() { js("if(document.body.dataset.view==='notes')document.getElementById('note-mode').click()") }
     @objc private func theme() { js("document.getElementById('theme-toggle').click()") }
-    @objc private func about() { NSApp.orderFrontStandardAboutPanel(options:[.applicationName:applicationName,.applicationVersion:"1.0.0",.credits:NSAttributedString(string:"一座属于自己的知识库。")]) }
+    @objc private func about() { NSApp.orderFrontStandardAboutPanel(options:[.applicationName:applicationName,.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.0.1",.credits:NSAttributedString(string:"一座属于自己的知识库。")]) }
     @objc private func reloadDevelopment() {
         guard development != nil, baseURL != nil, !quitting else { return }
-        web.callAsyncJavaScript("if(window.SeaNotebook) await window.SeaNotebook.flush(); return true;",arguments:[:],in:nil,in:.page) { [weak self] result in
+        web.callAsyncJavaScript("if(window.SeaNotebook) await window.SeaNotebook.flush(); if(window.SeaTalkUploads) await window.SeaTalkUploads.flush(); return true;",arguments:[:],in:nil,in:.page) { [weak self] result in
             guard let self = self, !self.quitting else { return }
             if case .failure = result {
-                let alert = NSAlert(); alert.messageText = "刷新前无法保存手记"; alert.informativeText = "请先保存当前内容，再刷新开发界面。"; alert.beginSheetModal(for:self.window); return
+                let alert = NSAlert(); alert.messageText = "刷新前无法保存资料"; alert.informativeText = "请先保存笔记或重试暂存失败的录音，再刷新开发界面。"; alert.beginSheetModal(for:self.window); return
             }
             self.persistPreferences()
             self.web.configuration.userContentController.removeAllUserScripts()
@@ -212,10 +212,10 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
         if stopping { return .terminateNow }
         if quitting { return .terminateCancel }
         quitting = true
-        web.callAsyncJavaScript("if(window.SeaNotebook) await window.SeaNotebook.flush(); return true;",arguments:[:],in:nil,in:.page) { [weak self] result in
+        web.callAsyncJavaScript("if(window.SeaNotebook) await window.SeaNotebook.flush(); if(window.SeaTalkUploads) await window.SeaTalkUploads.flush(); return true;",arguments:[:],in:nil,in:.page) { [weak self] result in
             guard let self = self else { return }
             if case .failure = result, self.baseURL != nil {
-                let alert = NSAlert(); alert.messageText = "手记还没有保存"; alert.informativeText = "未保存草稿已保留在本机。可以返回继续编辑，或退出后重新打开。"; alert.addButton(withTitle:"返回编辑"); alert.addButton(withTitle:"退出并保留草稿")
+                let alert = NSAlert(); alert.messageText = "还有资料尚未保存"; alert.informativeText = "笔记草稿已保留；暂存失败的录音需要返回讲座列表重试。仍然退出会丢失尚未暂存的文件选择。"; alert.addButton(withTitle:"返回处理"); alert.addButton(withTitle:"仍然退出")
                 if alert.runModal() == .alertFirstButtonReturn { self.quitting = false; sender.reply(toApplicationShouldTerminate:false); return }
             }
             self.stopping = true; self.persistPreferences(); self.backend?.terminate()
@@ -228,7 +228,7 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
         }
         return .terminateLater
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool) -> Bool { window.makeKeyAndOrderFront(nil); return true }
 
     func webView(_ webView: WKWebView,decidePolicyFor navigationAction: WKNavigationAction,decisionHandler: @escaping (WKNavigationActionPolicy)->Void) {

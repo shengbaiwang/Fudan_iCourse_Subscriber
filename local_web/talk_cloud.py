@@ -22,7 +22,7 @@ class TalkCloudSync:
             item = self.store.get_talk(talk_id)
             if not item:
                 raise ValueError("讲座不存在")
-            if item["source"] != "upload" or item["status"] == "ready":
+            if item["source"] != "upload" or item["status"] in {"ready", "paused"}:
                 return item
             credentials = self.credentials()
             if not credentials:

@@ -29,6 +29,9 @@ from .provider_test import ProviderTestError, test_provider
 from .provider_models import ModelDirectoryError, fetch_provider_models
 from .talk_cloud import TalkCloudSync
 from .runs import LocalRuns, LocalRunBusy
+from .comparisons import ComparisonJobs
+from src.ai.summary_prompt import SYSTEM_PROMPT, summary_user_content
+from src.ai.bucketer import assemble
 from src.runtime.auto_check import PAUSE_VARIABLE, parse_auto_check_pauses
 from .api_keychain import LocalAPIKeychain
 from .talks import (
@@ -42,7 +45,6 @@ from .talks import (
     TalkUploadQueue,
     decrypt_talk_blob,
     encrypt_talk_blob,
-    talk_audio_remote_path,
     talk_transcript_remote_path,
     validate_audio_upload,
     validate_talk_input,
@@ -53,6 +55,8 @@ from .state import (
     RuntimeState,
 )
 from .notebook import Notebook, NoteConflict
+from .note_library import NoteLibrary
+from .shared_notes import SharedNotes
 from src.runtime.config import DEFAULT_MODEL_PROVIDERS
 from src.runtime.model_config import config_json, validate_model_config
 from src.runtime.run_order import ordered_ids, ordered_lectures
@@ -200,12 +204,65 @@ class TalkSummarizeRequest(BaseModel):
     api_key: SecretStr = SecretStr("")
 
 
+class ComparisonModel(BaseModel):
+    provider: str = Field(min_length=1, max_length=50)
+    model: str = Field(min_length=1, max_length=200)
+
+
+class ComparisonRequest(BaseModel):
+    models: list[ComparisonModel] = Field(min_length=1, max_length=20)
+    api_key: SecretStr = SecretStr("")
+
+
+class SourceNoteEditRequest(BaseModel):
+    title: str = Field(max_length=200)
+    body: str = Field(max_length=2_000_000)
+    revision: str = Field(min_length=64, max_length=64)
+
+
 class PersonalNoteRequest(BaseModel):
     title: str = Field(default="", max_length=200)
     body: str = Field(default="", max_length=2_000_000)
     revision: int = Field(default=0, ge=0)
     starred: bool | None = None
     deleted: bool | None = None
+
+
+class NoteFolderRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    parent_id: str | None = Field(default=None, max_length=32)
+
+
+class NoteLocationRequest(BaseModel):
+    folder_id: str = Field(default="", max_length=32)
+    revision: int = Field(ge=0)
+    candidates: list[str] = Field(default_factory=list, max_length=10000)
+
+
+class NoteFolderMoveRequest(BaseModel):
+    parent_id: str = Field(default="", max_length=32)
+    expected_parent: str = Field(max_length=32)
+
+
+class NoteFolderRestoreRequest(BaseModel):
+    folders: list[dict[str, Any]] = Field(max_length=10000)
+    locations: list[dict[str, Any]] = Field(max_length=100000)
+    folder_candidates: list[dict[str, Any]] = Field(default_factory=list, max_length=100000)
+
+
+class SharedNoteIdentity(BaseModel):
+    note_id: str = Field(min_length=1, max_length=210)
+
+
+class SharedNoteResolution(SharedNoteIdentity):
+    title: str = Field(max_length=200)
+    body: str = Field(max_length=2_000_000)
+    raw_hash: str = Field(min_length=64, max_length=64)
+    app_hash: str = Field(min_length=64, max_length=64)
+
+
+class NoteFlagRequest(BaseModel):
+    value: StrictBool
 
 
 def create_app(
@@ -221,7 +278,10 @@ def create_app(
     talks = talk_store or TalkStore()
     jobs = talk_jobs or TalkJobs(talks)
     local_runs = LocalRuns(db)
+    comparisons = ComparisonJobs()
     personal_notes = notebook or Notebook(runtime.store.directory)
+    note_library = NoteLibrary(personal_notes, db, talks, lambda: dict(runtime.lecture_names))
+    shared_notes = SharedNotes(note_library)
 
     def _upload_client() -> GitHubClient:
         return client()
@@ -232,9 +292,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app):
         cloud.start()
+        shared_notes.start()
         try:
             yield
         finally:
+            shared_notes.close()
+            comparisons.close()
             local_runs.close()
             cloud.close()
 
@@ -250,10 +313,12 @@ def create_app(
     app.state.database = db
     app.state.talks = talks
     app.state.talk_jobs = jobs
+    app.state.comparisons = comparisons
     app.state.talk_uploads = uploads
     app.state.talk_cloud = cloud
     app.state.local_runs = local_runs
     app.state.obsidian = ObsidianSyncService()
+    app.state.shared_notes = shared_notes
     atexit.register(db.close)
     atexit.register(local_runs.close)
     if runtime.credentials:
@@ -280,17 +345,77 @@ def create_app(
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
+    async def library_call(function, *args, **kwargs):
+        try:
+            return await run_in_threadpool(shared_notes.call, function, *args, **kwargs)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="笔记或文件夹已不存在，请刷新列表") from exc
+        except NoteConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/local/note-library")
+    async def library_notes(q: str = "", kind: str = "all", folder: str | None = None, starred: bool = False, trash: bool = False):
+        try:
+            result = await library_call(note_library.list, q, kind, folder, starred, trash)
+        except HTTPException as exc:
+            if not shared_notes.enabled or exc.status_code != 400:
+                raise
+            result = await run_in_threadpool(note_library.list, q, kind, folder, starred, trash)
+        return {**result, 'shared': shared_notes.status()}
+
+    @app.get("/api/local/note-library/{kind}/{source_id}")
+    async def library_note(kind: str, source_id: str):
+        return shared_notes.detail(await library_call(note_library.get, kind, source_id))
+
+    @app.put("/api/local/note-library/{kind}/{source_id}/star")
+    async def library_star(kind: str, source_id: str, payload: NoteFlagRequest):
+        return await library_call(note_library.set_star, kind, source_id, payload.value)
+
+    @app.put("/api/local/note-library/{kind}/{source_id}/content")
+    async def library_save_edit(kind: str, source_id: str, payload: SourceNoteEditRequest):
+        return await library_call(note_library.save_edit, kind, source_id, payload.title, payload.body, payload.revision)
+
+    @app.get("/api/local/note-library/{kind}/{source_id}/versions")
+    async def library_edit_versions(kind: str, source_id: str):
+        return await library_call(note_library.edit_versions, kind, source_id)
+
+    @app.put("/api/local/note-library/{kind}/{source_id}/folder")
+    async def library_location(kind: str, source_id: str, payload: NoteLocationRequest):
+        return await library_call(note_library.move_note, kind, source_id, payload.folder_id, payload.revision, payload.candidates)
+
+    @app.post("/api/local/note-folders")
+    async def create_note_folder(payload: NoteFolderRequest):
+        return await library_call(note_library.save_folder, payload.name, None, payload.parent_id)
+
+    @app.post("/api/local/note-folders/restore")
+    async def restore_note_folder(payload: NoteFolderRestoreRequest):
+        return await library_call(note_library.restore_folder, payload.model_dump())
+
+    @app.put("/api/local/note-folders/{folder_id}")
+    async def rename_note_folder(folder_id: str, payload: NoteFolderRequest):
+        return await library_call(note_library.save_folder, payload.name, folder_id)
+
+    @app.put("/api/local/note-folders/{folder_id}/move")
+    async def move_note_folder(folder_id: str, payload: NoteFolderMoveRequest):
+        return await library_call(note_library.move_folder, folder_id, payload.parent_id, payload.expected_parent)
+
+    @app.delete("/api/local/note-folders/{folder_id}")
+    async def delete_note_folder(folder_id: str):
+        return await library_call(note_library.delete_folder, folder_id)
+
     @app.get("/api/local/notebook")
     async def list_notes(q: str = "", trash: bool = False):
-        return await run_in_threadpool(personal_notes.list, q, trash)
+        return await library_call(personal_notes.list, q, trash)
 
     @app.post("/api/local/notebook")
     async def create_note(payload: PersonalNoteRequest):
-        return await run_in_threadpool(personal_notes.save, None, payload.title, payload.body)
+        return await library_call(shared_notes.save_personal, None, payload.title, payload.body)
 
     @app.get("/api/local/notebook/backup")
     async def backup_notes():
-        return Response(await run_in_threadpool(personal_notes.backup), media_type="application/zip",
+        return Response(await library_call(personal_notes.backup), media_type="application/zip",
                         headers={"Content-Disposition": "attachment; filename=sea-notebook.zip"})
 
     @app.post("/api/local/notebook/restore")
@@ -298,7 +423,7 @@ def create_app(
         from zipfile import BadZipFile
         data = await file.read(20_000_001)
         try:
-            count = await run_in_threadpool(personal_notes.restore, data)
+            count = await library_call(personal_notes.restore, data)
         except (ValueError, BadZipFile, UnicodeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"imported": count}
@@ -306,26 +431,76 @@ def create_app(
     @app.get("/api/local/notebook/{note_id}")
     async def read_note(note_id: str):
         try:
-            return await run_in_threadpool(personal_notes.get, note_id)
+            return await library_call(personal_notes.get, note_id)
         except KeyError as exc:
-            raise HTTPException(status_code=404, detail="手记不存在") from exc
+            raise HTTPException(status_code=404, detail="笔记不存在") from exc
 
     @app.get("/api/local/notebook/{note_id}/versions")
     async def note_versions(note_id: str):
         try:
-            return await run_in_threadpool(personal_notes.versions, note_id)
+            return await library_call(personal_notes.versions, note_id)
         except KeyError as exc:
-            raise HTTPException(status_code=404, detail="手记不存在") from exc
+            raise HTTPException(status_code=404, detail="笔记不存在") from exc
 
     @app.put("/api/local/notebook/{note_id}")
     async def save_note(note_id: str, payload: PersonalNoteRequest):
         try:
             flags = {name: getattr(payload, name) for name in ("starred", "deleted") if getattr(payload, name) is not None}
-            return await run_in_threadpool(personal_notes.save, note_id, payload.title, payload.body, payload.revision, **flags)
+            return await library_call(shared_notes.save_personal, note_id, payload.title, payload.body, payload.revision, **flags)
         except NoteConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except KeyError as exc:
-            raise HTTPException(status_code=404, detail="手记不存在") from exc
+            raise HTTPException(status_code=404, detail="笔记不存在") from exc
+
+    @app.get("/api/local/shared-notes/status")
+    async def shared_status():
+        try:
+            await library_call(lambda: None)
+        except HTTPException:
+            pass
+        return shared_notes.status()
+
+    @app.get("/api/local/shared-notes/conflict")
+    async def shared_conflict(note_id: str):
+        return await library_call(shared_notes.conflict, note_id)
+
+    @app.post("/api/local/shared-notes/resolve")
+    async def resolve_shared_conflict(payload: SharedNoteResolution):
+        if not shared_notes.enabled:
+            raise HTTPException(status_code=400, detail="尚未连接共享笔记库")
+        return await library_call(shared_notes.resolve, payload.note_id, payload.title, payload.body, payload.raw_hash, payload.app_hash)
+
+    @app.post("/api/local/shared-notes/restore")
+    async def restore_shared_note(payload: SharedNoteIdentity):
+        if not shared_notes.enabled:
+            raise HTTPException(status_code=400, detail="尚未连接共享笔记库")
+        await library_call(shared_notes.restore, payload.note_id)
+        return {"restored": True}
+
+    @app.post("/api/local/shared-notes/trash")
+    async def trash_shared_note(payload: SharedNoteIdentity):
+        if not shared_notes.enabled:
+            raise HTTPException(status_code=400, detail="尚未连接共享笔记库")
+        return await library_call(shared_notes.delete, payload.note_id)
+
+    @app.get("/api/local/shared-notes/asset")
+    async def shared_asset(note_id: str, target: str):
+        if not shared_notes.enabled:
+            raise HTTPException(status_code=404, detail="尚未连接共享笔记库")
+        path = await library_call(shared_notes.asset, note_id, target)
+        import base64
+        import mimetypes
+        if path.stat().st_size > 20_000_000:
+            raise HTTPException(status_code=400, detail="图片超过 20 MB")
+        data = await run_in_threadpool(path.read_bytes)
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        return {"data_url": "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii")}
+
+    @app.get("/api/local/shared-notes/link")
+    async def shared_link(note_id: str, target: str):
+        if not shared_notes.enabled:
+            raise HTTPException(status_code=404, detail="尚未连接共享笔记库")
+        return await library_call(shared_notes.link, note_id, target)
 
     def client() -> GitHubClient:
         credentials = runtime.credentials
@@ -634,6 +809,11 @@ def create_app(
     async def preview_obsidian_sync(
         payload: ObsidianPreviewRequest,
     ) -> dict[str, Any]:
+        if shared_notes.enabled:
+            requested = Path(payload.vault_path).expanduser().resolve()
+            connected = shared_notes.root.resolve()
+            if requested == connected or connected in requested.parents:
+                raise HTTPException(status_code=409, detail='该目录已是共享笔记库，修改会自动更新，请从「笔记」打开，无需再次导出')
         local_db = require_db()
         service: ObsidianSyncService = app.state.obsidian
         try:
@@ -949,6 +1129,63 @@ def create_app(
     async def run_jobs():
         return {"jobs": local_runs.list()}
 
+    @app.get("/api/local/comparisons/{source}/{source_id}")
+    async def comparison_status(source: Literal["lecture", "talk"], source_id: str):
+        return {"jobs": comparisons.list(source, source_id)}
+
+    @app.post("/api/local/comparisons/{source}/{source_id}")
+    async def generate_comparisons(source: Literal["lecture", "talk"], source_id: str,
+                                   payload: ComparisonRequest):
+        credentials = _require_talk_credentials()
+        if source == "talk":
+            item = _talk_or_404(source_id)
+            if jobs.is_running(source_id) or item["status"] in {"uploading", "dispatching", "transcribing", "summarizing"}:
+                raise HTTPException(status_code=409, detail="请等待讲座处理完成后再生成对照笔记")
+        else:
+            item = await run_in_threadpool(require_db().lecture, source_id)
+            if not item:
+                raise HTTPException(status_code=404, detail="课次不存在")
+        transcript = str(item.get("transcript") or "").strip()
+        if not transcript:
+            raise HTTPException(status_code=409, detail="没有可用转写文本")
+        try:
+            raw = await run_in_threadpool(client().repository_variable, "MODEL_PROVIDERS_JSON")
+            document = validate_model_config(raw or DEFAULT_MODEL_PROVIDERS)
+            enabled = {p["name"]: p for p in document["providers"] if p["enabled"]}
+            providers, seen = [], set()
+            for selection in payload.models:
+                identity = (selection.provider, selection.model)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                provider = enabled.get(selection.provider)
+                if not provider or selection.model not in provider["models"]:
+                    raise ValueError(f"模型未启用或未保存：{selection.provider}/{selection.model}")
+                key = payload.api_key.get_secret_value().strip() if selection.provider == payload.models[0].provider else ""
+                key = key or os.environ.get(provider["api_key_env"], "") or LocalAPIKeychain().load(provider)
+                if not key:
+                    raise ValueError(f"请先保存 {selection.provider} 的本机 API Key，或在本轮输入该供应商的 Key")
+                providers.append({"name": provider["name"], "base_url": provider["default_base_url"],
+                                  "models": [selection.model], "api_key": key,
+                                  **({"generation": provider["generation"]} if "generation" in provider else {})})
+            pages = [p for p in item.get("ppt_pages", []) if p.get("ocr_status", "done") == "done"] if source == "lecture" else []
+            material, _mode = assemble(transcript, None, pages)
+            title = str(item.get("course_title") or item.get("custom_title") or item.get("title") or "未命名讲座")
+            def save(body, ai_title, model):
+                if runtime.credentials is not credentials:
+                    raise ValueError("登录资料已变化，请重新生成")
+                if source == "talk":
+                    if talks.get_talk(source_id) is None:
+                        raise ValueError("讲座已删除")
+                    talks.save_summary(source_id, body, ai_title, model)
+                else:
+                    db.save_comparison(source_id, body, ai_title, model, credentials)
+            launched = comparisons.submit(source, source_id, providers, SYSTEM_PROMPT,
+                                          summary_user_content(title, material), save)
+            return {"jobs": launched, "model_policy": "selected-models"}
+        except (ValueError, OSError, GitHubAPIError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/local/runs/{job_id}/cancel")
     async def cancel_local_run(job_id: str):
         client()
@@ -1067,7 +1304,8 @@ def create_app(
 
     @app.get("/api/local/talks")
     async def list_talks():
-        return await run_in_threadpool(talks.list_talks)
+        rows = await run_in_threadpool(talks.list_talks)
+        return [{**row, **uploads.describe(row["id"])} for row in rows]
 
     @app.post("/api/local/talks")
     async def create_talk(payload: TalkCreateRequest):
@@ -1085,6 +1323,7 @@ def create_app(
     async def upload_talk_audio(
         file: UploadFile = File(...),
         title: str = Form(default=""),
+        upload_token: str = Form(default="", max_length=100),
     ):
         """Stage a recording and return immediately; chunks go up in back.
 
@@ -1106,7 +1345,8 @@ def create_app(
             ext, _ = validate_audio_upload(file.filename or "", raw)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        clean_title = str(title or "").strip()[:100]
+        clean_title = (str(title or "").strip() or Path(file.filename or "").stem)[:100]
+        audio_bytes = len(raw)
         try:
             encrypted = await run_in_threadpool(
                 encrypt_talk_blob, raw, credentials.stuid, credentials.uispsw
@@ -1117,33 +1357,12 @@ def create_app(
             ) from exc
         # Release the plaintext before any disk/network I/O.
         del raw
-        # Mint the row first so the talk id is stable, then stage + queue.
-        created = await run_in_threadpool(
-            talks.create_audio_talk, clean_title, ext, 0, "",
-        )
-        talk_id = created["id"]
-        remote_path = talk_audio_remote_path(talk_id, ext)
         try:
-            total = await run_in_threadpool(
-                uploads.stage_blob, talk_id, encrypted, ext, clean_title,
+            return await run_in_threadpool(
+                uploads.enqueue_blob, encrypted, ext, clean_title, audio_bytes, upload_token,
             )
         except OSError as exc:
-            await run_in_threadpool(talks.set_status, talk_id, "failed",
-                                    "本地保存录音失败，请检查磁盘空间并重新上传", "upload")
             raise HTTPException(status_code=500, detail="本地保存录音失败，请检查磁盘空间") from exc
-        del encrypted
-        await run_in_threadpool(talks.note_audio_pushed, talk_id, 0, remote_path)
-        await run_in_threadpool(talks.bump_upload_attempts, talk_id)
-        # Persist the chunk count on the row for the progress poll loop.
-        await run_in_threadpool(
-            talks.note_chunk_uploaded, talk_id, 0, total,
-        )
-        # Undo the index-0 marker: chunk indexes are 1-based.
-        await run_in_threadpool(talks.set_status, talk_id, "uploading")
-        uploads.submit(talk_id)
-        item = await run_in_threadpool(talks.get_talk, talk_id)
-        progress = await run_in_threadpool(talks.upload_progress, talk_id)
-        return {**(item or {}), "upload_progress": progress}
 
     @app.get("/api/local/talks/{talk_id}/upload-progress")
     async def talk_upload_progress(talk_id: str):
@@ -1168,6 +1387,8 @@ def create_app(
         if item["status"] == "ready":
             raise HTTPException(status_code=409, detail="笔记已生成，无需恢复上传")
         if uploads.is_active(item["id"]):
+            if item["status"] == "paused":
+                raise HTTPException(status_code=409, detail="正在暂停当前分片，请稍后继续")
             return item
         if item["status"] in {"transcribing", "summarizing"}:
             raise HTTPException(status_code=409, detail="云端正在处理，请等待处理结果")
@@ -1180,6 +1401,13 @@ def create_app(
             talks.upload_progress, item["id"]
         )
         return {**refreshed, "upload_progress": progress}
+
+    @app.post("/api/local/talks/{talk_id}/pause-upload")
+    async def pause_talk_upload(talk_id: str):
+        _talk_or_404(talk_id)
+        if not uploads.pause(talk_id):
+            raise HTTPException(status_code=409, detail="只能暂停排队或上传中的录音")
+        return _talk_or_404(talk_id)
 
     @app.post("/api/local/talks/{talk_id}/sync-transcript")
     async def sync_talk_transcript(talk_id: str):
@@ -1201,12 +1429,12 @@ def create_app(
 
     @app.get("/api/local/talks/{talk_id}")
     async def get_talk(talk_id: str):
-        return _talk_or_404(talk_id)
+        return {**_talk_or_404(talk_id), **uploads.describe(talk_id)}
 
     @app.delete("/api/local/talks/{talk_id}")
     async def delete_talk(talk_id: str):
         item = _talk_or_404(talk_id)
-        if uploads.is_active(item["id"]) or jobs.is_running(item["id"]) or item["status"] in {"transcribing", "summarizing", "dispatching"}:
+        if uploads.is_active(item["id"]) or jobs.is_running(item["id"]) or comparisons.is_running("talk", item["id"]) or item["status"] in {"transcribing", "summarizing", "dispatching"}:
             raise HTTPException(status_code=409, detail="讲座正在处理，请等待结束后再删除")
         deleted = await run_in_threadpool(
             talks.delete_talk, talk_id.strip()
@@ -1245,7 +1473,7 @@ def create_app(
     async def summarize_talk(talk_id: str, payload: TalkSummarizeRequest):
         """Generate using the complete saved chain and locally available keys."""
         item = _talk_or_404(talk_id)
-        if jobs.is_running(item["id"]) or item["status"] in {"transcribing", "dispatching", "summarizing", "uploading"}:
+        if jobs.is_running(item["id"]) or comparisons.is_running("talk", item["id"]) or item["status"] in {"transcribing", "dispatching", "summarizing", "uploading"}:
             raise HTTPException(
                 status_code=409, detail="该讲座正在生成中，请稍后刷新查看"
             )

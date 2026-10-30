@@ -36,6 +36,7 @@
     }
     await script('app.js');
     await script('reading.js');
+    await script('workspace.js');
     if (!pages) await script('notebook.js');
     // Rich Markdown is progressive: an offline local console still opens immediately.
     try {

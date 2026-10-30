@@ -26,6 +26,7 @@ const base = process.env.SEA_TEST_URL || 'http://127.0.0.1:18976';
     await page.reload();
     await page.locator('#note-title').waitFor();
     assert.equal(await page.locator('#note-title').inputValue(),title);
+    await page.locator('#note-mode').click();
     await page.locator('#note-body').fill('修订后的私人手记。');
     await page.waitForFunction(()=>document.getElementById('note-save-state').textContent==='已保存');
     await page.locator('#note-more').click();

@@ -37,6 +37,12 @@ def test_keychain_does_not_accept_empty_keys():
         LocalAPIKeychain(MemoryBackend()).save(provider(), '  ')
 
 
+def test_disabled_keychain_never_initializes_native_backend(monkeypatch):
+    monkeypatch.setenv('SEA_DISABLE_KEYCHAIN', '1')
+    monkeypatch.setattr('local_web.api_keychain._NativeKeychain', lambda: pytest.fail('must not read personal keychain'))
+    assert LocalAPIKeychain().load(provider()) is None
+
+
 def test_local_summarizer_reads_remembered_key_without_prompting(monkeypatch, capsys):
     from src.ai import summarizer
     from src.runtime import config

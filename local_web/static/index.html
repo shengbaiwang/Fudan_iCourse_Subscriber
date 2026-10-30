@@ -28,7 +28,7 @@
       <span><strong>丰饶之海</strong><small>私人知识库</small></span>
     </button>
       <nav class="desktop-nav" aria-label="主导航">
-        <button class="nav-button" type="button" data-capability="notes" data-view="notes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 16h6"/></svg>手记</button>
+        <button class="nav-button" type="button" data-capability="notes" data-view="notes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 16h6"/></svg>笔记</button>
         <button class="nav-button" type="button" data-view="courses"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h6v16H4zM14 4h6v16h-6zM7 8h0M17 8h0"/></svg>课程</button>
         <button class="nav-button" type="button" data-capability="talks" data-view="talks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg>讲座</button>
         <button class="nav-button" type="button" data-view="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg>搜索</button>
@@ -41,6 +41,7 @@
   <header id="app-header" class="app-header hidden">
     <div class="header-inner">
       <div class="header-title">
+        <button id="nav-panel-toggle" class="icon-button panel-toggle" type="button" aria-label="收起资料库导航" aria-controls="app-sidebar" aria-expanded="true" title="收起资料库导航">☰</button>
         <button id="back-button" class="icon-button hidden" type="button" aria-label="返回">←</button>
         <div>
           <strong id="page-title">丰饶之海</strong>
@@ -88,25 +89,34 @@
 
     <section id="dashboard" class="hidden">
 
-      <section id="view-notes" class="view-pane notebook-view hidden" aria-label="私人手记">
-        <aside class="notebook-index">
-          <div class="notebook-head"><h1>手记</h1><button id="note-new" class="icon-button" type="button" aria-label="新建手记" title="新建手记 ⌘N">＋</button></div>
-          <input id="note-search" type="search" placeholder="搜索手记" aria-label="搜索手记">
-          <div class="notebook-filters" aria-label="手记筛选"><button data-note-filter="all" class="active" type="button">全部</button><button data-note-filter="starred" type="button">收藏</button><button data-note-filter="trash" type="button">回收站</button></div>
-          <div id="note-list" class="note-list" aria-label="手记列表"></div>
-          <div class="notebook-index-footer"><span id="note-count" class="meta"></span><button id="note-import" class="text-button" type="button">导入 Markdown</button><input id="note-import-files" class="hidden" type="file" accept=".md,.markdown,.txt" multiple></div>
+      <section id="view-notes" class="view-pane notebook-view hidden" aria-label="笔记">
+        <aside id="notebook-index" class="notebook-index">
+          <div class="notebook-head"><h1>笔记</h1><button id="note-new" class="icon-button" type="button" aria-label="新建笔记" title="新建笔记 ⌘N">＋</button></div>
+          <button id="shared-notes-status" class="text-button shared-notes-status hidden" type="button" aria-live="polite"></button>
+          <input id="note-search" type="search" placeholder="搜索全部笔记" aria-label="搜索笔记">
+          <div class="notebook-filters" aria-label="笔记来源"><button data-note-kind="all" class="active" type="button">全部</button><button data-note-kind="personal" type="button">个人</button><button data-note-kind="course" type="button">课程</button><button data-note-kind="talk" type="button">讲座</button></div>
+          <div class="notebook-collections" aria-label="笔记筛选"><button data-note-filter="all" class="active" type="button">全部笔记</button><button data-note-filter="starred" type="button">收藏</button><button data-note-filter="trash" type="button" title="可恢复已删除的共享笔记">回收站</button></div>
+          <div class="note-folders-heading"><span>文件夹</span><button id="note-folder-new" class="text-button" type="button" aria-label="新建文件夹" title="在当前文件夹中新建">＋</button></div>
+          <div id="note-list" class="note-list" role="tree" aria-label="笔记文件夹"></div>
+          <div class="notebook-index-footer"><span id="note-count" class="meta"></span><button id="note-import" class="text-button" type="button" title="可同时选择 Markdown 和文中引用的 PNG、JPEG、GIF、WebP 图片，也可拖入列表">导入 Markdown</button><input id="note-import-files" class="hidden" type="file" accept=".md,.markdown,.txt,.png,.jpg,.jpeg,.gif,.webp" multiple></div>
         </aside>
         <div class="notebook-paper">
-          <div id="note-welcome" class="note-welcome"><img class="brand-icon" src="branding/icourse-icon-192.png" width="64" height="64" alt=""><h2>让知识在这里汇流。</h2><button id="note-first" class="primary" type="button">写一篇手记</button></div>
+          <div class="notebook-panel-bar"><button id="notes-panel-toggle" class="text-button panel-toggle" type="button" aria-controls="notebook-index" aria-expanded="true">收起笔记列表</button><div><button id="note-find-toggle" class="text-button" type="button" title="查找正文 ⌘F">查找正文</button><button id="outline-panel-toggle" class="text-button panel-toggle" type="button" aria-controls="note-outline" aria-expanded="true">收起大纲</button></div></div>
+          <div id="note-find-bar" class="note-find-bar hidden" role="search" aria-label="查找笔记正文"><input id="note-find" type="search" aria-label="查找正文" placeholder="查找正文…"><span id="note-find-count" role="status"></span><button id="note-find-prev" class="text-button" type="button" aria-label="上一个匹配">↑</button><button id="note-find-next" class="text-button" type="button" aria-label="下一个匹配">↓</button><button id="note-find-close" class="text-button" type="button" aria-label="关闭正文查找">×</button></div>
+          <div id="note-welcome" class="note-welcome"><img class="brand-icon" src="branding/icourse-icon-192.png" width="64" height="64" alt=""><h2>让知识在这里汇流。</h2><p class="meta">在这里阅读课程、讲座，也写下自己的想法。</p><button id="note-first" class="primary" type="button">写一篇笔记</button></div>
           <article id="note-editor" class="note-editor hidden">
-            <div class="note-toolbar"><button id="note-index-back" class="text-button" type="button">← 手记</button><span id="note-save-state" role="status">已保存</span><div class="note-tools"><button id="note-mode" class="text-button" type="button">阅读</button><button id="note-star" class="icon-button" type="button" aria-label="收藏手记">☆</button><button id="note-more" class="icon-button" type="button" aria-label="手记操作" aria-haspopup="menu">⋯</button></div></div>
-            <input id="note-title" class="note-title-input" aria-label="手记标题" placeholder="未命名手记" maxlength="200">
+            <div class="note-toolbar"><button id="note-index-back" class="text-button" type="button">← 笔记</button><span id="note-save-state" role="status">已保存</span><div class="note-tools"><button id="note-undo" class="text-button" type="button" aria-label="撤销编辑" title="撤销 ⌘Z" disabled>↶</button><button id="note-redo" class="text-button" type="button" aria-label="重做编辑" title="重做 ⇧⌘Z" disabled>↷</button><button id="note-mode" class="text-button" type="button">阅读</button><button id="note-star" class="icon-button" type="button" aria-label="收藏笔记">☆</button><button id="note-more" class="icon-button" type="button" aria-label="笔记操作" aria-haspopup="menu">⋯</button></div></div>
+            <input id="note-title" class="note-title-input" aria-label="笔记标题" placeholder="未命名笔记" maxlength="200">
             <p id="note-date" class="meta"></p>
-            <textarea id="note-body" class="note-body-input" aria-label="手记正文" placeholder="从一个想法开始…" spellcheck="false"></textarea>
-            <div id="note-preview" class="summary hidden" tabindex="0" aria-label="手记阅读"></div>
+            <div id="note-folder-path" class="note-folder-path" aria-label="笔记位置"></div>
+            <div id="note-source-controls" class="note-source-controls hidden"><div class="note-source-actions"><button id="note-source-link" class="text-button" type="button">查看来源 →</button><button id="note-source-tab" class="text-button" type="button">查看转写</button></div><label id="note-version-label">笔记版本<select id="note-version" aria-label="笔记版本"></select></label></div>
+            <section id="note-conflict-review" class="note-conflict-review hidden" aria-label="比较笔记版本"></section>
+            <textarea id="note-body" class="note-body-input" aria-label="笔记正文" placeholder="从一个想法开始…" spellcheck="false"></textarea>
+            <div id="note-preview" class="summary hidden" tabindex="0" aria-label="笔记阅读"></div>
             <details id="note-history" class="note-history hidden"><summary>历史版本</summary><div id="note-history-list"></div></details>
           </article>
         </div>
+        <aside id="note-outline" class="note-outline" aria-label="笔记大纲"><div class="note-outline-heading">大纲</div><nav id="note-outline-list" aria-label="章节导航"><p class="meta">打开笔记后显示标题大纲</p></nav></aside>
       </section>
 
       <section id="view-courses" class="view-pane content-wide">
@@ -185,18 +195,14 @@
       <dialog id="talk-upload" aria-labelledby="talk-upload-title">
         <form id="talk-upload-form" method="dialog">
           <h2 id="talk-upload-title">上传录音</h2>
-          <p class="muted">录音加密上传后生成笔记，完成后删除云端音频。支持常见音视频格式，最大 500 MB。</p>
-          <label>标题（可选）<input id="talk-upload-title-input" maxlength="100" placeholder="例如 梯度下降"></label>
-          <label>录音文件<input id="talk-upload-file" type="file" accept=".mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.mp4,.mov,audio/*,video/mp4,video/quicktime"></label>
-          <div id="talk-upload-progress" class="talk-upload-progress hidden" aria-live="polite">
-            <div class="talk-upload-progress-bar"><div id="talk-upload-progress-fill"></div></div>
-            <p id="talk-upload-progress-text" class="meta"></p>
-          </div>
+          <p class="muted">可一次选择多个录音，也可拖入讲座列表。每个文件最大 500 MB，默认以文件名命名。</p>
+          <label>标题（单个文件时可选）<input id="talk-upload-title-input" maxlength="100" placeholder="留空使用文件名"></label>
+          <label>录音文件<input id="talk-upload-file" type="file" multiple accept=".mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.mp4,.mov,audio/*,video/mp4,video/quicktime"></label>
+          <p class="meta">加入后可继续浏览，进度在讲座列表显示。本机暂存完成后，退出应用也能在下次启动时继续处理。</p>
           <p id="talk-upload-error" role="alert"></p>
           <div class="section-editor-actions">
             <button id="talk-upload-cancel" type="button">取消</button>
-            <button id="talk-upload-retry" type="button" class="hidden">重新上传</button>
-            <button id="talk-upload-save" class="primary" type="submit">上传并转写</button>
+            <button id="talk-upload-save" class="primary" type="submit">加入后台队列</button>
           </div>
         </form>
       </dialog>
@@ -244,16 +250,19 @@
         </div>
         <p id="blind-hint" class="blind-hint"></p>
         <section id="blind-generate" class="blind-generate" aria-label="生成对照版本">
-          <strong>重新生成对照笔记</strong>
-          <p class="meta">按模型设置顺序生成一份新笔记；已有版本都会保留。会产生模型费用。</p>
-          <div id="blind-model-list" class="blind-model-list" role="group" aria-label="模型生成顺序"></div>
-          <label id="blind-api-keys" class="blind-api-keys hidden">首个供应商 API Key（可选）<input id="blind-api-key" type="password" autocomplete="off" placeholder="已存本机钥匙串时可留空"></label>
+          <strong>选择本轮对比模型</strong>
+          <p id="blind-generate-description" class="meta">每个所选模型各生成一份，使用相同材料和提示词；失败可单独重试。会产生模型费用。</p>
+          <div id="blind-model-list" class="blind-model-list" role="group" aria-label="本轮对比模型"></div>
+          <label id="blind-api-keys" class="blind-api-keys hidden"><span id="blind-key-label">所选首个供应商 API Key（可选）</span><input id="blind-api-key" type="password" autocomplete="off" placeholder="已存本机钥匙串时可留空"></label>
           <div class="blind-generate-row">
-            <button id="blind-generate-button" class="primary" type="button" disabled>按模型顺序重新生成</button>
+            <button id="blind-generate-button" class="primary" type="button" disabled>生成所选模型的笔记</button>
             <button id="blind-refresh-versions" type="button">刷新版本</button>
+            <button id="blind-refresh-models" type="button">刷新模型</button>
           </div>
           <p id="blind-generate-hint" class="meta"></p>
+          <div id="blind-job-list" aria-live="polite"></div>
         </section>
+        <details id="blind-history" class="blind-history"><summary>选择参与对比的历史版本</summary><div id="blind-history-list"></div></details>
         <div id="blind-preference" class="blind-preference hidden"></div>
         <div id="blind-grid" class="blind-grid"></div>
       </section>
@@ -271,7 +280,7 @@
           </div>
         </div>
         <p id="search-meta" class="search-meta hidden" role="status" aria-live="polite"></p>
-        <div id="search-personal-results" class="personal-search-results hidden" aria-label="手记搜索结果"></div>
+        <div id="search-personal-results" class="personal-search-results hidden" aria-label="笔记搜索结果"></div>
         <div id="search-results" class="search-results empty">输入关键词后开始搜索。</div>
         <nav id="search-pagination" class="pagination hidden" aria-label="搜索结果翻页"></nav>
         <button id="search-retry" class="hidden" type="button">重试</button>
@@ -346,14 +355,14 @@
           </div>
         </div>
         <section class="runs-card run-history"><div class="section-title"><h2>本地运行</h2><span class="meta">自动更新</span></div><div id="local-runs" class="runs-list empty">暂无本地任务。</div></section>
-        <section class="runs-card run-history"><div class="section-title"><h2>GitHub Actions</h2><button id="refresh-runs-button" type="button">刷新状态</button></div><div id="runs" class="runs-list empty">正在读取运行记录…</div><div class="quick-actions"><button id="backfill-titles-button" type="button">设置标题补齐任务</button><button data-capability="obsidian" id="obsidian-button" type="button">打开 Obsidian 同步</button></div></section>
+        <section class="runs-card run-history"><div class="section-title"><h2>GitHub Actions</h2><button id="refresh-runs-button" type="button">刷新状态</button></div><div id="runs" class="runs-list empty">正在读取运行记录…</div><div class="quick-actions"><button id="backfill-titles-button" type="button">设置标题补齐任务</button><button data-capability="obsidian" id="obsidian-button" type="button">Obsidian 连接</button></div></section>
       </section>
 
       <section id="view-settings" class="view-pane content-column hidden">
         <div class="view-heading"><div><h1>设置</h1></div></div>
         <section class="settings-card"><h2>当前连接</h2><p id="settings-repository" class="mono-value">—</p><div class="settings-actions"><button id="configure-button" type="button">重新配置会话</button><button id="forget-credentials-button" class="danger" type="button">忘记本机登录</button></div></section>
-        <section class="settings-card"><h2>管理</h2><div class="settings-actions"><button id="model-button" class="primary" type="button">打开模型管理</button><button data-capability="obsidian" id="settings-obsidian-button" type="button">打开 Obsidian 同步</button></div></section>
-        <section data-capability="notes" class="settings-card"><h2>保存与备份</h2><p class="meta">手记和历史版本保存在本机，备份可导入其他电脑。</p><div class="settings-actions"><button id="notebook-backup" type="button">导出手记备份</button><button id="notebook-restore" type="button">导入备份</button><input id="notebook-restore-file" class="hidden" type="file" accept=".zip"></div><p id="notebook-backup-status" class="meta" role="status"></p></section>
+        <section class="settings-card"><h2>管理</h2><div class="settings-actions"><button id="model-button" class="primary" type="button">打开模型管理</button><button data-capability="obsidian" id="settings-obsidian-button" type="button">Obsidian 连接</button></div></section>
+        <section data-capability="notes" class="settings-card"><h2>保存与备份</h2><p class="meta">个人笔记、课程与讲座的手动修订、历史版本、文件夹归类与收藏保存在本机。备份包含这些内容，课程和讲座的原始资料需另行保存。</p><div class="settings-actions"><button id="notebook-backup" type="button">导出笔记备份</button><button id="notebook-restore" type="button">导入备份</button><input id="notebook-restore-file" class="hidden" type="file" accept=".zip"></div><p id="notebook-backup-status" class="meta" role="status"></p></section>
         <section class="settings-card"><h2>工具</h2><div class="settings-actions"><button id="settings-rerun-button" type="button">重新生成笔记</button><button id="settings-automation-button" type="button">运行与进度</button></div></section>
       </section>
 
@@ -390,7 +399,7 @@
   </main>
 
   <nav id="mobile-nav" class="mobile-nav hidden" aria-label="主导航">
-    <button class="nav-button" type="button" data-capability="notes" data-view="notes">手记</button>
+    <button class="nav-button" type="button" data-capability="notes" data-view="notes">笔记</button>
     <button class="nav-button" type="button" data-view="courses">课程</button>
     <button class="nav-button" type="button" data-capability="talks" data-view="talks">讲座</button>
     <button class="nav-button" type="button" data-view="search">搜索</button>

@@ -143,6 +143,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         if (p==='/courses') return json(courses.filter(course => !deletedLocalCourses.has(course.course_id)).map(course => ({...course,
           total_count:course.total_count - rows('SELECT sub_id FROM lectures WHERE course_id=?',[course.course_id]).filter(row=>deletedLocalLectures.has(row.sub_id)).length})));
         if (p.startsWith('/notebook')) return json([]);
+        if (p==='/note-library') return json({notes:[],folders:[]});
         if (p==='/lecture-names') {if(request.method()==='PUT') {const body=request.postDataJSON();names[body.sub_id]=body.name;} return json({names});}
         if (p==='/lecture-holidays') {
           if(request.method()==='PUT') {
@@ -818,17 +819,18 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         const color = selector => getComputedStyle(document.querySelector(`#note-color-check ${selector}`)).color;
         return {
           title: color('h2'), subtitle: color('h3'), emphasis: color('strong'), code: color('code'), quote: color('blockquote'),
+          emphasisWeight: getComputedStyle(document.querySelector('#note-color-check strong')).fontWeight,
           quoteBackground: getComputedStyle(document.querySelector('#note-color-check blockquote')).backgroundColor,
         };
       });
       assert.deepEqual(await noteColors(), {
-        title:'rgb(229, 228, 223)', subtitle:'rgb(155, 200, 241)', emphasis:'rgb(229, 228, 223)',
+        title:'rgb(229, 228, 223)', subtitle:'rgb(155, 200, 241)', emphasis:'rgb(253, 164, 175)', emphasisWeight:'400',
         code:'rgb(155, 200, 241)', quote:'rgb(161, 163, 169)', quoteBackground:'rgba(0, 0, 0, 0)',
       });
       await page.locator('#theme-toggle').click();
       assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'light');
       assert.deepEqual(await noteColors(), {
-        title:'rgb(38, 43, 49)', subtitle:'rgb(30, 80, 133)', emphasis:'rgb(38, 43, 49)',
+        title:'rgb(38, 43, 49)', subtitle:'rgb(30, 80, 133)', emphasis:'rgb(180, 35, 24)', emphasisWeight:'400',
         code:'rgb(33, 97, 166)', quote:'rgb(116, 121, 131)', quoteBackground:'rgba(0, 0, 0, 0)',
       });
       await page.locator('#theme-toggle').click();

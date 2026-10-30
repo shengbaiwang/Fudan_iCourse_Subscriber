@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 from contextlib import contextmanager
 import hashlib
+import os
 import sys
 
 from src.runtime.model_config import normalize_base_url
@@ -101,12 +102,16 @@ class LocalAPIKeychain:
 
     def _backend(self):
         if self.backend is None:
+            if os.environ.get('SEA_DISABLE_KEYCHAIN') == '1':
+                raise OSError('本次运行已禁用 API 钥匙串')
             if sys.platform != 'darwin':
                 raise OSError('当前系统不支持 macOS API 钥匙串')
             self.backend = _NativeKeychain()
         return self.backend
 
     def load(self, provider):
+        if self.backend is None and os.environ.get('SEA_DISABLE_KEYCHAIN') == '1':
+            return None
         if sys.platform != 'darwin' and self.backend is None:
             return None
         return self._backend().read(self.service(provider))

@@ -1,6 +1,10 @@
 #!/bin/zsh
 set -eu
 PROJECT_DIR="${0:A:h}"
+INSTALLED_APP="/Applications/丰饶之海.app"
+if [[ -d "${INSTALLED_APP}" ]]; then
+  exec /usr/bin/open "${INSTALLED_APP}"
+fi
 APP_PATH="${PROJECT_DIR}/dist/desktop/丰饶之海.app"
 if [[ -d "${APP_PATH}" ]]; then
   exec /usr/bin/open "${APP_PATH}"
