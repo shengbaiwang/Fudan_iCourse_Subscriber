@@ -111,7 +111,7 @@ def credentials():
 
 def login(creds):
     from src.api.icourse import ICourseClient
-    from src.api.webvpn import WebVPNSession
+    from src.api.webvpn import WebVPNSession, WebVPNSessionError
     from scripts.local_http import BrowserHTTPSAdapter
     for attempt in range(2):
         vpn = WebVPNSession()
@@ -120,22 +120,17 @@ def login(creds):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9",
         })
-        # Rejected credentials are never retried. Only a successful login
-        # followed by a cold session / incomplete CAS redirect gets a retry.
+        # Retry an incomplete session once with a fresh ticket.
         try:
             vpn.login(creds.stuid, creds.uispsw)
-            try:
-                vpn.authenticate_icourse(creds.stuid, creds.uispsw)
-            except RuntimeError as exc:
-                transient = ("WebVPN session cold" in str(exc)
-                             or "Failed to extract lck from CAS redirect chain" in str(exc))
-                if transient and attempt == 0:
-                    print("WebVPN/CAS 会话未生效，5 秒后仅重试一次。", flush=True)
-                    vpn.session.close()
-                    time.sleep(5)
-                    continue
-                raise
+            vpn.authenticate_icourse(creds.stuid, creds.uispsw)
             return ICourseClient(vpn)
+        except WebVPNSessionError:
+            vpn.session.close()
+            if attempt:
+                raise
+            print("WebVPN/CAS 会话未生效，5 秒后仅重试一次。", flush=True)
+            time.sleep(5)
         except BaseException:
             vpn.session.close()
             raise

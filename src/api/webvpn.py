@@ -9,7 +9,7 @@ Handles:
 import html as html_mod
 import re
 from binascii import hexlify, unhexlify
-from urllib.parse import urlparse, urlencode, quote, urljoin
+from urllib.parse import urlparse, urlencode, quote
 
 import requests
 from Crypto.Cipher import AES
@@ -112,6 +112,10 @@ def get_ordinary_url(vpn_url: str) -> str:
     return original
 
 
+class WebVPNSessionError(RuntimeError):
+    """A WebVPN or iCourse session could not be established after UIS login."""
+
+
 class WebVPNSession:
     """Manages a WebVPN session with full IDP authentication."""
 
@@ -163,7 +167,7 @@ class WebVPNSession:
         self._establish_session(ticket_url)
 
         self.logged_in = True
-        print("[*] WebVPN login successful!")
+        print("[*] WebVPN ticket flow finished. Checking access during iCourse CAS login.")
         return True
 
     def authenticate_icourse(
@@ -183,15 +187,6 @@ class WebVPNSession:
 
         print("[*] Starting iCourse CAS authentication through WebVPN...")
 
-        # Pre-flight: probe the WebVPN portal.  A cold session redirects to
-        # /login instantly (status 302); a hot session returns 200.  Fail
-        # fast on cold — login_with_retry() in main.py will re-login.
-        warmup = self.session.get(
-            config.WEBVPN_BASE + "/", allow_redirects=False, timeout=5,
-        )
-        if warmup.status_code != 200:
-            raise RuntimeError("WebVPN session cold — re-login needed")
-
         idp_vpn_base = get_vpn_url(config.IDP_BASE)
 
         # Step 1: Initiate CAS login via casapi.  Use allow_redirects=True
@@ -206,6 +201,12 @@ class WebVPNSession:
         vpn_url = get_vpn_url(casapi_url)
 
         resp = self.session.get(vpn_url, allow_redirects=True, timeout=60)
+        final_url = urlparse(resp.url)
+        if (final_url.netloc == urlparse(config.WEBVPN_BASE).netloc
+                and final_url.path.rstrip("/") == "/login"):
+            raise WebVPNSessionError("WebVPN redirected the iCourse login to the VPN login page")
+        if resp.status_code >= 400:
+            raise WebVPNSessionError(f"iCourse CAS entry failed (HTTP {resp.status_code})")
         lck = None
         for source in [resp.url] + [
             h.headers.get("Location", "") for h in (resp.history or [])
@@ -219,9 +220,9 @@ class WebVPNSession:
             if m:
                 lck = m.group(1)
         if not lck:
-            raise RuntimeError(
+            raise WebVPNSessionError(
                 f"Failed to extract lck from CAS redirect chain "
-                f"(final URL: {resp.url[:120]})"
+                f"(HTTP {resp.status_code}, redirects: {len(resp.history)})"
             )
 
         entity_id = config.ICOURSE_BASE
@@ -357,15 +358,12 @@ class WebVPNSession:
         if resp.status_code == 200:
             try:
                 user_data = resp.json()
-                if user_data.get("code") in (0, 200):
-                    print("    Verified: login OK")
-                    print("[*] iCourse authentication successful!")
-                    return True
-            except Exception:
-                pass
-
-        print("    Could not verify iCourse auth via API, proceeding...")
-        return True
+            except ValueError:
+                user_data = None
+            if isinstance(user_data, dict) and user_data.get("code") in (0, 200):
+                print("[*] iCourse authentication verified via API.")
+                return True
+        raise WebVPNSessionError(f"iCourse session verification failed (HTTP {resp.status_code})")
 
     def get(self, url: str, **kwargs) -> requests.Response:
         """GET request through WebVPN. Converts URL automatically."""
@@ -574,26 +572,15 @@ class WebVPNSession:
 
     def _establish_session(self, ticket_url: str):
         """Step 7: Follow the ticket URL to establish WebVPN session."""
-        for attempt in range(3):
-            try:
-                resp = self.session.get(
-                    ticket_url, allow_redirects=True, timeout=20
-                )
-                if resp.status_code == 200:
-                    print("    Session established.")
-                    return
-                raise RuntimeError(
-                    f"Failed to establish WebVPN session (status={resp.status_code})"
-                )
-            except requests.exceptions.Timeout:
-                has_ticket = any(
-                    "wengine_vpn_ticket" in c.name
-                    for c in self.session.cookies
-                )
-                if has_ticket:
-                    print("    Session cookie set despite timeout.")
-                    return
-                if attempt < 2:
-                    print(f"    Timeout, retrying ({attempt + 2}/3)...")
-                    continue
-                raise
+        try:
+            resp = self.session.get(ticket_url, allow_redirects=True, timeout=60)
+        except requests.exceptions.Timeout:
+            if any(c.name.startswith("wengine_vpn_ticket") and c.value
+                   for c in self.session.cookies):
+                print("    WebVPN issued a session cookie before the redirect timed out.")
+                return
+            # The server may have consumed the one-use CAS ticket before the
+            # response timed out. The caller must start with a fresh ticket.
+            raise WebVPNSessionError("WebVPN ticket redemption timed out") from None
+        if resp.status_code != 200:
+            raise WebVPNSessionError(f"WebVPN ticket redemption failed (HTTP {resp.status_code})")
