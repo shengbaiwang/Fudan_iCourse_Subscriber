@@ -159,6 +159,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           StuId: ${{ secrets.STUID }}
           UISPsw: ${{ secrets.UISPSW }}
+          UIS_TOTP_SECRET: ${{ secrets.UIS_TOTP_SECRET }}
           COURSE_IDS: ${{ secrets.COURSE_IDS }}
           SUBSCRIBED_COURSE_IDS: ${{ secrets.COURSE_IDS }}
           COURSE_AUTO_CHECK_JSON: ${{ vars.COURSE_AUTO_CHECK_JSON }}

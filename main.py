@@ -30,7 +30,7 @@ from src.runtime.progress import emit, note_saved
 from src.runtime.lecture_process import drive_lectures as drive_supervised_lectures
 from src.ai.summarizer import Summarizer
 from src.ai.transcriber import Transcriber
-from src.api.webvpn import WebVPNSession
+from src.api.webvpn import SecondFactorError, WebVPNSession
 
 
 def login_with_retry(max_attempts: int = 10) -> WebVPNSession:
@@ -45,11 +45,10 @@ def login_with_retry(max_attempts: int = 10) -> WebVPNSession:
             return vpn
         except Exception as e:
             vpn.session.close()
-            if attempt < max_attempts - 1:
-                print(f"  Failed: {type(e).__name__}: {e}; retrying...")
-                time.sleep(5)
-            else:
+            if isinstance(e, SecondFactorError) or attempt == max_attempts - 1:
                 raise
+            print(f"  Failed: {type(e).__name__}: {e}; retrying...")
+            time.sleep(5)
 
 
 def _check_session(client: ICourseClient) -> None:

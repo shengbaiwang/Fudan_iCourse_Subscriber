@@ -185,6 +185,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           StuId: ${{ secrets.STUID }}
           UISPsw: ${{ secrets.UISPSW }}
+          UIS_TOTP_SECRET: ${{ secrets.UIS_TOTP_SECRET }}
           COURSE_IDS: ${{ inputs.course_ids }}
           TITLE_COURSE_IDS: ${{ inputs.course_ids }}
           LECTURE_ORDER: ${{ inputs.lecture_order || 'api' }}
