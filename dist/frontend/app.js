@@ -25,6 +25,7 @@ let lectureHolidays = new Set();
 let lectureHolidaySaving = false;
 let lectureMenu = null;
 let currentLecture = null;
+let switchingLecture = false;
 let detailTab = "summary";
 let courseRows = [];
 let searchTimer = null;
@@ -251,10 +252,10 @@ function activateMath(element) {
 }
 
 function renderMarkdown(value) {
-  const stashed = _stashFormulas(value);
   if (window.ICS?.render && window.marked && window.DOMPurify) {
-    return _restoreFormulas(window.ICS.render.renderMarkdown(stashed.text || "暂无摘要"), stashed.formulas);
+    return window.ICS.render.renderMarkdown(String(value || "暂无摘要"));
   }
+  const stashed = _stashFormulas(value);
   const lines = stashed.text.replace(/\r\n?/g, "\n").split("\n");
   const html = [];
   let paragraph = [];
@@ -1836,7 +1837,9 @@ function renderLectureList() {
 
 async function openLecture(subId, options = {}) {
   closeLectureMenu(false);
-  currentLecture = await api(`/api/local/lectures/${encodeURIComponent(subId)}`);
+  const lecture = await api(`/api/local/lectures/${encodeURIComponent(subId)}`);
+  if (options.fromLecture && (activeView !== "detail" || currentLecture !== options.fromLecture)) return;
+  currentLecture = lecture;
   if (!currentCourse || String(currentCourse.course_id) !== String(currentLecture.course_id)) {
     currentCourse = courseRows.find((course) => String(course.course_id) === String(currentLecture.course_id)) || {
       course_id: currentLecture.course_id,
@@ -1852,7 +1855,11 @@ async function openLecture(subId, options = {}) {
   // Empty on purpose — renderSummaryVersions auto-selects the latest version.
   selectedSummaryVersionKeys = new Set();
   renderDetail();
-  showView("detail", {restoreReading: !options.terms?.length});
+  showView("detail", {restoreReading: !options.terms?.length && !options.fromLecture});
+  if (options.fromLecture) {
+    $("#detail-title").focus({preventScroll: true});
+    window.scrollTo(0, 0);
+  }
   // 搜索定位：高亮关键词并滚动到首个命中处。
   if (Array.isArray(options.terms) && options.terms.length) {
     const root = $("#detail-content");
@@ -1946,9 +1953,7 @@ function renderDetail() {
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
   });
-  const index = courseLectures.findIndex((lecture) => String(lecture.sub_id) === String(currentLecture.sub_id));
-  $("#previous-lecture").disabled = index <= 0;
-  $("#next-lecture").disabled = index < 0 || index >= courseLectures.length - 1;
+  updateLectureNavigation();
   applyStoredHighlights(root);
 }
 
@@ -2359,47 +2364,132 @@ function openBlindCompare() {
     message("请先打开一篇课次或讲座笔记。", true);
     return;
   }
-  // 单版本也可进入：按保存顺序重新生成，然后比较历史版本。
+  // 单版本也可进入：选择模型生成新版本，再与历史笔记比较。
   blindCompare = {
     ...payload,
     revealed: new Set(),
     preferredKey: null,
     mode: "blind",
     generating: false,
+    selectedModels: new Set(),
+    includedKeys: new Set(payload.versions.map(version => version.key)),
+    jobs: [],
     order: shuffleKeys(payload.versions.map((version) => version.key)),
   };
   renderBlindCompare();
   showView("blindCompare");
   ensureBlindModelOptions().catch((error) => {
-    const hint = $("#blind-generate-hint");
-    if (hint) hint.textContent = error.message;
+    if (blindCompare) blindCompare.modelError = error.message;
   }).finally(() => renderBlindGeneratePanel());
   scheduleBlindRefresh();
+  refreshBlindVersions().catch(error => message(error.message, true));
 }
 
 async function ensureBlindModelOptions() {
-  await loadGenerationOrder("#blind-model-list", true);
+  if (blindCompare) blindCompare.modelError = "";
+  if (isPages) {
+    await loadGenerationOrder("#blind-model-list", true);
+    $("#blind-generate-description").textContent = "网页版按已保存的模型顺序生成；桌面版可选择本轮对比模型。";
+  } else {
+    const result = await api("/api/local/model-providers");
+    rerunModelOptions = (result.providers || []).filter(p => p.enabled)
+      .flatMap(p => (p.models || []).map(model => ({provider: String(p.name), model: String(model)})));
+    if (!rerunModelOptions.length) throw new Error("请先在模型与 API 中添加并启用模型。");
+    if (blindCompare) {
+      const available = new Set(rerunModelOptions.map(option => JSON.stringify(option)));
+      blindCompare.selectedModels = new Set([...blindCompare.selectedModels].filter(key => available.has(key)));
+    }
+    renderBlindModelChoices();
+  }
   renderBlindGeneratePanel();
+}
+
+function renderBlindModelChoices() {
+  if (!blindCompare || isPages) return;
+  const list = $("#blind-model-list");
+  list.replaceChildren();
+  rerunModelOptions.forEach(option => {
+    const key = JSON.stringify(option);
+    const label = document.createElement("label");
+    label.className = "blind-model-choice";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = blindCompare.selectedModels.has(key);
+    check.onchange = () => {
+      if (check.checked) blindCompare.selectedModels.add(key);
+      else blindCompare.selectedModels.delete(key);
+      renderBlindGeneratePanel();
+    };
+    label.append(check, document.createTextNode(`${option.provider} / ${option.model}`));
+    list.append(label);
+  });
+}
+
+function blindJobsBusy() {
+  return Boolean(blindCompare?.jobs.some(job => ["queued", "running"].includes(job.status)));
 }
 
 function renderBlindGeneratePanel() {
   const button = $("#blind-generate-button");
   const talkBusy = blindCompare?.source === "talk" && currentTalk
     && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
-  button.disabled = !rerunModelOptions.length || Boolean(blindCompare?.generating) || talkBusy;
-  button.textContent = blindCompare?.generating || talkBusy ? "生成中…" : "按模型顺序重新生成";
-  $("#blind-api-keys").classList.toggle("hidden", blindCompare?.source !== "talk");
+  const busy = Boolean(blindCompare?.generating) || talkBusy || blindJobsBusy();
+  const selected = blindCompare?.selectedModels.size || 0;
+  button.disabled = !rerunModelOptions.length || (!isPages && !selected) || busy;
+  button.textContent = busy ? "生成中…" : isPages ? "按模型顺序重新生成" : `生成所选模型的笔记${selected ? `（${selected}）` : ""}`;
+  $("#blind-api-keys").classList.toggle("hidden", isPages);
+  const first = blindCompare && [...blindCompare.selectedModels][0];
+  $("#blind-key-label").textContent = `${first ? JSON.parse(first).provider : "所选首个供应商"} API Key（可选，仅本轮使用）`;
   $("#blind-refresh-versions").disabled = Boolean(blindCompare?.generating);
-  $("#blind-generate-hint").textContent = talkBusy
+  $("#blind-generate-hint").textContent = blindCompare?.modelError || (talkBusy
     ? "正在按模型设置顺序生成，完成后自动载入。"
-    : "每次生成一份笔记；失败后按保存顺序尝试下一模型，历史版本会保留。";
+    : isPages ? "每次生成一份笔记，历史版本会保留。" : blindJobsBusy()
+      ? "正在后台生成。本轮完成后统一匿名洗牌，可切换页面继续使用。"
+      : "勾选本轮模型；在「模型与 API」保存新模型后，点击「刷新模型」即可选择。本轮使用本机 Key。");
+  const jobs = $("#blind-job-list");
+  jobs.replaceChildren();
+  (blindCompare?.jobs || []).forEach(job => {
+    const row = document.createElement("div");
+    row.className = "blind-job";
+    const text = document.createElement("span");
+    text.textContent = `${job.provider} / ${job.model} · ${{queued:"排队中",running:"生成中",completed:"已完成",failed:"失败",cancelled:"已停止"}[job.status] || job.status}`;
+    row.append(text);
+    if (job.status === "failed") {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "重试此模型";
+      retry.disabled = busy;
+      retry.onclick = () => submitBlindGenerate([{provider:job.provider, model:job.model}]);
+      row.append(retry);
+      const error = document.createElement("p");
+      error.className = "meta";
+      error.textContent = job.error;
+      row.append(error);
+    }
+    jobs.append(row);
+  });
 }
 
 async function refreshBlindVersions(options = {}) {
   if (!blindCompare) return null;
+  const session = blindCompare;
+  const refresh = session.refreshSerial = (session.refreshSerial || 0) + 1;
+  const stale = () => blindCompare !== session || session.refreshSerial !== refresh;
+  if (!isPages) {
+    const result = await api(`/api/local/comparisons/${session.source}/${encodeURIComponent(session.sourceId)}`);
+    if (stale()) return null;
+    session.jobs = result.jobs || [];
+    if (blindJobsBusy()) {
+      renderBlindCompare();
+      scheduleBlindRefresh();
+      return session;
+    }
+  }
   const previousCount = blindCompare.versions.length;
   if (blindCompare.source === "lecture") {
-    currentLecture = await api(`/api/local/lectures/${encodeURIComponent(blindCompare.sourceId)}`);
+    const lecture = await api(`/api/local/lectures/${encodeURIComponent(session.sourceId)}`);
+    if (stale()) return null;
+    currentLecture = lecture;
     if (!currentCourse || String(currentCourse.course_id) !== String(currentLecture.course_id)) {
       currentCourse = courseRows.find((course) => String(course.course_id) === String(currentLecture.course_id)) || {
         course_id: currentLecture.course_id,
@@ -2409,12 +2499,18 @@ async function refreshBlindVersions(options = {}) {
     }
     blindCompare.versions = summaryVersions();
   } else {
-    currentTalk = await api(`/api/local/talks/${encodeURIComponent(blindCompare.sourceId)}`);
+    const talk = await api(`/api/local/talks/${encodeURIComponent(session.sourceId)}`);
+    if (stale()) return null;
+    currentTalk = talk;
     blindCompare.versions = talkVersions();
     blindCompare.subtitle = currentTalk.custom_title && currentTalk.ai_title && currentTalk.custom_title !== currentTalk.ai_title
       ? `AI 标题：${currentTalk.ai_title}` : "";
   }
   const nextKeys = new Set(blindCompare.versions.map((version) => version.key));
+  blindCompare.versions.forEach(version => {
+    if (!blindCompare.order.includes(version.key)) blindCompare.includedKeys.add(version.key);
+  });
+  blindCompare.includedKeys = new Set([...blindCompare.includedKeys].filter(key => nextKeys.has(key)));
   blindCompare.revealed = new Set([...blindCompare.revealed].filter((key) => nextKeys.has(key)));
   if (blindCompare.preferredKey && !nextKeys.has(blindCompare.preferredKey)) {
     blindCompare.preferredKey = null;
@@ -2446,18 +2542,29 @@ function scheduleBlindRefresh() {
   const talkBusy = blindCompare.source === "talk" && currentTalk
     && ["summarizing", "transcribing", "uploading", "dispatching"].includes(currentTalk.status);
   // 讲座生成由此轮询；课次由资料库自动同步后更新版本。
-  if (!talkBusy) return;
+  if (!talkBusy && !blindJobsBusy()) return;
   blindRefreshTimer = setTimeout(() => {
-    refreshBlindVersions().catch(() => {});
-  }, currentTalk?.status === "transcribing" ? 15000 : 4000);
+    refreshBlindVersions().catch(() => scheduleBlindRefresh());
+  }, talkBusy && currentTalk?.status === "transcribing" ? 15000 : 2000);
 }
 
-async function submitBlindGenerate() {
+async function submitBlindGenerate(retryModels = null) {
   if (!blindCompare || !rerunModelOptions.length) return;
+  const session = blindCompare;
+  const selected = retryModels || [...session.selectedModels].map(key => JSON.parse(key));
+  if (!isPages && !selected.length) return;
+  session.refreshSerial = (session.refreshSerial || 0) + 1;
   blindCompare.generating = true;
   renderBlindGeneratePanel();
   try {
-    if (blindCompare.source === "talk") {
+    if (!isPages) {
+      const result = await api(`/api/local/comparisons/${session.source}/${encodeURIComponent(session.sourceId)}`, {
+        method: "POST", body: JSON.stringify({models:selected, api_key:$("#blind-api-key").value.trim()}),
+      });
+      if (blindCompare !== session) return;
+      session.jobs = result.jobs || [];
+      $("#blind-api-key").value = "";
+    } else if (blindCompare.source === "talk") {
       await api(`/api/local/talks/${encodeURIComponent(blindCompare.sourceId)}/summarize`, {
         method: "POST", body: JSON.stringify({api_key: $("#blind-api-key").value.trim()}),
       });
@@ -2467,11 +2574,12 @@ async function submitBlindGenerate() {
         sub_ids: [blindCompare.sourceId], course_ids: [],
       })});
     }
-    message("已提交，将按模型设置的顺序生成；新笔记会自动载入。");
+    message(isPages ? "已提交，新笔记会自动载入。" : "已加入后台任务，每个所选模型各生成一份笔记。");
     await refreshBlindVersions();
   } catch (error) { message(error.message, true); }
   finally {
-    blindCompare.generating = false;
+    session.generating = false;
+    if (blindCompare !== session) return;
     renderBlindGeneratePanel();
     scheduleBlindRefresh();
   }
@@ -2502,7 +2610,7 @@ function revealBlindVersion(key) {
 
 function revealAllBlindVersions() {
   if (!blindCompare) return;
-  blindCompare.versions.forEach((version) => blindCompare.revealed.add(version.key));
+  blindCompare.includedKeys.forEach(key => blindCompare.revealed.add(key));
   renderBlindCompare();
 }
 
@@ -2516,10 +2624,10 @@ function blindVersionByKey(key) {
   return blindCompare?.versions.find((version) => version.key === key);
 }
 
-function renderBlindCompare() {
+function renderBlindCompare(keepHistory = false) {
   if (!blindCompare) return;
   const isBlind = blindCompare.mode === "blind";
-  const versionCount = blindCompare.versions.length;
+  const versionCount = blindCompare.includedKeys.size;
   $("#blind-compare-course").textContent = blindCompare.course || "";
   $("#blind-compare-title").textContent = isBlind ? "盲测对比" : "公开对比";
   $("#blind-compare-back").textContent = blindCompare.backLabel || "返回";
@@ -2536,17 +2644,41 @@ function renderBlindCompare() {
   const revealAll = $("#blind-reveal-all");
   revealAll.classList.toggle("hidden", !isBlind || versionCount < 2);
   $("#blind-reshuffle").classList.toggle("hidden", !isBlind || versionCount < 2);
-  revealAll.disabled = !isBlind || versionCount < 1 || blindCompare.revealed.size >= versionCount;
+  const revealedCount = [...blindCompare.includedKeys].filter(key => blindCompare.revealed.has(key)).length;
+  revealAll.disabled = !isBlind || versionCount < 1 || revealedCount >= versionCount;
 
   renderBlindGeneratePanel();
+  $("#blind-history").classList.toggle("hidden", !blindCompare.versions.length);
+  const history = $("#blind-history-list");
+  if (!keepHistory) {
+    history.replaceChildren();
+    blindCompare.order.forEach((key, index) => {
+      const version = blindVersionByKey(key);
+      if (!version) return;
+      const label = document.createElement("label");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = blindCompare.includedKeys.has(version.key);
+      check.onchange = () => {
+        if (check.checked) blindCompare.includedKeys.add(version.key);
+        else blindCompare.includedKeys.delete(version.key);
+        if (!check.checked && blindCompare.preferredKey === version.key) blindCompare.preferredKey = null;
+        renderBlindCompare(true);
+      };
+      const identity = !isBlind || blindCompare.revealed.has(version.key)
+        ? `${version.model} · ${formatVersionDate(version.generated_at)}` : "模型未揭示";
+      label.append(check, document.createTextNode(`方案 ${BLIND_SLOT_LABELS[index] || index + 1} · ${identity}`));
+      history.append(label);
+    });
+  }
 
   const hint = $("#blind-hint");
   if (versionCount < 2 && isBlind) {
     hint.textContent = versionCount === 0
-      ? "还没有可对比的笔记。可在下方按保存顺序重新生成；有 ≥2 个版本后即可随机盲测。"
-      : "目前只有 1 个版本。可在下方按保存顺序重新生成，凑齐 ≥2 份后再盲测（模型名默认隐藏，点「揭示模型」才显示）。";
+      ? "还没有选中可对比的笔记。可选择历史版本，或生成新的对照笔记。"
+      : "目前选中 1 个版本。可选择其他历史版本，或生成新的对照笔记后再盲测。";
   } else if (isBlind) {
-    const left = versionCount - blindCompare.revealed.size;
+    const left = versionCount - revealedCount;
     hint.textContent = left > 0
       ? `同一课堂的 ${versionCount} 份笔记已随机匿名排布。先盲读对比，点「揭示模型」才能看到生成模型（还有 ${left} 份未揭示）。`
       : "全部模型已揭示。可点「重新洗牌」再测一轮，或切换到公开对比。";
@@ -2582,15 +2714,22 @@ function renderBlindCompare() {
 
   const grid = $("#blind-grid");
   grid.replaceChildren();
+  if (blindJobsBusy()) {
+    hint.textContent = "正在生成本轮对照笔记；完成后统一随机排列并隐藏模型身份。可以离开页面，稍后回来。";
+    $("#blind-history").classList.add("hidden");
+    $("#blind-preference").classList.add("hidden");
+    return;
+  }
   grid.classList.toggle("compare", versionCount > 1);
   if (!versionCount) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "暂无笔记版本。按模型顺序生成后，新版本会自动载入。";
+    empty.textContent = "请选择历史版本，或勾选模型生成对照笔记。";
     grid.append(empty);
     return;
   }
   blindCompare.order.forEach((key, index) => {
+    if (!blindCompare.includedKeys.has(key)) return;
     const version = blindVersionByKey(key);
     if (!version) return;
     const slot = BLIND_SLOT_LABELS[index] || String(index + 1);
@@ -2668,156 +2807,6 @@ async function loadGenerationOrder(selector, refresh = false) {
   if (!rerunModelOptions.length) throw new Error("请先在模型与 API 中启用模型并保存 API Key。");
   $(selector).textContent = rerunModelOptions.map(option => `${option.provider} / ${option.model}`).join(" → ");
 }
-
-/* ── 重跑视图 ─────────────────────────────────────────────
-   课程级勾选走 course_ids（该课全部有转录的课次）；展开课程
-   可改选单个课次走 sub_ids。整课勾选时清空其课次选择。 */
-const rerunSelectedCourseIds = new Set();
-const rerunSelectedSubIds = new Set();
-const rerunOpenCourseIds = new Set();
-const rerunLectureCache = new Map();
-let runPriorityIds = [];
-let runPreferencesLoaded = false;
-let runSubmitting = false;
-let localRunRows = [];
-let runCapabilities = null;
-let liveRefreshBusy = false;
-let lastCloudCheck = 0;
-
-function updateRerunSubmit() {
-  const courses = rerunSelectedCourseIds.size;
-  const subs = rerunSelectedSubIds.size;
-  const button = $("#rerun-page-submit");
-  button.disabled = runSubmitting || (!courses && (!subs || $("#run-kind").value !== "rerun"));
-  const parts = [];
-  if (courses) parts.push(`${courses} 门课程`);
-  if (subs) parts.push(`${subs} 节课次`);
-  button.textContent = runSubmitting ? "正在提交…" : parts.length ? `开始运行（${parts.join(" + ")}）` : "开始运行";
-  renderRunQueue();
-}
-
-async function toggleRerunCourseExpand(courseId) {
-  const cid = String(courseId);
-  if (rerunOpenCourseIds.has(cid)) {
-    rerunOpenCourseIds.delete(cid);
-    renderRerunView();
-    return;
-  }
-  rerunOpenCourseIds.add(cid);
-  renderRerunView();
-  if (!rerunLectureCache.has(cid)) {
-    try {
-      const lectures = await api(`/api/local/courses/${encodeURIComponent(cid)}/lectures`);
-      rerunLectureCache.set(cid, lectures);
-    } catch (error) {
-      rerunOpenCourseIds.delete(cid);
-      message(error.message, true);
-    }
-    renderRerunView();
-  }
-}
-
-function renderRerunView() {
-  const list = $("#rerun-course-list");
-  list.replaceChildren();
-  const availableCourses = runCourses();
-  if (!availableCourses.length) {
-    list.textContent = "数据库中还没有课程。";
-    list.classList.add("empty");
-    updateRerunSubmit();
-    return;
-  }
-  list.classList.remove("empty");
-  const filter = $("#run-course-query").value.trim().toLowerCase();
-  availableCourses.filter(course => `${course.title || ""} ${course.course_id}`.toLowerCase().includes(filter)).forEach((course) => {
-    const cid = String(course.course_id);
-    const courseChecked = rerunSelectedCourseIds.has(cid);
-    const card = document.createElement("div");
-    card.className = "rerun-course";
-
-    const head = document.createElement("div");
-    head.className = "rerun-course-head";
-    const label = document.createElement("label");
-    label.className = "rerun-course-check";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = courseChecked;
-    checkbox.onchange = () => {
-      if (checkbox.checked) {
-        rerunSelectedCourseIds.add(cid);
-        // 整课重跑已包含全部课次，清掉该课的单课次选择
-        (rerunLectureCache.get(cid) || []).forEach((lec) =>
-          rerunSelectedSubIds.delete(String(lec.sub_id)));
-      } else {
-        rerunSelectedCourseIds.delete(cid);
-      }
-      renderRerunView();
-    };
-    const title = document.createElement("span");
-    title.className = "rerun-course-title";
-    title.textContent = course.title || cid;
-    title.title = title.textContent;
-    const identity = document.createElement("span");
-    identity.className = "course-identity";
-    const details = createCourseMetadata(course);
-    identity.append(title, details);
-    label.append(checkbox, identity);
-    const meta = document.createElement("span");
-    meta.className = "rerun-course-meta";
-    meta.textContent = `笔记 ${course.summary_count ?? 0}/${course.total_count ?? 0}`;
-    const expand = document.createElement("button");
-    expand.type = "button";
-    expand.className = "rerun-expand";
-    expand.textContent = rerunOpenCourseIds.has(cid) ? "▾ 收起" : "▸ 选课次";
-    expand.disabled = $("#run-kind").value !== "rerun";
-    expand.onclick = () => toggleRerunCourseExpand(cid);
-    head.append(label, meta, expand);
-    card.append(head);
-
-    if (rerunOpenCourseIds.has(cid)) {
-      const box = document.createElement("div");
-      box.className = "rerun-lectures";
-      const lectures = rerunLectureCache.get(cid);
-      if (!lectures) {
-        box.textContent = "正在读取课次…";
-      } else if (!lectures.length) {
-        box.textContent = "暂无课次。";
-      } else {
-        lectures.forEach((lecture) => {
-          const sid = String(lecture.sub_id);
-          const rerunnable = Boolean(Number(lecture.transcript_available));
-          const row = document.createElement("label");
-          row.className = `rerun-lecture${rerunnable ? "" : " disabled"}`;
-          const input = document.createElement("input");
-          input.type = "checkbox";
-          input.disabled = !rerunnable || courseChecked;
-          input.checked = courseChecked || rerunSelectedSubIds.has(sid);
-          input.title = rerunnable ? "" : "没有可用转录，不能只重跑摘要";
-          input.onchange = () => {
-            if (input.checked) rerunSelectedSubIds.add(sid);
-            else rerunSelectedSubIds.delete(sid);
-            updateRerunSubmit();
-          };
-          const name = document.createElement("span");
-          name.textContent = lectureDisplayName(lecture);
-          row.append(input, name);
-          box.append(row);
-        });
-      }
-      card.append(box);
-    }
-    list.append(card);
-  });
-  updateRerunSubmit();
-}
-
-async function loadRerunView() {
-  return loadRunView();
-}
-
-$("#rerun-page-submit").onclick = async () => {
-  await submitUnifiedRun();
-};
 
 function renderPagination(root, page, total, loading, onChange) {
   root.replaceChildren();
@@ -2927,7 +2916,7 @@ function renderSubscriptions() {
     status.className = `meta subscription-check-state${paused || stopped ? " paused" : ""}`;
     status.textContent = stopped ? "已结课 · 笔记齐全 · 自动停止检查" : paused
       ? course.pause_scan_pending ? "已暂停 · 下次核对并补齐已有课次"
-        : `已暂停${course.pending_count ? ` · 待补齐 ${course.pending_count} 节` : " · 已停止每日检查"}${course.blocked_count ? ` · ${course.blocked_count} 节达到重试上限` : ""}`
+        : `已暂停${course.pending_count ? ` · 待补齐 ${course.pending_count} 节` : " · 已停止新课次检查"}${course.blocked_count ? ` · ${course.blocked_count} 节等待重试` : ""}`
       : `自动检查${course.pending_count ? ` · 待处理 ${course.pending_count} 节` : ""}`;
     if (course.total_count) status.textContent += ` · ${course.summary_count || 0}/${course.total_count} 篇笔记`;
     row.firstElementChild.append(status);
@@ -2975,17 +2964,17 @@ function renderSubscriptions() {
 }
 
 function addCourseToRun(course) {
-  const id = String(course.course_id), field = $("#single-run-ids");
-  const ids = new Set(field.value.split(/[,，\s]+/).filter(Boolean));
-  ids.add(id);
-  field.value = [...ids].join(",");
-  rerunSelectedCourseIds.add(id);
-  if (!runPriorityIds.includes(id)) runPriorityIds.push(id);
-  $("#run-kind").value = "process";
-  rerunSelectedSubIds.clear();
   showView("run");
-  loadRunView().catch(error => message(error.message, true));
-  message(`已加入运行队列：${course.title || id}`);
+  setRunKind("process");
+  const id = String(course.course_id);
+  runManualCourses.set(id, course);
+  rerunSelectedCourseIds.add(id);
+  setRunCustomOpen(true);
+  setRunFilter(true);
+  $("#run-course-query").value = "";
+  renderRerunView();
+  focusRunCourse(id);
+  loadRunView();
 }
 
 async function loadSubscriptionCatalog(page = 1) {
@@ -3052,7 +3041,6 @@ async function toggleAutoCheck(course) {
   try {
     const state = await api("/api/local/subscriptions/auto-check", {method:"PUT", body:JSON.stringify({course_id:id, paused})});
     applySubscriptionState(state);
-    if (paused) rerunSelectedCourseIds.delete(id);
     message(paused ? "已暂停自动检查；下次核对并继续补齐已有课次，资料保留。" : "已恢复自动检查。");
     renderRerunView();
   } catch (error) { message(error.message, true); }
@@ -3091,42 +3079,6 @@ async function saveSubscriptions() {
   }
 }
 
-async function loadRuns() {
-  const runs = await api("/api/local/workflows");
-  const root = $("#runs");
-  root.replaceChildren();
-  root.classList.remove("empty");
-  if (!runs.length) {
-    root.textContent = "没有 workflow 运行记录。";
-    return;
-  }
-  runs.forEach((run) => {
-    const row = document.createElement("div");
-    row.className = "run";
-    const link = document.createElement("a");
-    link.href = run.html_url;
-    link.target = "_blank";
-    link.rel = "noreferrer";
-    link.textContent = run.name;
-    const meta = document.createElement("div");
-    const statusKey = run.conclusion || run.status;
-    meta.className = `meta status-${statusKey}`;
-    const stamp = new Date(run.created_at);
-    const stampText = Number.isNaN(stamp.getTime())
-      ? ""
-      : stamp.toLocaleString("zh-CN", {month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit"});
-    meta.textContent = `${RUN_STATUS_LABELS[statusKey] || statusKey}${stampText ? " · " + stampText : ""}`;
-    row.append(link, meta);
-    if (statusKey === "action_required") {
-      const hint = document.createElement("div");
-      hint.className = "meta";
-      hint.textContent = "打开此运行记录，在 GitHub 查看原因并按提示处理。";
-      row.append(hint);
-    }
-    root.append(row);
-  });
-}
-
 function setModelView(open) {
   if (open) showView("models"); else showView("settings", {keepScroll: true});
 }
@@ -3154,7 +3106,7 @@ function showView(view, options = {}) {
   };
   Object.entries(paneIds).forEach(([name, id]) => $("#" + id).classList.toggle("hidden", name !== view));
   const title = {
-    notes: "手记", courses: "课程", lectures: currentCourse?.title || "课程", detail: currentLecture ? lectureDisplayName(currentLecture) : "笔记",
+    notes: "笔记", courses: "课程", lectures: currentCourse?.title || "课程", detail: currentLecture ? lectureDisplayName(currentLecture) : "笔记",
     talks: "讲座", talkDetail: currentTalk ? talkDisplayName(currentTalk) : "讲座",
     search: "搜索", subscriptions: "订阅",
     run: "运行", settings: "设置", models: "模型与 API", obsidian: "同步到 Obsidian",
@@ -3192,6 +3144,7 @@ function normalizeProvider(item) {
     base_url: String(item.base_url || item.default_base_url || ""),
     api_key_env: apiKeyEnv,
     models: Array.isArray(item.models) ? item.models.map(String) : [],
+    generation: window.ICourseGenerationPolicy.normalize(item.generation),
     api_key: "",
     api_key_configured: Boolean(item.api_key_configured),
     configured_api_key_env: item.api_key_configured ? apiKeyEnv.toUpperCase() : "",
@@ -3598,6 +3551,36 @@ function renderModelProviders() {
     const summary = document.createElement("summary");
     summary.textContent = "高级设置";
     advanced.append(summary, secretField);
+    const generationFields = [
+      ["timeout_seconds", "笔记请求等待（秒）", 1, 86400],
+      ["title_timeout_seconds", "标题请求等待（秒）", 1, 86400],
+      ["max_retries", "临时故障重试次数", 0, 10],
+      ["retry_delay_seconds", "初始重试间隔（秒）", 0, 3600],
+      ["retry_max_delay_seconds", "退避等待上限（秒）", 0, 3600],
+      ["output_tokens", "初始输出预算（tokens）", 1, 2147483647],
+      ["max_output_tokens", "截断扩容上限（tokens）", 1, 2147483647],
+    ];
+    for (const [key, label, minimum, maximum] of generationFields) {
+      const input = document.createElement("input");
+      input.type = "number"; input.min = minimum; input.max = maximum; input.step = 1;
+      input.setAttribute("aria-label", label);
+      input.value = provider.generation[key];
+      input.addEventListener("input", () => {
+        provider.generation[key] = input.value === "" ? null : Number(input.value);
+        markModelsDirty();
+      });
+      advanced.append(createField(label, input));
+    }
+    const tokenParameter = document.createElement("select");
+    tokenParameter.setAttribute("aria-label", "输出预算参数");
+    for (const [value, label] of [["auto", "自动选择"], ["max_tokens", "max_tokens"], ["max_completion_tokens", "max_completion_tokens"]]) {
+      const option = document.createElement("option"); option.value = value; option.textContent = label;
+      tokenParameter.append(option);
+    }
+    tokenParameter.value = provider.generation.token_parameter;
+    tokenParameter.addEventListener("change", () => { provider.generation.token_parameter = tokenParameter.value; markModelsDirty(); });
+    advanced.append(createField("输出预算参数", tokenParameter,
+      "按供应商支持的预算范围设置；遇到截断会扩大预算重新生成，仍不完整时保留原笔记。"));
 
     const apiKeyInput = document.createElement("input");
     apiKeyInput.setAttribute("aria-label", "API Key");
@@ -3647,6 +3630,7 @@ function addModelProvider() {
     base_url: "",
     api_key_env: `LLM_CUSTOM_${suffix}_API_KEY`,
     models: [],
+    generation: window.ICourseGenerationPolicy.normalize(),
     api_key: "",
     api_key_configured: false,
     configured_api_key_env: "",
@@ -3670,6 +3654,8 @@ async function saveModelProviders() {
     message("请补全服务商名称、API 地址，并至少添加一个模型。", true); return;
   }
   if (!modelProviders.some(item => item.enabled)) { message("至少需要启用一个服务商。", true); return; }
+  try { modelProviders.forEach(item => window.ICourseGenerationPolicy.normalize(item.generation)); }
+  catch (error) { message(error.message, true); return; }
   if (!confirm("保存会更新 GitHub Actions 的模型配置，并写入本次填写的 API Key。继续吗？")) return;
   const button = $("#model-save-button");
   modelsSaving = true;
@@ -3683,6 +3669,7 @@ async function saveModelProviders() {
         base_url: window.ICourseProviderURLs.normalize(provider.base_url),
         api_key_env: provider.api_key_env.trim().toUpperCase(),
         models: provider.models.map((item) => item.trim()).filter(Boolean),
+        generation: window.ICourseGenerationPolicy.normalize(provider.generation),
       };
       if (provider.api_key.trim()) result.api_key = provider.api_key.trim();
       return result;
@@ -3940,11 +3927,7 @@ $("#setup-form").onsubmit = async (event) => {
   submit.textContent = "正在连接…";
   try {
     await api("/api/local/configure", {method: "POST", body: JSON.stringify(data)});
-    runPreferencesLoaded = false;
-    runPriorityIds = [];
-    rerunSelectedCourseIds.clear(); rerunSelectedSubIds.clear();
-    rerunOpenCourseIds.clear(); rerunLectureCache.clear();
-    $("#run-api-key").value = "";
+    resetRunView();
     message("本地会话已配置");
     setupRequested = false;
     activeView = "courses";
@@ -3972,6 +3955,7 @@ $("#forget-credentials-button").onclick = async () => {
   if (!confirm(isPages ? "退出当前浏览器会话？下次需要重新输入凭据。" : "忘记这台 Mac 上保存的登录信息？本地加密资料库会保留，但再次打开需要重新登录。")) return;
   try {
     await api("/api/local/credentials/forget", {method: "POST", body: "{}"});
+    resetRunView();
     message(isPages ? "已退出当前会话" : "已忘记本机登录信息");
     if (isPages) {
       loadedLibraryIdentity = ""; currentCourse = null; currentLecture = null; courseLectures = []; courseRows = []; rerunModelOptions = []; modelProviders = [];
@@ -4017,11 +4001,17 @@ $("#provider-search").oninput = renderProviderNavigation;
 $("#model-add-button").onclick = addModelProvider;
 $("#model-save-button").onclick = saveModelProviders;
 
-$("#obsidian-button").onclick = async () => {
-  const button = $("#obsidian-button");
+$("#settings-obsidian-button").onclick = async () => {
+  const button = $("#settings-obsidian-button");
   button.disabled = true;
-  setObsidianView(true);
   try {
+    const shared = await api("/api/local/shared-notes/status");
+    if (shared.enabled) {
+      showView("notes");
+      message(shared.error || `共享目录：${shared.path} · 两端修改自动更新`, Boolean(shared.error));
+      return;
+    }
+    setObsidianView(true);
     await loadObsidianSettings();
   } catch (error) {
     message(`无法读取 Obsidian 设置：${error.message}`, true);
@@ -4060,24 +4050,6 @@ async function syncDatabase() {
 
 $("#header-sync-button").onclick = syncDatabase;
 
-$("#run-button").onclick = async () => {
-  try {
-    await loadSubscriptions();
-    subscribedCourseIds.forEach(id => {
-      if (!pausedCourseIds.has(String(id)) && !subscriptionCourses.some(course =>
-        String(course.course_id) === String(id) && course.auto_check_stopped)) rerunSelectedCourseIds.add(String(id));
-      else rerunSelectedCourseIds.delete(String(id));
-    });
-    $("#run-kind").value = "process";
-    updateRunSettings();
-  } catch (error) { message(error.message, true); }
-};
-$("#backfill-titles-button").onclick = () => {
-  $("#run-kind").value = "titles";
-  updateRunSettings();
-  window.scrollTo({top: 0, behavior: "smooth"});
-};
-
 $("#course-back-button").onclick = () => showView("courses", {keepScroll: true});
 $("#detail-back").onclick = () => showView("lectures", {keepScroll: true});
 $("#talk-back").onclick = () => showView("talks", {keepScroll: true});
@@ -4115,20 +4087,33 @@ $("#back-button").onclick = () => {
   else if (activeView === "blindCompare") showView(blindCompare?.backView || "detail", {keepScroll: true});
   else showView("settings", {keepScroll: true});
 };
-$("#previous-lecture").onclick = async () => {
+function adjacentLecture(step) {
   const index = courseLectures.findIndex((lecture) => String(lecture.sub_id) === String(currentLecture?.sub_id));
-  if (index > 0) {
-    await openLecture(courseLectures[index - 1].sub_id);
-    window.scrollTo(0, 0);
+  return index < 0 ? null : courseLectures[index + step];
+}
+const lectureStepButtons = document.querySelectorAll("[data-lecture-step]");
+function updateLectureNavigation() {
+  lectureStepButtons.forEach(button => {
+    button.disabled = switchingLecture || !adjacentLecture(Number(button.dataset.lectureStep));
+  });
+}
+async function stepLecture(step) {
+  const target = adjacentLecture(step);
+  if (!target || switchingLecture) return;
+  switchingLecture = true;
+  updateLectureNavigation();
+  try {
+    await openLecture(target.sub_id, {fromLecture: currentLecture});
+  } catch (error) {
+    message(error.message, true);
+  } finally {
+    switchingLecture = false;
+    updateLectureNavigation();
   }
-};
-$("#next-lecture").onclick = async () => {
-  const index = courseLectures.findIndex((lecture) => String(lecture.sub_id) === String(currentLecture?.sub_id));
-  if (index >= 0 && index < courseLectures.length - 1) {
-    await openLecture(courseLectures[index + 1].sub_id);
-    window.scrollTo(0, 0);
-  }
-};
+}
+lectureStepButtons.forEach(button => {
+  button.onclick = () => stepLecture(Number(button.dataset.lectureStep));
+});
 document.querySelectorAll(".detail-tab").forEach((button) => {
   button.onclick = () => {
     detailTab = button.dataset.detailTab;
@@ -4152,8 +4137,7 @@ document.querySelectorAll(".nav-button").forEach((button) => {
       try { await loadSubscriptions(); }
       catch (error) { message(error.message, true); }
     } else if (view === "run" || view === "rerun") {
-      try { await loadRerunView(); }
-      catch (error) { message(error.message, true); }
+      await loadRunView();
     } else if (view === "talks") {
       try { await loadTalks(); }
       catch (error) { message(error.message, true); }
@@ -4196,17 +4180,17 @@ $("#subscription-query").oninput = () => {
   subscriptionTimer = setTimeout(() => loadSubscriptionCatalog().catch((error) => message(error.message, true)), 240);
 };
 $("#subscription-catalog-retry").onclick = () => loadSubscriptionCatalog(catalogFailedPage);
-$("#settings-obsidian-button").onclick = () => $("#obsidian-button").click();
-$("#settings-rerun-button").onclick = async () => {
-  $("#run-kind").value = "rerun";
+$("#settings-rerun-button").onclick = () => {
   showView("run");
-  try { await loadRunView(); } catch (error) { message(error.message, true); }
+  setRunKind("rerun");
+  setRunCustomOpen(true);
+  $("#run-kind").focus();
+  loadRunView();
 };
-$("#settings-automation-button").onclick = async () => {
+$("#settings-automation-button").onclick = () => {
   showView("run");
-  try { await loadRunView(); } catch (error) { message(error.message, true); }
+  loadRunView();
 };
-$("#refresh-runs-button").onclick = () => loadRuns().catch((error) => message(error.message, true));
 
 /* ── 搜索：多关键词 AND、域/课程过滤、分页 ── */
 const SEARCH_DOMAIN_LABELS = { title: "标题", summary: "摘要", transcript: "转录", ocr: "OCR" };
@@ -4372,6 +4356,8 @@ $("#search-retry").onclick = () => runSearch(searchFailedPage);
    独立于课程库（课程库是 data 分支的只读镜像）；转写文本只在本机
    SQLite 与本次摘要请求中出现，不上 GitHub。 */
 let talkRows = [];
+const talkIntake = [];
+let talkIntakeWork = null;
 let currentTalk = null;
 let talkTab = "summary";
 let talkDetailTimer = null;
@@ -4381,7 +4367,20 @@ function talkDisplayName(talk) {
   return talk?.display_title || talk?.custom_title || talk?.ai_title || talk?.id || "讲座";
 }
 
+function talkErrorText(talk) {
+  const error = talk.error || "";
+  if (talk.source === "upload" && /^GitHub API 0:.*(?:UNEXPECTED_EOF|IncompleteRead|timed out|Connection reset|Remote end closed)/i.test(error)) {
+    return "与 GitHub 的连接已中断，网络恢复后可重试";
+  }
+  if (talk.error_stage === "upload" && /^GitHub API 400: Bad Request$/i.test(error)) {
+    return "上传请求收到 HTTP 400，未取得 GitHub 确认，可稍后重试";
+  }
+  return error;
+}
+
 function talkStateLabel(talk) {
+  if (talk?.status === "paused") return "已暂停";
+  if (talk?.queue_state === "queued") return `排队中 · ${talk.queue_position}`;
   if (talk?.error_stage === "approval") return "等待 GitHub 批准";
   if (talk?.status === "ready") return "已生成";
   if (talk?.status === "summarizing") return "生成中";
@@ -4405,14 +4404,54 @@ function talkStateClass(talk) {
 
 async function loadTalks() {
   talkRows = await api("/api/local/talks");
+  renderTalkList();
+}
+
+function renderTalkList() {
   const list = $("#talk-list");
   list.replaceChildren();
   list.classList.remove("empty");
-  if (!talkRows.length) {
+  if (!talkRows.length && !talkIntake.length) {
     list.textContent = "还没有讲座。点击「上传录音」开始，也可以粘贴已有转写。";
     list.classList.add("empty");
     return;
   }
+  talkIntake.forEach(item => {
+    const card = document.createElement("article");
+    card.className = "lecture-card talk-intake-card";
+    const content = document.createElement("div");
+    content.className = "talk-intake-content";
+    const title = document.createElement("strong");
+    title.textContent = item.title;
+    const status = document.createElement("p");
+    status.textContent = item.error || (item.state === "staging" ? "正在本机加密暂存，完成后可退出应用" : "等待本机暂存");
+    content.append(title, status);
+    if (item.state === "staging") {
+      const progress = document.createElement("progress");
+      progress.setAttribute("aria-label", `${item.title} 本机暂存中`);
+      content.append(progress);
+    }
+    const actions = document.createElement("div");
+    actions.className = "talk-row-actions";
+    if (item.state === "failed") {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "重试暂存";
+      retry.onclick = () => { item.state = "queued"; item.error = ""; startTalkIntake(); renderTalkList(); };
+      actions.append(retry);
+    }
+    // Once the HTTP request has started, its durable server receipt must be
+    // allowed to finish; aborting it could leave an unnoticed uploaded copy.
+    if (item.state !== "staging") {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "取消";
+      cancel.onclick = () => { talkIntake.splice(talkIntake.indexOf(item), 1); renderTalkList(); };
+      actions.append(cancel);
+    }
+    card.append(content, actions);
+    list.append(card);
+  });
   talkRows.forEach((talk) => {
     const card = document.createElement("article");
     card.className = "lecture-card";
@@ -4431,14 +4470,16 @@ async function loadTalks() {
       parts.push(`录音 ${(talk.audio_bytes / 1024 / 1024).toFixed(1)} MB`);
     }
     if (talk.source === "upload" && talk.status === "uploading") {
-      parts.push("后台分片上传中，打开详情查看进度");
+      const done = String(talk.uploaded_chunks || "").split(",").filter(Boolean).length;
+      parts.push(talk.queue_state === "queued" ? "已安全暂存，等待后台处理" : uploadProgressText({done, total:talk.upload_total_chunks}));
     }
-    if (talk.source === "upload" && talk.status === "failed" && talk.error_stage === "upload") {
-      parts.push("上传中断，可一键断点续传");
+    if (talk.status === "failed" && talk.error_stage === "upload" && talk.upload_total_chunks) {
+      const done = String(talk.uploaded_chunks || "").split(",").filter(Boolean).length;
+      parts.push(`已确认 ${done}/${talk.upload_total_chunks} 片`);
     }
     if (talk.transcript_chars) parts.push(`转写 ${talk.transcript_chars} 字`);
     if (talk.summary_model) parts.push(talk.summary_model);
-    if (talk.error && (talk.status === "failed" || talk.error_stage === "approval")) parts.push(talk.error);
+    if (talk.error && (talk.status === "failed" || talk.error_stage === "approval")) parts.push(talkErrorText(talk));
     if (!parts.length && talk.status === "transcribing") parts.push("云端转写中，稍后自动同步");
     if (parts.length) {
       meta.textContent = parts.join(" · ");
@@ -4449,6 +4490,13 @@ async function loadTalks() {
     state.textContent = talkStateLabel(talk);
     row.append(left, state);
     open.append(row);
+    if (talk.status === "uploading") {
+      const progress = document.createElement("progress");
+      progress.max = Math.max(1, Number(talk.upload_total_chunks || 0));
+      progress.value = String(talk.uploaded_chunks || "").split(",").filter(Boolean).length;
+      progress.setAttribute("aria-label", `${talkDisplayName(talk)} 上传进度`);
+      open.append(progress);
+    }
     open.onclick = () => openTalk(talk.id);
     const remove = document.createElement("button");
     remove.type = "button";
@@ -4466,7 +4514,25 @@ async function loadTalks() {
         message(error.message, true);
       }
     };
-    card.append(open, remove);
+    const actions = document.createElement("div");
+    actions.className = "talk-row-actions";
+    if (talk.source === "upload" && ["uploading", "paused", "failed"].includes(talk.status)) {
+      const control = document.createElement("button");
+      control.type = "button";
+      control.textContent = talk.status === "uploading" ? "暂停" : talk.status === "paused" ? "继续" : "重试";
+      control.onclick = async () => {
+        control.disabled = true;
+        try {
+          await api(`/api/local/talks/${encodeURIComponent(talk.id)}/${talk.status === "uploading" ? "pause-upload" : "retry-upload"}`, {method:"POST", body:"{}"});
+          await loadTalks();
+        } catch (error) { message(error.message, true); }
+        finally { control.disabled = false; }
+      };
+      actions.append(control);
+    }
+    remove.disabled = ["uploading", "dispatching", "transcribing", "summarizing"].includes(talk.status);
+    actions.append(remove);
+    card.append(open, actions);
     list.append(card);
   });
 }
@@ -4580,9 +4646,9 @@ function renderTalkDetail() {
         if (fill) fill.style.width = `${uploadPercent(progress)}%`;
         if (text) text.textContent = uploadProgressText(progress);
       }).catch(() => {});
-    } else if (currentTalk.status === "failed" && currentTalk.source === "upload") {
+    } else if (["failed", "paused"].includes(currentTalk.status) && currentTalk.source === "upload") {
       controls.classList.add("hidden");
-      root.innerHTML = `<div class="summary"><p>${escapeHtml(currentTalk.error || "处理失败，请重试")}</p><p>录音与已完成的转写会被复用，无需重新选择文件。</p><p><button id="talk-detail-retry-upload" class="primary" type="button">继续处理</button></p></div>`;
+      root.innerHTML = `<div class="summary"><p>${escapeHtml(currentTalk.status === "paused" ? "录音已暂停" : talkErrorText(currentTalk) || "处理失败，请重试")}</p><p>录音与已完成的转写会被复用，无需重新选择文件。</p><p><button id="talk-detail-retry-upload" class="primary" type="button">继续处理</button></p></div>`;
       $("#talk-detail-retry-upload").onclick = retryCurrentTalkUpload;
     } else if (currentTalk.status === "dispatching") {
       controls.classList.add("hidden");
@@ -4670,9 +4736,9 @@ function renderTalkDetail() {
         const stage = currentTalk.error_stage === "transcribe" ? "转写"
           : currentTalk.error_stage === "upload" ? "上传" : "生成";
         const retryHint = currentTalk.error_stage === "upload" && currentTalk.source === "upload"
-          ? "点下方“重新上传”可断点续传（已传分片不会重传）。"
+          ? "点“继续处理”可从上次确认的分片续传。"
           : "可以点击“继续处理”恢复云端任务，或使用下方模型生成笔记。";
-        hint.textContent = `${stage}失败：${currentTalk.error}。${retryHint}`;
+        hint.textContent = `${stage}失败：${talkErrorText(currentTalk)}。${retryHint}`;
       }
     }
   }
@@ -4724,59 +4790,72 @@ async function fetchTalkUploadProgress(talkId) {
   return api(`/api/local/talks/${encodeURIComponent(talkId)}/upload-progress`);
 }
 
-function renderTalkUploadProgress(progress) {
-  const wrap = $("#talk-upload-progress");
-  const fill = $("#talk-upload-progress-fill");
-  const text = $("#talk-upload-progress-text");
-  const retry = $("#talk-upload-retry");
-  if (!progress || !Number(progress.total || 0)) {
-    wrap.classList.add("hidden");
-    retry.classList.add("hidden");
-    return;
+function enqueueTalkFiles(files, title = "") {
+  const accepted = Array.from(files || []);
+  if (!accepted.length) return false;
+  const invalid = accepted.find(file => !/\.(mp3|m4a|aac|wav|flac|ogg|opus|mp4|mov|webm)$/i.test(file.name) || file.size > 500 * 1024 * 1024 || !file.size);
+  if (invalid) {
+    message(`「${invalid.name}」格式不支持、内容为空或超过 500 MB，请调整选择。`, true);
+    return false;
   }
-  wrap.classList.remove("hidden");
-  fill.style.width = `${uploadPercent(progress)}%`;
-  if (progress.status === "failed") {
-    text.textContent = `${progress.error || "处理失败"}。已传 ${progress.done}/${progress.total} 片，点击继续处理可恢复。`;
-    retry.textContent = "继续处理";
-    retry.classList.remove("hidden");
-  } else {
-    text.textContent = `${uploadProgressText(progress)}，完成后自动触发云端转写。`;
-    retry.classList.add("hidden");
-  }
+  accepted.forEach(file => talkIntake.push({file, token:crypto.randomUUID(), title: accepted.length === 1 && title ? title : file.name.replace(/\.[^.]+$/, ""), state:"queued", error:""}));
+  showView("talks");
+  renderTalkList();
+  message(`已加入 ${accepted.length} 个录音，可继续浏览；本机暂存和上传进度见讲座列表。`);
+  startTalkIntake();
+  return true;
 }
 
-let talkUploadPollTimer = null;
-let talkUploadPollId = null;
-
-function stopTalkUploadPoll() {
-  clearInterval(talkUploadPollTimer);
-  talkUploadPollTimer = null;
-  talkUploadPollId = null;
-}
-
-function startTalkUploadPoll(talkId) {
-  stopTalkUploadPoll();
-  talkUploadPollId = talkId;
-  const tick = async () => {
-    if (!$("#talk-upload").open || talkUploadPollId !== talkId) return;
-    try {
-      const progress = await fetchTalkUploadProgress(talkId);
-      renderTalkUploadProgress(progress);
-      if (["transcribing", "summarizing", "transcribed", "ready"].includes(progress.status)) {
-        stopTalkUploadPoll();
-        $("#talk-upload").close();
-        await loadTalks();
-        await openTalk(talkId, {tab: "transcript"});
-        message("录音已上传，云端转写中（约 15 秒刷新一次）");
+function startTalkIntake() {
+  if (talkIntakeWork) return;
+  talkIntakeWork = (async () => {
+    for (let item; (item = talkIntake.find(row => row.state === "queued"));) {
+      item.state = "staging";
+      renderTalkList();
+      try {
+        const form = new FormData();
+        form.append("title", item.title);
+        form.append("file", item.file, item.file.name);
+        form.append("upload_token", item.token);
+        const response = await fetch("/api/local/talks/upload", {method:"POST", body:form});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : "本机暂存失败，请重试");
+        talkRows = [payload, ...talkRows.filter(row => row.id !== payload.id)];
+        talkIntake.splice(talkIntake.indexOf(item), 1);
+      } catch (error) {
+        item.state = "failed";
+        item.error = error.message;
+        message(`「${item.title}」暂存失败，可在讲座列表重试。`, true);
       }
-    } catch (_) {
-      // 轮询失败不打扰用户，下一次继续。
+      renderTalkList();
     }
-  };
-  talkUploadPollTimer = setInterval(tick, 2000);
-  tick().catch(() => {});
+  })().finally(() => { talkIntakeWork = null; });
 }
+
+window.SeaTalkUploads = {
+  async flush() {
+    await talkIntakeWork;
+    if (talkIntake.length) throw new Error("还有录音尚未保存到本机");
+  },
+};
+window.addEventListener("beforeunload", event => {
+  if (talkIntake.length) { event.preventDefault(); event.returnValue = ""; }
+});
+const talkDropTarget = $("#view-talks");
+talkDropTarget.addEventListener("dragover", event => {
+  if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  talkDropTarget.classList.add("file-drag-over");
+});
+talkDropTarget.addEventListener("dragleave", event => {
+  if (!talkDropTarget.contains(event.relatedTarget)) talkDropTarget.classList.remove("file-drag-over");
+});
+talkDropTarget.addEventListener("drop", event => {
+  event.preventDefault();
+  talkDropTarget.classList.remove("file-drag-over");
+  enqueueTalkFiles(event.dataTransfer.files);
+});
 
 $("#talk-title").ondblclick = renameCurrentTalk;
 document.querySelectorAll(".talk-detail-tab").forEach((button) => {
@@ -4820,76 +4899,22 @@ $("#talk-editor-form").onsubmit = async (event) => {
     save.disabled = false;
   }
 };
-$("#talk-upload-cancel").onclick = () => { stopTalkUploadPoll(); $("#talk-upload").close(); };
-$("#talk-upload-retry").onclick = async () => {
-  if (!talkUploadPollId) return;
-  const retry = $("#talk-upload-retry");
-  retry.disabled = true;
-  try {
-    await api(`/api/local/talks/${encodeURIComponent(talkUploadPollId)}/retry-upload`, {method: "POST", body: "{}"});
-    $("#talk-upload-error").textContent = "";
-    startTalkUploadPoll(talkUploadPollId);
-  } catch (error) {
-    $("#talk-upload-error").textContent = error.message;
-  } finally {
-    retry.disabled = false;
-  }
-};
+$("#talk-upload-cancel").onclick = () => $("#talk-upload").close();
 $("#talk-upload-button").onclick = () => {
   $("#talk-upload-title-input").value = "";
   $("#talk-upload-file").value = "";
   $("#talk-upload-error").textContent = "";
-  $("#talk-upload-progress").classList.add("hidden");
-  $("#talk-upload-progress-fill").style.width = "0%";
-  $("#talk-upload-progress-text").textContent = "";
-  $("#talk-upload-retry").classList.add("hidden");
-  stopTalkUploadPoll();
   $("#talk-upload").showModal();
-  $("#talk-upload-title-input").focus();
+  $("#talk-upload-file").focus();
 };
-$("#talk-upload-form").onsubmit = async (event) => {
+$("#talk-upload-form").onsubmit = event => {
   event.preventDefault();
-  $("#talk-upload-error").textContent = "";
-  const file = $("#talk-upload-file").files[0];
-  if (!file) {
+  const files = $("#talk-upload-file").files;
+  if (!files?.length) {
     $("#talk-upload-error").textContent = "请选择录音文件";
     return;
   }
-  if (file.size > 500 * 1024 * 1024) {
-    $("#talk-upload-error").textContent = "文件超过 500MB 上限";
-    return;
-  }
-  const save = $("#talk-upload-save");
-  save.disabled = true;
-  save.textContent = "加密暂存中…";
-  try {
-    const form = new FormData();
-    form.append("title", $("#talk-upload-title-input").value.trim());
-    form.append("file", file, file.name);
-    // 服务端只做校验+加密+暂存（秒回），真正的分片上传在后台跑，
-    // 这里不再长按请求等待全部完成。
-    const response = await fetch("/api/local/talks/upload", {method: "POST", body: form});
-    if (!response.ok) {
-      let detail = `${response.status} ${response.statusText}`;
-      try {
-        const payload = await response.json();
-        detail = typeof payload.detail === "string" ? payload.detail : JSON.stringify(payload.detail || payload);
-      } catch (_) {}
-      throw new Error(detail);
-    }
-    const created = await response.json();
-    $("#talk-upload-error").textContent = "";
-    renderTalkUploadProgress(created.upload_progress || null);
-    // 切到后台轮询：用户可关闭对话框去做别的事，上传继续。
-    startTalkUploadPoll(created.id);
-    message("录音已暂存，后台分片上传中（约 4MB/片），进度见对话框");
-  } catch (error) {
-    $("#talk-upload-error").textContent = error.message;
-    if (!$("#talk-upload").open) message(error.message, true);
-  } finally {
-    save.disabled = false;
-    save.textContent = "上传并转写";
-  }
+  if (enqueueTalkFiles(files, $("#talk-upload-title-input").value.trim())) $("#talk-upload").close();
 };
 $("#talk-generate-button").onclick = async () => {
   if (!currentTalk) return;
@@ -5011,6 +5036,11 @@ $("#blind-compare-back").onclick = () => {
 $("#blind-reshuffle").onclick = () => reshuffleBlindCompare();
 $("#blind-reveal-all").onclick = () => revealAllBlindVersions();
 $("#blind-generate-button").onclick = () => submitBlindGenerate();
+$("#blind-refresh-models").onclick = async () => {
+  try { await ensureBlindModelOptions(); }
+  catch (error) { if (blindCompare) blindCompare.modelError = error.message; }
+  renderBlindGeneratePanel();
+};
 $("#blind-refresh-versions").onclick = async () => {
   try {
     await refreshBlindVersions();
@@ -5022,183 +5052,9 @@ $("#blind-refresh-versions").onclick = async () => {
 document.querySelectorAll(".blind-mode").forEach((button) => {
   button.onclick = () => setBlindMode(button.dataset.blindMode);
 });
-$("#single-run-button").onclick = () => {
-  const ids = [...new Set($("#single-run-ids").value.split(/[,，\s]+/).filter(Boolean))];
-  if (!ids.length || ids.some(id => id.length > 100)) { message("请输入有效的课程 ID。", true); return; }
-  ids.forEach(id => {
-    rerunSelectedCourseIds.add(id);
-    if (!runPriorityIds.includes(id)) runPriorityIds.push(id);
-  });
-  $("#single-run-ids").value = "";
-  renderRerunView();
-};
-
-function runCourses() {
-  const rows = new Map([...subscriptionCourses, ...courseRows].map(row => [String(row.course_id), row]));
-  rerunSelectedCourseIds.forEach(id => {
-    if (!rows.has(id)) rows.set(id, {course_id: id, title: `课程 ${id}`, total_count: 0, summary_count: 0});
-  });
-  const rank = new Map(runPriorityIds.map((id, i) => [id, i]));
-  return [...rows.values()].sort((a, b) => (rank.get(String(a.course_id)) ?? rank.size) - (rank.get(String(b.course_id)) ?? rank.size));
-}
-
-function selectedRunCourseIds() {
-  const values = new Set(rerunSelectedCourseIds);
-  rerunLectureCache.forEach((lectures, cid) => {
-    if (lectures.some(row => rerunSelectedSubIds.has(String(row.sub_id)))) values.add(cid);
-  });
-  return runCourses().map(row => String(row.course_id)).filter(id => values.has(id));
-}
-
-function moveRunPriority(id, offset) {
-  const all = runCourses().map(row => String(row.course_id));
-  const visible = selectedRunCourseIds();
-  const index = visible.indexOf(id), next = visible[index + offset];
-  if (next === undefined) return;
-  const a = all.indexOf(id), b = all.indexOf(next);
-  [all[a], all[b]] = [all[b], all[a]];
-  runPriorityIds = all;
-  $("#run-priority-status").textContent = "本次队列顺序已调整；保存后也用于每日订阅运行。";
-  renderRerunView();
-}
-
-function renderRunQueue() {
-  const root = $("#run-queue");
-  root.replaceChildren();
-  const selected = selectedRunCourseIds();
-  root.classList.toggle("empty", !selected.length);
-  if (!selected.length) root.textContent = "从下方选择课程或课次。";
-  selected.forEach((id, index) => {
-    const row = document.createElement("div");
-    row.className = "run-queue-row";
-    row.dataset.courseId = id;
-    const number = document.createElement("span");
-    number.className = "run-queue-number";
-    number.textContent = String(index + 1).padStart(2, "0");
-    const label = document.createElement("span");
-    label.className = "run-queue-label";
-    const course = runCourses().find(course => String(course.course_id) === id);
-    const title = document.createElement("strong");
-    title.textContent = course?.title || id;
-    const meta = createCourseMetadata(course || {});
-    label.append(title, meta);
-    const actions = document.createElement("div");
-    actions.className = "run-queue-actions";
-    [-1, 1].forEach(offset => {
-      const button = createButton(offset < 0 ? "↑" : "↓", () => moveRunPriority(id, offset));
-      button.setAttribute("aria-label", `${offset < 0 ? "上移" : "下移"}${title.textContent}`);
-      button.disabled = index + offset < 0 || index + offset >= selected.length;
-      actions.append(button);
-    });
-    row.append(number, label, actions);
-    root.append(row);
-  });
-}
-
-function updateRunSettings() {
-  const local = $("#run-target").value === "local", kind = $("#run-kind").value;
-  $("#run-key-field").classList.toggle("hidden", !local || isPages);
-  $("#run-local-link").classList.toggle("hidden", !local || !isPages);
-  $("#run-target-hint").textContent = local
-    ? isPages ? "本地任务需在这台电脑的本地控制台启动。" : "使用这台电脑处理；关闭网页后任务仍会运行，本地服务需保持开启。"
-    : "任务在 GitHub 上执行，关闭电脑后仍会继续。笔记生成后自动同步。";
-  if (local && !isPages && runCapabilities && !runCapabilities.process_ready && kind === "process") {
-    $("#run-target-hint").textContent += " 当前需准备本地依赖或 ASR 权重。";
-  }
-  $("#run-kind-hint").textContent = {
-    process: "检查选中课程，跳过已完成的课次，继续未完成的处理。",
-    rerun: "复用转录与 PPT 文字重新生成，保留历史版本。可展开课程选课次，单次最多 20 节。",
-    titles: "只为选中课程中缺少标题的笔记补齐标题。",
-  }[kind];
-  $("#single-run-official").disabled = kind !== "process";
-  renderRerunView();
-  if (local && isPages) $("#rerun-page-submit").disabled = true;
-}
-
-async function loadRunView() {
-  await loadSubscriptions();
-  if (!runPreferencesLoaded) {
-    const preferences = await api("/api/local/run-preferences");
-    runPriorityIds = [...new Set([...(preferences.course_ids || []).map(String), ...runPriorityIds])];
-    $("#run-lecture-order").value = preferences.lecture_order || "api";
-    runPreferencesLoaded = true;
-  }
-  await loadGenerationOrder("#run-model-order", true);
-  runCapabilities = await api("/api/local/run-capabilities");
-  updateRunSettings();
-  await refreshLocalRuns();
-  await loadRuns();
-}
-
-async function submitUnifiedRun() {
-  if (runSubmitting) return;
-  if (!rerunModelOptions.length) { message("请先在模型与 API 中启用模型。", true); return; }
-  const priority = runCourses().map(course => String(course.course_id));
-  const courses = priority.filter(id => rerunSelectedCourseIds.has(id));
-  const payload = {target: $("#run-target").value, kind: $("#run-kind").value,
-    course_ids: courses, sub_ids: [...rerunSelectedSubIds], priority_course_ids: priority,
-    lecture_order: $("#run-lecture-order").value,
-    use_official_transcript: $("#single-run-official").checked};
-  if (payload.target === "local") payload.api_key = $("#run-api-key").value;
-  runSubmitting = true;
-  updateRerunSubmit();
-  try {
-    await api("/api/local/runs", {method: "POST", body: JSON.stringify(payload)});
-    $("#run-api-key").value = "";
-    message(`已开始${payload.target === "local" ? "本地" : "GitHub Actions"}任务；新笔记会自动载入。`);
-    lastCloudCheck = 0;
-    await refreshLocalRuns();
-    await loadRuns();
-  } catch (error) { message(error.message, true); }
-  finally { runSubmitting = false; updateRunSettings(); }
-}
-
-async function refreshLocalRuns() {
-  const result = await api("/api/local/runs");
-  localRunRows = result.jobs || [];
-  const root = $("#local-runs");
-  const expanded = new Set([...root.querySelectorAll(".local-run")].filter(row => row.querySelector("details")?.open).map(row => row.dataset.jobId));
-  root.replaceChildren();
-  root.classList.toggle("empty", !localRunRows.length);
-  if (!localRunRows.length) root.textContent = isPages ? "请在本地控制台查看本机任务。" : "暂无本地任务。";
-  localRunRows.forEach(job => {
-    const row = document.createElement("div");
-    row.className = "local-run";
-    row.dataset.jobId = job.id;
-    const title = document.createElement("strong");
-    title.textContent = `${{process:"处理新课次",rerun:"重新生成笔记",titles:"补齐标题"}[job.kind]} · ${{queued:"排队中",in_progress:"运行中",completed:"已完成",failed:"部分失败或未完成",cancelled:"已停止"}[job.status] || job.status}`;
-    const progress = document.createElement("progress");
-    progress.max = job.total || 1;
-    if (job.total || ["completed", "failed", "cancelled"].includes(job.status)) progress.value = job.completed + job.failed;
-    const meta = document.createElement("p");
-    meta.className = "meta";
-    meta.textContent = `${job.completed}/${job.total || "—"} 篇已生成${job.failed ? ` · ${job.failed} 节失败` : ""} · ${job.current || ""}`;
-    row.append(title, progress, meta);
-    if (["queued", "in_progress"].includes(job.status)) {
-      const stop = createButton("停止本地任务", async () => {
-        stop.disabled = true;
-        try { await api(`/api/local/runs/${job.id}/cancel`, {method: "POST", body: "{}"}); await refreshLocalRuns(); }
-        catch (error) { message(error.message, true); stop.disabled = false; }
-      });
-      row.append(stop);
-    }
-    const details = document.createElement("details");
-    details.open = expanded.has(job.id);
-    const summary = document.createElement("summary");
-    summary.textContent = "运行日志";
-    const log = document.createElement("pre");
-    log.textContent = (job.logs || []).join("\n");
-    details.append(summary, log);
-    row.append(details);
-    root.append(row);
-  });
-}
-
 async function refreshVisibleNotes() {
-  if (activeView === "run") {
-    for (const id of rerunOpenCourseIds) {
-      rerunLectureCache.set(id, await api(`/api/local/courses/${encodeURIComponent(id)}/lectures`));
-    }
+  if (activeView === "run" && !$("#run-custom").hidden) {
+    await Promise.allSettled([...rerunOpenCourseIds].map(id => loadRunLectures(id, true)));
     renderRerunView();
   }
   if (currentCourse && ["lectures", "detail"].includes(activeView)) {
@@ -5225,50 +5081,914 @@ async function refreshVisibleNotes() {
   if (activeView === "search" && $("#search").value.trim()) await runSearch(1);
 }
 
+/* ── Run page ── */
+const rerunSelectedCourseIds = new Set();
+const rerunSelectedSubIds = new Set();
+const rerunOpenCourseIds = new Set();
+const rerunLectureCache = new Map();
+const runLectureRequests = new Map();
+const runLectureErrors = new Map();
+const runManualCourses = new Map();
+const runCourseNodes = new Map();
+const runTaskNodes = new Map();
+const runKindLabels = {process: "处理新课次", rerun: "重新生成笔记", titles: "补齐笔记标题"};
+const activeRunStatuses = new Set(["queued", "in_progress", "requested", "waiting", "pending"]);
+let runPriorityIds = [];
+let runPreferencesLoaded = false;
+let runSubmitting = "";
+let runSelectedOnly = false;
+let runKind = "process";
+let runDragId = null;
+let runUndo = null;
+let localRunRows = [];
+let cloudRunRows = [];
+let pendingCloudRuns = [];
+let runHistoryErrors = new Map();
+let runHistoryRequests = new Map();
+let runViewRequest = null;
+let runViewEpoch = 0;
+let liveRefreshBusy = false;
+let lastCloudCheck = 0;
+
+function runTargetKey() {
+  const {owner, repo} = statusState?.repository || {};
+  return `icourse-run-target:${isPages ? "pages" : "local"}:${owner}/${repo}`;
+}
+
+function resetRunView() {
+  runViewEpoch++;
+  runViewRequest = null;
+  runDragId = null;
+  runHistoryRequests = new Map();
+  runHistoryErrors = new Map();
+  runLectureRequests.clear();
+  runLectureErrors.clear();
+  runManualCourses.clear();
+  runCourseNodes.clear();
+  runTaskNodes.clear();
+  rerunLectureCache.clear();
+  rerunOpenCourseIds.clear();
+  rerunSelectedCourseIds.clear();
+  rerunSelectedSubIds.clear();
+  runPriorityIds = [];
+  runPreferencesLoaded = false;
+  runSubmitting = "";
+  localRunRows = [];
+  cloudRunRows = [];
+  pendingCloudRuns = [];
+  lastCloudCheck = 0;
+  runKind = $("#run-kind").value = "process";
+  $("#run-api-key").value = "";
+  $("#run-course-query").value = "";
+  $("#single-run-ids").value = "";
+  $("#single-run-official").checked = false;
+  $("#run-options").open = false;
+  $("#run-priority-status").textContent = "";
+  $("#rerun-course-list").replaceChildren();
+  $("#run-history-list").replaceChildren();
+  runFeedback("update", "");
+  runFeedback("draft", "");
+  runFeedback("history", "");
+  $("#refresh-runs-button").removeAttribute("aria-busy");
+  setRunUndo();
+  setRunCustomOpen(false);
+  setRunFilter(false);
+}
+
+function setRunCustomOpen(open) {
+  $("#run-custom").hidden = !open;
+  $("#run-custom-toggle").setAttribute("aria-expanded", String(open));
+  if (open) renderRerunView();
+}
+
+function setRunFilter(selected) {
+  runSelectedOnly = selected;
+  $("#run-filter-all").setAttribute("aria-pressed", String(!selected));
+  $("#run-filter-selected").setAttribute("aria-pressed", String(selected));
+  renderRerunView();
+}
+
+function setRunUndo(label, action) {
+  const root = $("#run-undo");
+  root.replaceChildren();
+  runUndo = action || null;
+  if (!action) return;
+  root.append(label, createButton("撤销", () => {
+    const restore = runUndo;
+    setRunUndo();
+    restore();
+    renderRerunView();
+  }));
+}
+
+function replaceRunSelection(set, values) {
+  set.clear();
+  for (const id of values) set.add(id);
+}
+
+function setRunKind(kind) {
+  const previous = runKind;
+  runKind = $("#run-kind").value = kind;
+  runFeedback("draft", "");
+  setRunUndo();
+  if (previous === "rerun" && kind !== "rerun" && rerunSelectedSubIds.size) {
+    const subs = [...rerunSelectedSubIds];
+    rerunSelectedSubIds.clear();
+    setRunUndo("已清除所选课次", () => {
+      runKind = $("#run-kind").value = previous;
+      replaceRunSelection(rerunSelectedSubIds, subs);
+    });
+  }
+  renderRerunView();
+}
+
+function runCourses() {
+  const rows = new Map([...runManualCourses.values(), ...subscriptionCourses, ...courseRows]
+    .map(row => [String(row.course_id), row]));
+  const rank = new Map(runPriorityIds.map((id, index) => [id, index]));
+  return [...rows.values()].sort((a, b) =>
+    (rank.get(String(a.course_id)) ?? rank.size) - (rank.get(String(b.course_id)) ?? rank.size));
+}
+
+function selectedRunCourseIds(courses = runCourses()) {
+  const selected = new Set(rerunSelectedCourseIds);
+  for (const [id, lectures] of rerunLectureCache) {
+    if (lectures.some(row => rerunSelectedSubIds.has(String(row.sub_id)))) selected.add(id);
+  }
+  return courses.map(course => String(course.course_id)).filter(id => selected.has(id));
+}
+
+function moveRunPriority(id, destination) {
+  const selected = selectedRunCourseIds();
+  const from = selected.indexOf(id);
+  if (from < 0 || destination < 0 || destination >= selected.length || from === destination) return;
+  const previous = [...runPriorityIds];
+  const picked = new Set(selected);
+  selected.splice(destination, 0, selected.splice(from, 1)[0]);
+  let index = 0;
+  runPriorityIds = runCourses().map(row => {
+    const cid = String(row.course_id);
+    return picked.has(cid) ? selected[index++] : cid;
+  });
+  $("#run-priority-status").textContent = "";
+  setRunUndo("已调整顺序", () => { runPriorityIds = previous; });
+  renderRerunView();
+}
+
+function changeRunCourse(id, checked) {
+  const wasChecked = rerunSelectedCourseIds.has(id);
+  const subs = (rerunLectureCache.get(id) || []).map(row => String(row.sub_id))
+    .filter(sid => rerunSelectedSubIds.has(sid));
+  if (checked) rerunSelectedCourseIds.add(id);
+  else rerunSelectedCourseIds.delete(id);
+  subs.forEach(sid => rerunSelectedSubIds.delete(sid));
+  setRunUndo(checked ? "" : "已移除选择", checked ? null : () => {
+    if (wasChecked) rerunSelectedCourseIds.add(id);
+    subs.forEach(sid => rerunSelectedSubIds.add(sid));
+  });
+  renderRerunView();
+}
+
+function clearRunSelection() {
+  const courses = [...rerunSelectedCourseIds], subs = [...rerunSelectedSubIds];
+  rerunSelectedCourseIds.clear();
+  rerunSelectedSubIds.clear();
+  setRunUndo("已清空选择", () => {
+    replaceRunSelection(rerunSelectedCourseIds, courses);
+    replaceRunSelection(rerunSelectedSubIds, subs);
+  });
+  renderRerunView();
+}
+
+async function loadRunLectures(id, refresh = false) {
+  if (runLectureRequests.has(id)) return runLectureRequests.get(id);
+  if (rerunLectureCache.has(id) && !refresh) return;
+  const epoch = runViewEpoch;
+  const request = (async () => {
+    try {
+      const lectures = await api(`/api/local/courses/${encodeURIComponent(id)}/lectures`);
+      if (epoch !== runViewEpoch) return;
+      // Keep selections usable if a refresh temporarily omits a selected lecture.
+      const returned = new Set(lectures.map(row => String(row.sub_id)));
+      const missing = (rerunLectureCache.get(id) || []).filter(row =>
+        rerunSelectedSubIds.has(String(row.sub_id)) && !returned.has(String(row.sub_id)));
+      rerunLectureCache.set(id, [...lectures, ...missing]);
+      runLectureErrors.delete(id);
+    } catch (error) {
+      if (epoch === runViewEpoch) runLectureErrors.set(id, error.message);
+    } finally {
+      if (epoch === runViewEpoch) {
+        runLectureRequests.delete(id);
+        renderRerunView();
+      }
+    }
+  })();
+  runLectureRequests.set(id, request);
+  renderRerunView();
+  return request;
+}
+
+function makeRunCourse(course, selected, index, total) {
+  const id = String(course.course_id);
+  const checked = rerunSelectedCourseIds.has(id);
+  const canExpand = runKind === "rerun";
+  const expanded = canExpand && rerunOpenCourseIds.has(id);
+  const lectures = rerunLectureCache.get(id) || [];
+  const picked = lectures.filter(row => rerunSelectedSubIds.has(String(row.sub_id))).length;
+  const row = document.createElement("div");
+  row.className = "run-course";
+  row.dataset.courseId = id;
+  row.classList.toggle("is-selected", selected);
+  const head = document.createElement("div");
+  head.className = "run-course-head";
+  const label = document.createElement("label");
+  label.className = "run-course-check";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  input.indeterminate = !checked && picked > 0;
+  input.dataset.runFocus = "course";
+  input.onchange = () => changeRunCourse(id, input.checked);
+  const identity = document.createElement("span");
+  identity.className = "course-identity";
+  const title = document.createElement("strong");
+  title.textContent = course.title || id;
+  identity.append(title, createCourseMetadata(course));
+  label.append(input, identity);
+  head.append(label);
+  if (picked) {
+    const count = document.createElement("span");
+    count.className = "run-caption";
+    count.textContent = `${picked} 节`;
+    head.append(count);
+  }
+  if (canExpand) {
+    const toggle = createButton(expanded ? "收起" : "选课次", () => {
+      if (rerunOpenCourseIds.has(id)) rerunOpenCourseIds.delete(id);
+      else {
+        rerunOpenCourseIds.add(id);
+        loadRunLectures(id);
+      }
+      renderRerunView();
+    });
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.setAttribute("aria-label", `${expanded ? "收起" : "选择"}${title.textContent}的课次`);
+    toggle.dataset.runFocus = "expand";
+    head.append(toggle);
+  }
+  if (runSelectedOnly) {
+    const actions = document.createElement("div");
+    actions.className = "run-course-actions";
+    if (total > 1) {
+      const grip = document.createElement("span");
+      grip.className = "run-drag-grip";
+      grip.textContent = "⠿";
+      grip.title = "拖拽调整顺序";
+      grip.setAttribute("aria-hidden", "true");
+      grip.draggable = true;
+      grip.ondragstart = event => {
+        runDragId = id;
+        event.dataTransfer.setData("application/x-sea-run-course", id);
+        event.dataTransfer.effectAllowed = "move";
+      };
+      grip.ondragend = finishRunDrag;
+      row.ondragover = event => {
+        if (!runDragId || runDragId === id) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        row.classList.add("run-drop-target");
+      };
+      row.ondragleave = event => {
+        if (!row.contains(event.relatedTarget)) row.classList.remove("run-drop-target");
+      };
+      row.ondrop = event => {
+        if (!runDragId) return;
+        event.preventDefault();
+        const source = runDragId;
+        finishRunDrag();
+        moveRunPriority(source, index);
+      };
+      actions.append(grip);
+    }
+    for (const [offset, name, icon] of [[-1, "上移", "↑"], [1, "下移", "↓"]]) {
+      const button = createButton(icon, () => moveRunPriority(id, index + offset));
+      button.setAttribute("aria-label", name + title.textContent);
+      button.title = name;
+      button.dataset.runFocus = name;
+      button.disabled = index + offset < 0 || index + offset >= total;
+      actions.append(button);
+    }
+    const remove = createButton("移除", () => changeRunCourse(id, false));
+    remove.setAttribute("aria-label", "移除" + title.textContent);
+    remove.dataset.runFocus = "remove";
+    actions.append(remove);
+    head.append(actions);
+  }
+  row.append(head);
+  if (!expanded) return row;
+  const list = document.createElement("div");
+  list.className = "run-lectures";
+  if (runLectureErrors.has(id)) {
+    const retry = createButton("重试", () => loadRunLectures(id, true));
+    retry.dataset.runFocus = "retry";
+    list.append(runLectureErrors.get(id), retry);
+  } else if (!lectures.length) {
+    list.textContent = rerunLectureCache.has(id) ? "暂无课次" : "正在读取课次…";
+  }
+  for (const lecture of lectures) {
+    const sid = String(lecture.sub_id);
+    const name = document.createElement("label");
+    const choice = document.createElement("input");
+    choice.type = "checkbox";
+    choice.dataset.runFocus = "lecture:" + sid;
+    choice.disabled = !Number(lecture.transcript_available) || checked;
+    choice.checked = Boolean(Number(lecture.transcript_available)) && (checked || rerunSelectedSubIds.has(sid));
+    choice.onchange = () => {
+      if (choice.checked) {
+        rerunSelectedSubIds.add(sid);
+        setRunUndo();
+      } else {
+        rerunSelectedSubIds.delete(sid);
+        setRunUndo("已移除课次", () => rerunSelectedSubIds.add(sid));
+      }
+      renderRerunView();
+    };
+    const caption = document.createElement("span");
+    caption.textContent = lectureDisplayName(lecture);
+    name.append(choice, caption);
+    if (!Number(lecture.transcript_available)) {
+      const hint = document.createElement("small");
+      hint.className = "run-caption";
+      hint.textContent = "无可用转录";
+      name.append(hint);
+    }
+    list.append(name);
+  }
+  row.append(list);
+  return row;
+}
+
+function finishRunDrag() {
+  if (!runDragId) return;
+  runDragId = null;
+  document.querySelectorAll(".run-drop-target").forEach(row => row.classList.remove("run-drop-target"));
+  renderRerunView();
+}
+
+function focusRunCourse(id) {
+  runCourseNodes.get(id)?.node.querySelector("input")?.focus();
+}
+
+// Insert or move only rows whose identity or position has changed.
+function reconcileRunRows(root, rows) {
+  const wanted = new Set(rows);
+  for (const child of [...root.children]) if (!wanted.has(child)) child.remove();
+  let cursor = root.firstElementChild;
+  for (const row of rows) {
+    if (row === cursor) cursor = cursor.nextElementSibling;
+    else root.insertBefore(row, cursor);
+  }
+}
+
+function runEmpty(text) {
+  const empty = document.createElement("p");
+  empty.className = "run-empty";
+  empty.textContent = text;
+  return empty;
+}
+
+function renderRerunView() {
+  updateRunControls();
+  if ($("#run-custom").hidden || runDragId) return;
+  const root = $("#rerun-course-list");
+  const scroll = root.scrollTop;
+  const focus = root.contains(document.activeElement) ? document.activeElement : null;
+  const focusId = focus?.closest("[data-course-id]")?.dataset.courseId;
+  const courses = runCourses();
+  const selected = selectedRunCourseIds(courses);
+  const ranks = new Map(selected.map((id, index) => [id, index]));
+  const query = $("#run-course-query").value.trim().toLowerCase();
+  const visible = courses.filter(course => {
+    const id = String(course.course_id);
+    return (!runSelectedOnly || ranks.has(id)) && `${course.title || ""} ${id}`.toLowerCase().includes(query);
+  });
+  const rows = visible.map(course => {
+    const id = String(course.course_id);
+    const rank = ranks.get(id);
+    const lectures = rerunLectureCache.get(id) || [];
+    const expanded = runKind === "rerun" && rerunOpenCourseIds.has(id);
+    const signature = JSON.stringify([
+      course, runKind, rerunSelectedCourseIds.has(id), runSelectedOnly, expanded,
+      runSelectedOnly ? rank : undefined, runSelectedOnly ? selected.length : undefined,
+      lectures.filter(row => rerunSelectedSubIds.has(String(row.sub_id))).map(row => row.sub_id),
+      expanded && rerunLectureCache.has(id) ? lectures.map(lecture =>
+        [lecture.sub_id, lectureDisplayName(lecture), lecture.transcript_available]) : undefined,
+      expanded ? runLectureErrors.get(id) : undefined,
+    ]);
+    let entry = runCourseNodes.get(id);
+    if (entry?.signature !== signature) {
+      entry = {signature, node: makeRunCourse(course, ranks.has(id), rank, selected.length)};
+      runCourseNodes.set(id, entry);
+    }
+    return entry.node;
+  });
+  if (!rows.length) rows.push(runEmpty(query ? "没有匹配的课程" : runSelectedOnly ? "尚未选择课程或课次" : "暂无课程"));
+  const liveIds = new Set(courses.map(course => String(course.course_id)));
+  for (const id of runCourseNodes.keys()) if (!liveIds.has(id)) runCourseNodes.delete(id);
+  reconcileRunRows(root, rows);
+  root.scrollTop = scroll;
+  if (focus && document.activeElement !== focus) {
+    const row = runCourseNodes.get(focusId)?.node;
+    const replacement = row?.isConnected && [...row.querySelectorAll("[data-run-focus]")]
+      .find(control => control.dataset.runFocus === focus.dataset.runFocus && !control.disabled);
+    (replacement || (row?.isConnected && row.querySelector("input")) ||
+      $("#run-undo button") || $("#run-course-query")).focus({preventScroll: true});
+  }
+}
+
+function updateRunControls() {
+  const target = $("#run-target").value;
+  const localUnavailable = isPages && target === "local";
+  const courses = rerunSelectedCourseIds.size;
+  const subs = rerunSelectedSubIds.size;
+  const count = [courses && `${courses} 门课程`, subs && `${subs} 节课次`].filter(Boolean).join(" · ");
+  if ($("#run-selection-count").textContent !== (count || "未选择")) {
+    $("#run-selection-count").textContent = count || "未选择";
+  }
+  $("#run-official-field").hidden = runKind !== "process";
+  $("#run-key-field").hidden = isPages || target !== "local";
+  $("#run-local-link").classList.toggle("hidden", !localUnavailable);
+  $("#run-target").disabled = Boolean(runSubmitting);
+  const update = $("#run-button");
+  update.disabled = Boolean(runSubmitting) || localUnavailable;
+  update.textContent = runSubmitting === "update" ? "正在提交…" : "更新订阅课程";
+  update.setAttribute("aria-busy", String(runSubmitting === "update"));
+  const submit = $("#rerun-page-submit");
+  submit.disabled = Boolean(runSubmitting) || localUnavailable || !(courses || runKind === "rerun" && subs);
+  submit.textContent = runSubmitting === "draft" ? "正在提交…" : "开始运行";
+  submit.setAttribute("aria-busy", String(runSubmitting === "draft"));
+  $("#run-clear-selection").disabled = !(courses || subs);
+}
+
+function runFeedback(area, text, action) {
+  const root = $(`#run-${area}-feedback`);
+  root.replaceChildren();
+  if (text) root.append(text);
+  if (action) root.append(createButton(action.label, action.run));
+}
+
+function modelSettingsAction() {
+  return {label: "模型与 API", run: () => $("#model-button").click()};
+}
+
+function runOrder(value) {
+  return ["api", "oldest", "newest"].includes(value) ? value : "api";
+}
+
+function loadRunView() {
+  if (!statusState?.configured) {
+    runFeedback("update", "请先连接课程资料", {label: "连接", run: () => $("#configure-button").click()});
+    return Promise.resolve();
+  }
+  if (runViewRequest) return runViewRequest;
+  const epoch = runViewEpoch;
+  if (!runPreferencesLoaded) {
+    let target;
+    try { target = localStorage.getItem(runTargetKey()); } catch (_) {}
+    $("#run-target").value = target === "local" ? "local" : "github";
+  }
+  updateRunControls();
+  const reads = [
+    api("/api/local/subscriptions").then(state => {
+      if (epoch === runViewEpoch) applySubscriptionState(state);
+    }),
+    api("/api/local/run-preferences").then(preferences => {
+      if (epoch !== runViewEpoch || runPreferencesLoaded) return;
+      runPriorityIds = [...new Set([...(preferences.course_ids || []).map(String), ...runPriorityIds])];
+      $("#run-lecture-order").value = runOrder(preferences.lecture_order);
+      runPreferencesLoaded = true;
+    }),
+    loadGenerationOrder("#run-model-order", true).catch(error => {
+      if (epoch === runViewEpoch) $("#run-model-order").textContent = error.message;
+    }),
+    refreshRunHistory(),
+  ];
+  runViewRequest = Promise.allSettled(reads).then(results => {
+    if (epoch !== runViewEpoch) return;
+    runViewRequest = null;
+    if (results[0].status === "rejected") {
+      runFeedback("draft", "暂时无法读取订阅课程", {label: "重试", run: loadRunView});
+    }
+    renderRerunView();
+  });
+  return runViewRequest;
+}
+
+async function runSubscriptionPayload() {
+  const [state, preferences] = await Promise.all([
+    api("/api/local/subscriptions"),
+    api("/api/local/run-preferences"),
+  ]);
+  const excluded = new Set((state.paused_course_ids || []).map(String));
+  for (const course of state.courses || []) {
+    if (course.auto_check_stopped) excluded.add(String(course.course_id));
+  }
+  const eligible = new Set((state.course_ids || []).map(String).filter(id => !excluded.has(id)));
+  const ids = [...new Set([...(preferences.course_ids || []).map(String), ...eligible])]
+    .filter(id => eligible.has(id));
+  return {kind: "process", course_ids: ids, sub_ids: [], priority_course_ids: ids,
+    lecture_order: runOrder(preferences.lecture_order), use_official_transcript: false};
+}
+
+function runDraftPayload(target) {
+  const priority = selectedRunCourseIds();
+  const payload = {kind: runKind,
+    course_ids: priority.filter(id => rerunSelectedCourseIds.has(id)),
+    sub_ids: runKind === "rerun" ? [...rerunSelectedSubIds] : [],
+    priority_course_ids: priority,
+    lecture_order: $("#run-lecture-order").value,
+    use_official_transcript: runKind === "process" && $("#single-run-official").checked};
+  if (target === "local") payload.api_key = $("#run-api-key").value;
+  return payload;
+}
+
+async function submitUnifiedRun(area) {
+  const target = $("#run-target").value;
+  if (runSubmitting || isPages && target === "local") return;
+  if (!statusState?.configured) {
+    runFeedback(area, "请先连接课程资料", {label: "连接", run: () => $("#configure-button").click()});
+    return;
+  }
+  const epoch = runViewEpoch;
+  const trigger = $(area === "update" ? "#run-button" : "#rerun-page-submit");
+  const hadFocus = document.activeElement === trigger;
+  runSubmitting = area;
+  runFeedback(area, "");
+  updateRunControls();
+  try {
+    const payload = area === "update" ? await runSubscriptionPayload() : runDraftPayload(target);
+    if (epoch !== runViewEpoch) return;
+    if (!payload.course_ids.length && !payload.sub_ids.length) {
+      const subscription = area === "update";
+      runFeedback(area, subscription ? "没有可更新的订阅课程" : "请选择课程或课次",
+        subscription ? {label: "查看订阅", run: () => $('.nav-button[data-view="subscriptions"]').click()} : null);
+      return;
+    }
+    if (target === "local") {
+      const capabilities = await api("/api/local/run-capabilities");
+      if (epoch !== runViewEpoch) return;
+      if (!capabilities.summary_ready || payload.kind === "process" && !capabilities.process_ready) {
+        const missing = [...(capabilities.missing || [])];
+        if (payload.kind === "process" && capabilities.models_ready === false) missing.push("ASR 权重");
+        runFeedback(area, missing.length ? `本地环境缺少 ${missing.join("、")}` : "本地运行环境未就绪",
+          {label: "改用 GitHub Actions", run: () => setRunTarget("github")});
+        return;
+      }
+    }
+    if (epoch !== runViewEpoch) return;
+    const started = Date.now();
+    const result = await api("/api/local/runs", {method: "POST", body: JSON.stringify({target, ...payload})});
+    if (epoch !== runViewEpoch) return;
+    if (target === "github") {
+      pendingCloudRuns.push({id: String(started), created_at: new Date(started).toISOString(),
+        kind: payload.kind, known: new Set(cloudRunRows.map(row => String(row.id)))});
+    } else if (result.job) {
+      localRunRows = [result.job, ...localRunRows.filter(row => row.id !== result.job.id)];
+      if (area === "draft") $("#run-api-key").value = "";
+    }
+    renderRunHistory();
+    lastCloudCheck = 0;
+    if (area === "draft") {
+      setRunCustomOpen(false);
+      $("#run-custom-toggle").focus({preventScroll: true});
+    }
+    if (activeView === "run") $("#run-history-title").scrollIntoView({block: "nearest"});
+    // Submission has already succeeded. History reports refresh errors independently.
+    void refreshRunHistory();
+  } catch (error) {
+    if (epoch !== runViewEpoch) return;
+    const needsModel = /模型与 API|API Key|GitHub Key|启用模型/.test(error.message);
+    const isBusy = /已有本地任务/.test(error.message);
+    runFeedback(area, error.message, needsModel ? modelSettingsAction() : isBusy
+      ? {label: "查看任务", run: () => $("#run-history-title").scrollIntoView({block: "nearest"})} : null);
+  } finally {
+    if (epoch === runViewEpoch) {
+      runSubmitting = "";
+      updateRunControls();
+      if (activeView === "run" && hadFocus && document.activeElement === document.body && !trigger.closest("[hidden]")) {
+        trigger.focus({preventScroll: true});
+      }
+    }
+  }
+}
+
+function setRunTarget(target) {
+  $("#run-target").value = target;
+  try { localStorage.setItem(runTargetKey(), target); } catch (_) {}
+  runFeedback("update", "");
+  runFeedback("draft", "");
+  updateRunControls();
+}
+
+const localRunStatusLabels = {completed: "已完成", failed: "部分失败或未完成", cancelled: "已停止"};
+
+function taskElement(tag, className) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  return element;
+}
+
+function setTaskText(element, value) {
+  if (element.textContent !== value) element.textContent = value;
+}
+
+function buildRunTask(source, id) {
+  const node = taskElement("article", "run-task");
+  node.dataset.taskKey = `${source}:${id}`;
+  const head = taskElement("div", "run-task-head");
+  const title = taskElement(source === "cloud" ? "a" : "strong", "run-task-name");
+  if (source === "cloud") {
+    title.target = "_blank";
+    title.rel = "noreferrer";
+  }
+  const meta = taskElement("div", "run-task-meta run-caption");
+  const origin = taskElement("span");
+  origin.textContent = source === "local" ? "本地" : "GitHub Actions";
+  const time = taskElement("time");
+  meta.append(origin, time);
+  const status = taskElement("span", "run-task-state");
+  head.append(title, meta, status);
+  const activity = taskElement("div", "run-task-progress");
+  const progress = taskElement("progress");
+  progress.setAttribute("aria-label", "本地任务进度");
+  const current = taskElement("div", "run-caption");
+  activity.append(progress, current);
+  const footer = taskElement("div", "run-task-footer");
+  const details = taskElement("details");
+  const summary = taskElement("summary");
+  summary.textContent = source === "local" ? "运行日志" : "查看详情";
+  const log = taskElement(source === "local" ? "pre" : "p");
+  details.append(summary, log);
+  const stop = createButton("停止本地任务", () => stopLocalRun(id, stop));
+  footer.append(details, stop);
+  node.append(head, activity, footer);
+  return {node, title, time, status, activity, progress, current, details, log, stop, footer};
+}
+
+async function stopLocalRun(id, button) {
+  const epoch = runViewEpoch;
+  button.disabled = true;
+  try {
+    const result = await api(`/api/local/runs/${encodeURIComponent(id)}/cancel`, {method: "POST", body: "{}"});
+    if (epoch !== runViewEpoch) return;
+    if (result.id === id) {
+      localRunRows = localRunRows.map(row => row.id === id ? result : row);
+      renderRunHistory();
+    }
+    if ($("#run-history-feedback").dataset.refreshError !== "true") runFeedback("history", "");
+    await runHistoryRequests.get("local");
+    if (epoch === runViewEpoch) await refreshRunHistory(["local"]);
+  } catch (error) {
+    if (epoch === runViewEpoch) {
+      runFeedback("history", error.message, {label: "重试停止", run: () => stopLocalRun(id, button)});
+    }
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function updateRunTask(task, source, row) {
+  const local = source === "local", pending = source === "submitted";
+  const status = pending ? "submitted" : row.conclusion || row.status;
+  const name = source === "cloud" ? row.name || "GitHub Actions" : runKindLabels[row.kind] || "运行任务";
+  setTaskText(task.title, name);
+  if (source === "cloud" && task.title.getAttribute("href") !== row.html_url) task.title.href = row.html_url;
+  task.time.dateTime = row.created_at || "";
+  const timestamp = Date.parse(row.created_at);
+  task.time.hidden = !Number.isFinite(timestamp);
+  if (Number.isFinite(timestamp)) {
+    setTaskText(task.time, new Date(timestamp).toLocaleString("zh-CN", {
+      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+    }));
+  }
+  const label = (local ? localRunStatusLabels[status] : null) || RUN_STATUS_LABELS[status] || status;
+  setTaskText(task.status, pending ? "已提交" : label);
+  task.status.className = `run-task-state status-${status}`;
+  task.activity.hidden = !local || !activeRunStatuses.has(status);
+  if (local) {
+    const finished = row.completed || 0, failed = row.failed || 0;
+    task.progress.max = row.total || 1;
+    if (row.total) task.progress.value = finished + failed;
+    else task.progress.removeAttribute("value");
+    const counts = `${finished}/${row.total || "—"} 篇已生成${failed ? ` · ${failed} 节失败` : ""}`;
+    setTaskText(task.current, [counts, row.current].filter(Boolean).join(" · "));
+  }
+  const errors = ["action_required", "failure", "timed_out", "startup_failure"];
+  task.details.hidden = !local && !errors.includes(status);
+  task.stop.hidden = !local || !activeRunStatuses.has(status);
+  task.footer.hidden = task.details.hidden && task.stop.hidden;
+  if (local) setTaskText(task.log, (row.logs || []).join("\n") || "暂无日志");
+  else if (errors.includes(status)) setTaskText(task.log, "打开此运行记录，在 GitHub 查看原因。");
+}
+
+function renderRunHistory() {
+  const root = $("#run-history-list");
+  const focus = root.contains(document.activeElement) ? document.activeElement : null;
+  const history = [
+    ...localRunRows.map(row => ({source: "local", row})),
+    ...cloudRunRows.map(row => ({source: "cloud", row})),
+    ...pendingCloudRuns.map(row => ({source: "submitted", row})),
+  ];
+  const isActive = ({source, row}) => source === "submitted" || activeRunStatuses.has(row.status) && !row.conclusion;
+  history.sort((a, b) => Number(isActive(b)) - Number(isActive(a)) ||
+    (Date.parse(b.row.created_at) || 0) - (Date.parse(a.row.created_at) || 0));
+  const ids = new Set();
+  const rows = history.map(({source, row}) => {
+    const key = `${source}:${row.id}`;
+    ids.add(key);
+    if (!runTaskNodes.has(key)) runTaskNodes.set(key, buildRunTask(source, row.id));
+    const task = runTaskNodes.get(key);
+    updateRunTask(task, source, row);
+    return task.node;
+  });
+  for (const key of runTaskNodes.keys()) if (!ids.has(key)) runTaskNodes.delete(key);
+  if (!rows.length) rows.push(runEmpty(runHistoryRequests.size ? "正在读取任务…" :
+    runHistoryErrors.size ? "暂无可显示的任务记录" : "暂无任务记录"));
+  reconcileRunRows(root, rows);
+  if (focus && (document.activeElement !== focus || focus.closest("[hidden]"))) {
+    const restore = focus.isConnected && !focus.closest("[hidden]") ? focus :
+      focus.closest(".run-task")?.querySelector("details:not([hidden]) summary");
+    (restore?.isConnected ? restore : $("#refresh-runs-button")).focus({preventScroll: true});
+  }
+}
+
+function reconcileSubmittedRuns() {
+  // The dispatch endpoint returns no run ID. Match only an unambiguous new
+  // Single Run in the immediate dispatch window. Other runs keep their own rows.
+  const cutoff = Date.now() - 120000;
+  const claimed = new Set();
+  pendingCloudRuns = pendingCloudRuns.filter(pending => {
+    const started = Date.parse(pending.created_at);
+    const candidates = cloudRunRows.filter(row => {
+      const id = String(row.id), time = Date.parse(row.created_at);
+      return !pending.known.has(id) && !claimed.has(id) && row.name === "Single Run" &&
+        row.event === "workflow_dispatch" && time >= Math.floor(started / 1000) * 1000 && time <= started + 120000;
+    });
+    if (candidates.length === 1) {
+      claimed.add(String(candidates[0].id));
+      return false;
+    }
+    return started >= cutoff;
+  });
+  for (const pending of pendingCloudRuns) for (const id of claimed) pending.known.add(id);
+}
+
+function refreshRunSource(source) {
+  if (runHistoryRequests.has(source)) return runHistoryRequests.get(source);
+  const epoch = runViewEpoch;
+  const local = source === "local";
+  const existingJobs = new Set(localRunRows.map(row => row.id));
+  const request = (async () => {
+    try {
+      const result = await api(local ? "/api/local/runs" : "/api/local/workflows");
+      if (epoch !== runViewEpoch) return;
+      if (local) {
+        const jobs = result.jobs || [];
+        const returned = new Set(jobs.map(row => row.id));
+        // A request already in flight can predate a newly submitted job.
+        localRunRows = [...localRunRows.filter(row => !existingJobs.has(row.id) && !returned.has(row.id)), ...jobs];
+      } else {
+        cloudRunRows = result;
+        reconcileSubmittedRuns();
+      }
+      runHistoryErrors.delete(source);
+    } catch (error) {
+      if (epoch === runViewEpoch) runHistoryErrors.set(source, error.message);
+    } finally {
+      if (epoch === runViewEpoch) {
+        runHistoryRequests.delete(source);
+        if (activeView === "run") renderRunHistory();
+      }
+    }
+  })();
+  runHistoryRequests.set(source, request);
+  return request;
+}
+
+async function refreshRunHistory(sources = isPages ? ["cloud"] : ["local", "cloud"]) {
+  const epoch = runViewEpoch;
+  const button = $("#refresh-runs-button");
+  const requests = sources.map(refreshRunSource);
+  button.setAttribute("aria-busy", "true");
+  if (!runTaskNodes.size) renderRunHistory();
+  await Promise.all(requests);
+  if (epoch !== runViewEpoch) return;
+  if (!runHistoryRequests.size) button.removeAttribute("aria-busy");
+  const failed = [...runHistoryErrors.keys()];
+  const feedback = $("#run-history-feedback");
+  if (failed.length) {
+    const names = failed.map(source => source === "local" ? "本地" : "GitHub Actions");
+    const label = `无法刷新 ${names.join("与")}记录`;
+    if (!feedback.textContent.startsWith(label)) {
+      runFeedback("history", label, {label: "重试", run: () => refreshRunHistory(failed)});
+    }
+  } else if (feedback.dataset.refreshError === "true") {
+    if (feedback.contains(document.activeElement)) button.focus({preventScroll: true});
+    runFeedback("history", "");
+  }
+  feedback.dataset.refreshError = String(Boolean(failed.length));
+}
+
 async function pollRunUpdates(force = false) {
   if (!statusState?.configured || liveRefreshBusy || document.hidden && !force) return;
   liveRefreshBusy = true;
   try {
-    await refreshLocalRuns();
-    const busy = localRunRows.some(job => ["queued", "in_progress"].includes(job.status));
+    const checkCloud = Date.now() - lastCloudCheck >= 15000 || force;
+    const sources = isPages ? [] : ["local"];
+    if (checkCloud && activeView === "run") sources.push("cloud");
+    if (sources.length) await refreshRunHistory(sources);
     await refreshStatus();
-    if (Date.now() - lastCloudCheck >= 15000 || force) {
+    if (checkCloud) {
       lastCloudCheck = Date.now();
       await api("/api/local/sync", {method: "POST", body: "{}"});
       await refreshStatus();
-      if (activeView === "run") await loadRuns();
     }
-    $("#run-live-status").textContent = busy ? "本地任务运行中 · 自动更新" : "自动更新已开启";
-  } catch (error) {
-    $("#run-live-status").textContent = "更新暂未成功，正在自动重试";
+  } catch (_) {
+    // The next poll retries note synchronization. Task reads report separately.
   } finally { liveRefreshBusy = false; }
 }
 
-$("#run-target").onchange = updateRunSettings;
-$("#run-kind").onchange = () => { rerunSelectedSubIds.clear(); updateRunSettings(); };
+$("#run-custom-toggle").onclick = () => setRunCustomOpen($("#run-custom").hidden);
+$("#run-target").onchange = () => setRunTarget($("#run-target").value);
+$("#run-kind").onchange = () => setRunKind($("#run-kind").value);
+$("#run-filter-all").onclick = () => setRunFilter(false);
+$("#run-filter-selected").onclick = () => setRunFilter(true);
 $("#run-course-query").oninput = renderRerunView;
-$("#run-clear-selection").onclick = () => { rerunSelectedCourseIds.clear(); rerunSelectedSubIds.clear(); renderRerunView(); };
+$("#run-clear-selection").onclick = clearRunSelection;
+$("#run-button").onclick = () => submitUnifiedRun("update");
+$("#rerun-page-submit").onclick = () => submitUnifiedRun("draft");
+$("#refresh-runs-button").onclick = () => statusState?.configured ? refreshRunHistory() : loadRunView();
+
+$("#run-add-ids").onsubmit = event => {
+  event.preventDefault();
+  const field = $("#single-run-ids");
+  const ids = [...new Set(field.value.split(/[,，\s]+/).filter(Boolean))];
+  if (!ids.length || ids.some(id => id.length > 100)) {
+    runFeedback("draft", "请输入有效的课程 ID");
+    return;
+  }
+  const known = new Set(runCourses().map(row => String(row.course_id)));
+  for (const id of ids) {
+    if (!known.has(id)) runManualCourses.set(id, {course_id: id, title: `课程 ${id}`});
+    rerunSelectedCourseIds.add(id);
+    for (const lecture of rerunLectureCache.get(id) || []) rerunSelectedSubIds.delete(String(lecture.sub_id));
+  }
+  field.value = "";
+  runFeedback("draft", "");
+  setRunUndo();
+  $("#run-course-query").value = "";
+  setRunFilter(true);
+  focusRunCourse(ids[0]);
+};
+
 $("#run-save-priority").onclick = async () => {
   const button = $("#run-save-priority");
+  const status = $("#run-priority-status");
+  const epoch = runViewEpoch;
   button.disabled = true;
+  status.textContent = "正在保存…";
+  const selected = selectedRunCourseIds();
+  const order = $("#run-lecture-order").value;
   try {
-    const subscription = await api("/api/local/subscriptions");
-    const ids = new Set((subscription.course_ids || []).map(String));
-    const ordered = runCourses().map(row => String(row.course_id)).filter(id => ids.has(id));
-    (subscription.course_ids || []).forEach(id => { if (!ordered.includes(String(id))) ordered.push(String(id)); });
-    const saved = await api("/api/local/run-preferences", {method: "PUT", body: JSON.stringify({course_ids: ordered, lecture_order: $("#run-lecture-order").value})});
+    const state = await api("/api/local/subscriptions");
+    if (epoch !== runViewEpoch) return;
+    const ids = (state.course_ids || []).map(String);
+    const subscribed = new Set(ids);
+    const ordered = selected.filter(id => subscribed.has(id));
+    const picked = new Set(ordered);
+    let index = 0;
+    const saved = await api("/api/local/run-preferences", {method: "PUT", body: JSON.stringify({
+      course_ids: ids.map(id => picked.has(id) ? ordered[index++] : id), lecture_order: order,
+    })});
+    if (epoch !== runViewEpoch) return;
     subscribedCourseIds = saved.course_ids;
-    $("#run-priority-status").textContent = "已保存，下次每日订阅运行按此顺序处理。";
-  } catch (error) { $("#run-priority-status").textContent = error.message; }
-  finally { button.disabled = false; }
+    status.textContent = "已保存";
+  } catch (error) {
+    if (epoch === runViewEpoch) status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 };
+
 setInterval(pollRunUpdates, 3000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) pollRunUpdates(true); });
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) pollRunUpdates(true);
+});
 if (location.hash === "#run") {
   showView("run");
   const openRun = () => {
-    if (statusState?.configured) loadRunView().catch(error => message(error.message, true));
-    else setTimeout(openRun, 1000);
+    if (statusState?.configured) loadRunView();
+    else if (activeView === "run") setTimeout(openRun, 1000);
   };
   openRun();
 }

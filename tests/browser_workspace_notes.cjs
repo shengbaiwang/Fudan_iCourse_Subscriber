@@ -46,7 +46,31 @@ const root=path.resolve(__dirname,'..');
     const original=await page.locator('#note-preview').innerText();
     await page.locator('#note-preview').dblclick();await page.locator('#note-body').waitFor();
     const body='# 研究札记\n\n勘误与档案。\n\n## 材料比较\n\n'+('较长的研究材料与说明。\n\n'.repeat(35))+'\n第三部分\n--------\n\n勘误的下一处。\n\n```md\n# 代码内标题\n```';
-    await page.locator('#note-title').fill('课程手动修订');await page.locator('#note-body').fill(body);
+    await page.locator('#note-title').fill('课程手动修订');
+    const duringSwitch=await page.evaluate(body=>{
+      const editor=document.querySelector('#note-body');
+      editor.value=body;
+      editor.dispatchEvent(new InputEvent('input'));
+      editor.setSelectionRange(4,8);
+      window.scrollTo(0,300);
+      const before=scrollY;
+      const toggle=document.querySelector('#note-organization-toggle');
+      toggle.click();
+      const problem=document.querySelector('#note-list').dataset.organization;
+      toggle.click();
+      return {
+        body:editor.value, before, after:scrollY, problem,
+        selection:[editor.selectionStart,editor.selectionEnd],
+        undoAvailable:!document.querySelector('#note-undo').disabled,
+        editing:!editor.classList.contains('hidden')
+      };
+    },body);
+    assert.equal(duringSwitch.body,body);
+    assert.ok(duringSwitch.before>0);
+    assert.equal(duringSwitch.after,duringSwitch.before);
+    assert.equal(duringSwitch.problem,'problem');
+    assert.deepEqual(duringSwitch.selection,[4,8]);
+    assert.ok(duringSwitch.undoAvailable && duringSwitch.editing);
     await page.waitForFunction(()=>document.querySelector('#note-save-state').textContent==='已保存');
     await page.waitForFunction(()=>document.querySelectorAll('.note-outline-link').length===3);
     await page.locator('#note-undo').click();
@@ -76,10 +100,19 @@ const root=path.resolve(__dirname,'..');
     await page.locator('[data-note-id="course:one"]').click();await page.waitForFunction(()=>document.querySelector('#note-find').value==='勘误');
     await page.locator('#note-search').fill('');await page.locator('#note-find-close').click();
     // A source conflict keeps the editor draft, and the fallback saves every word.
+    const courseContent=`${base}/api/local/note-library/course/one/content`;
+    let externalStatus;
+    await page.route(courseContent,async route=>{
+      const {title,revision}=route.request().postDataJSON();
+      const external=await page.request.put(courseContent,{data:{title,body:'另一窗口已保存',revision}});
+      externalStatus=external.status();
+      await route.continue();
+    },{times:1});
     await page.locator('#note-mode').click();await page.locator('#note-body').fill('# 本窗口草稿\n\n尚未保存的内容。');
-    const external=await page.request.put(`${base}/api/local/note-library/course/one/content`,{data:{title:edited.title,body:'另一窗口已保存',revision:edited.edit_revision}});
-    assert.equal(external.status(),200);
-    await page.getByRole('button',{name:'保留为新笔记'}).click();
+    const keepDraft=page.getByRole('button',{name:'保留为新笔记'});
+    await keepDraft.waitFor();
+    assert.equal(externalStatus,200);
+    await keepDraft.click();
     await page.waitForFunction(()=>document.querySelector('#message').textContent.includes('已保存为新笔记'));
     assert.match(await page.locator('#note-body').inputValue(),/本窗口草稿/);
     assert.equal((await (await page.request.get(`${base}/api/local/note-library/course/one`)).json()).body,'另一窗口已保存');

@@ -21,8 +21,21 @@
   let notes = [], folders = [], selected = null, kind = 'all', filter = 'all', folder = '';
   let reading = false, dirty = false, saving = null, saveTimer, searchTimer, menu = null;
   let editHistory=[], editIndex=-1, outlineTimer, findMatches=[], findIndex=-1, outlineObserver;
-  let expanded = new Set(['']);
-  try { expanded = new Set(['',...JSON.parse(localStorage.getItem('sea-note-folders-open') || '[]')]); } catch (_) {}
+  const organizationKey = 'sea-note-organization';
+  const expansionKeys = {course:'sea-note-courses-open', problem:'sea-note-folders-open'};
+  const expansion = {course:new Set(['source:personal','source:talk']), problem:new Set([''])};
+  const listScroll = {course:0, problem:0, trash:0};
+  let preferredOrganization, organization = 'course';
+  for (const [view,key] of Object.entries(expansionKeys)) {
+    try {
+      const saved=JSON.parse(localStorage.getItem(key));
+      if (Array.isArray(saved)) expansion[view]=new Set(saved);
+    } catch (_) {}
+  }
+  try {
+    const saved=localStorage.getItem(organizationKey);
+    if (saved==='course' || saved==='problem') preferredOrganization=organization=saved;
+  } catch (_) {}
   let activeLoads=0, polling=false;
   let loadId = 0, openId = 0, searchId = 0, versionKey = 'active', contentTab = 'summary', folderEdit = null;
 
@@ -245,15 +258,50 @@
     }
     return names.join(' / ') || '收件箱';
   }
-  function rememberExpanded() {
-    try { localStorage.setItem('sea-note-folders-open',JSON.stringify([...expanded])); } catch (_) {}
+  function rememberExpanded(view=organization) {
+    try { localStorage.setItem(expansionKeys[view],JSON.stringify([...expansion[view]])); } catch (_) {}
   }
   function revealFolder(key) {
+    const expanded=expansion.problem;
     const seen=new Set();
     while (key && !seen.has(key)) {
       seen.add(key); expanded.add(key); key=folders.find(row=>row.id===key)?.parent_id;
     }
-    expanded.add(''); rememberExpanded();
+    expanded.add(''); rememberExpanded('problem');
+  }
+  const courseBranchId = row => `course-group:${row.course_id}`;
+  const noteBranchId = row => row.kind==='course' ? courseBranchId(row) : `source:${row.kind}`;
+  function revealNote(row) {
+    if (organization==='problem') {
+      revealFolder(row.folder_id);
+    } else {
+      expansion.course.add(noteBranchId(row));
+      rememberExpanded('course');
+    }
+  }
+  function updateOrganizationButton() {
+    const button=el('note-organization-toggle');
+    const label=organization==='course' ? '当前按课程，切换到按问题' : '当前按问题，切换到按课程';
+    button.title=label;
+    button.setAttribute('aria-label',label);
+    for (const icon of button.querySelectorAll('svg')) {
+      icon.classList.toggle('hidden',icon.dataset.noteOrganizationIcon!==organization);
+    }
+  }
+  function chooseOrganization(view) {
+    organization=preferredOrganization=view;
+    try { localStorage.setItem(organizationKey,view); } catch (_) {}
+    closeMenu();
+    if (filter==='trash' || el('note-list').dataset.organization==='trash') {
+      updateOrganizationButton();
+      return;
+    }
+    const row=notes.find(note=>note.id===selected?.id);
+    if (row) {
+      if (view==='problem') folder=row.folder_id || '';
+      revealNote(row);
+    }
+    renderList();
   }
   function renderSharedStatus() {
     const node=el('shared-notes-status');node.classList.toggle('hidden',!shared.enabled);
@@ -335,20 +383,19 @@
     });
   }
   function courseEntry(row) {
-    return {...row,id:row.location_reference || `course-group:${row.course_id}`,kind:'course-group',source_id:row.course_id,title:row.source_label};
+    return {...row,id:courseBranchId(row),kind:'course-group',source_id:row.course_id,title:row.source_label};
   }
   function courseGroups() {
-    if(shared.enabled)return [];
     const groups=new Map();
     notes.filter(row=>row.kind==='course').forEach(row=>{
-      if(!groups.has(row.course_id))groups.set(row.course_id,{...courseEntry(row),notes:[]});
+      if(!groups.has(row.course_id))groups.set(row.course_id,{id:courseBranchId(row),course_id:row.course_id,title:row.source_label,notes:[]});
       groups.get(row.course_id).notes.push(row);
     });
     for(const row of groups.values())row.notes.sort((a,b)=>`${a.lecture_date} ${a.lecture_label}`.localeCompare(`${b.lecture_date} ${b.lecture_label}`,'zh-CN',{numeric:true}) || a.id.localeCompare(b.id));
-    return [...groups.values()];
+    return [...groups.values()].sort((a,b)=>a.title.localeCompare(b.title,'zh-CN') || a.id.localeCompare(b.id));
   }
   function folderNotes(key) {
-    const rows=notes.filter(note=>note.folder_id===key && (shared.enabled || note.kind!=='course'));
+    const rows=notes.filter(note=>(note.folder_id || '')===key);
     const order=row=>/^(\d{2,})\s+\S/.exec(row.title);
     return rows.sort((a,b)=>{
       const left=order(a),right=order(b);
@@ -369,7 +416,7 @@
       const folderKey=event.dataTransfer.getData('application/x-sea-folder');
       if (!key && !folderKey) return;
       event.preventDefault(); event.stopPropagation(); node.classList.remove('drop-target');
-      if (key) { const row=notes.find(item=>item.id===key) || courseGroups().find(item=>item.id===key); if (row) act(()=>moveNote(row,target)); }
+      if (key) { const row=notes.find(item=>item.id===key); if (row) act(()=>moveNote(row,target)); }
       else if (foldersAllowed) { const row=folders.find(item=>item.id===folderKey); if (row) act(()=>moveFolder(row,target)); }
     };
   }
@@ -388,46 +435,50 @@
     button.title=snippet(row.excerpt || '') || row.title;
     button.onclick=()=>act(()=>open(row.id));
     button.ondblclick=()=>act(async()=>{await open(row.id);if(editable()){reading=false;updateMode();el('note-title').focus();el('note-title').select();}});
-    bindContext(button,()=>act(async()=>{await open(row.id);openMenu(button);}));
+    bindContext(button,()=>act(async()=>{
+      await open(row.id);
+      const anchor=el('note-list').querySelector(`[data-note-id="${CSS.escape(row.id)}"]`);
+      if(anchor) openMenu(anchor);
+    }));
     button.addEventListener('keydown',event=>{
       if(event.key==='F2'){event.preventDefault();button.ondblclick();}
     });
-    if(!row.deleted && (shared.enabled || row.kind!=='course')){
+    if(!row.deleted && organization==='problem'){
+      if(isCourse(row)) button.title=`拖入文件夹可移动整门课程 · ${button.title}`;
       button.draggable=true;
       button.ondragstart=event=>{event.stopPropagation();event.dataTransfer.setData('application/x-sea-note',row.id);event.dataTransfer.effectAllowed='move';};
     }
     return button;
   }
-  function courseNode(row,level) {
-    const branch=document.createElement('div');branch.className='note-tree-branch note-course-branch';branch.tabIndex=0;
-    branch.dataset.treeCourseId=row.id;branch.setAttribute('role','treeitem');branch.setAttribute('aria-level',level);branch.setAttribute('aria-label',row.title);
+  function browseGroup(row) {
+    const expanded=expansion.course;
+    const branch=document.createElement('div');branch.className='note-tree-branch';branch.tabIndex=0;
+    branch.dataset.treeGroupId=row.id;branch.setAttribute('role','treeitem');branch.setAttribute('aria-level',1);branch.setAttribute('aria-label',row.title);
     const isOpen=!!el('note-search').value.trim() || expanded.has(row.id);
     branch.setAttribute('aria-expanded',String(isOpen));
-    const button=document.createElement('div');button.className='note-course-row';button.tabIndex=-1;button.dataset.courseId=row.course_id;
+    const button=document.createElement('div');button.className='note-course-row';button.tabIndex=-1;
+    if(row.course_id) button.dataset.courseId=row.course_id;
     const arrow=document.createElement('span');arrow.className='note-folder-arrow';arrow.textContent=isOpen ? '▾' : '▸';arrow.setAttribute('aria-hidden','true');
     const name=document.createElement('span');name.className='note-folder-label';name.textContent=row.title;
-    const count=document.createElement('span');count.className='note-course-count';count.textContent=`${row.notes.length} 篇${row.folder_candidates?.length ? ' · 待整理' : ''}`;
-    button.append(arrow,name,count);button.title='展开课次笔记；拖拽或右键移动整门课程';
-    button.onclick=()=>act(async()=>{
-      await flush();folder=row.folder_id;
+    const count=document.createElement('span');count.className='note-course-count';count.textContent=`${row.notes.length} 篇`;
+    button.append(arrow,name,count);
+    button.onclick=()=>{
       if(expanded.has(row.id))expanded.delete(row.id);else expanded.add(row.id);
-      rememberExpanded();renderList();el('note-list').querySelector(`[data-tree-course-id="${CSS.escape(row.id)}"]`)?.focus();
-    });
-    button.draggable=true;
-    button.ondragstart=event=>{event.stopPropagation();event.dataTransfer.setData('application/x-sea-note',row.id);event.dataTransfer.effectAllowed='move';};
-    bindContext(button,()=>openFolderMenu(button,row));
+      rememberExpanded();renderList();el('note-list').querySelector(`[data-tree-group-id="${CSS.escape(row.id)}"]`)?.focus();
+    };
     const group=document.createElement('div');group.className='note-course-children';group.setAttribute('role','group');group.hidden=!isOpen;
-    row.notes.forEach(note=>group.append(noteNode(note,level+1)));
+    row.notes.forEach(note=>group.append(noteNode(note,2)));
     branch.append(button,group);
     branch.addEventListener('keydown',event=>{
       if(event.target!==branch)return;
       if(['Enter',' '].includes(event.key)){event.preventDefault();button.click();}
-      if(event.key==='ContextMenu' || event.shiftKey && event.key==='F10')button.oncontextmenu(event);
     });
     return branch;
   }
-  function folderNode(row,level,courses) {
+  function folderNode(row,level) {
     const key=row.id;
+    const expanded=expansion.problem;
+    const rows=folderNotes(key);
     const branch=document.createElement('div'); branch.className='note-tree-branch';branch.tabIndex=0;branch.dataset.treeFolderId=key;
     branch.setAttribute('role','treeitem');branch.setAttribute('aria-label',row.name);branch.setAttribute('aria-level',level);
     const button=document.createElement('div'); button.tabIndex=-1; button.className=`note-folder-row${folder===key ? ' active' : ''}`;
@@ -437,7 +488,7 @@
     branch.setAttribute('aria-expanded',String(isOpen)); branch.setAttribute('aria-selected',String(folder===key));
     const arrow=document.createElement('span');arrow.className='note-folder-arrow';arrow.textContent=isOpen ? '▾' : '▸';arrow.setAttribute('aria-hidden','true');
     const name=document.createElement('span');name.className='note-folder-label';name.textContent=row.name;
-    const count=document.createElement('span');count.className='note-folder-count';count.textContent=notes.filter(note=>note.folder_id===key && (shared.enabled || note.kind!=='course')).length+courses.filter(row=>row.folder_id===key).length || '';
+    const count=document.createElement('span');count.className='note-folder-count';count.textContent=rows.length || '';
     button.append(arrow,name,count);button.title=key ? `${folderPath(key)} · 双击改名，拖入笔记移动` : '未指定文件夹的笔记';
     button.onclick=event=>act(async()=>{
       await flush(); folder=key;
@@ -455,9 +506,8 @@
     ]));
     bindDrop(button,key,!!key); // The inbox is a note location; folders live at the root.
     const group=document.createElement('div');group.className='note-folder-children';group.setAttribute('role','group');group.hidden=!isOpen;
-    if(key)folders.filter(item=>item.parent_id===key).forEach(item=>group.append(folderNode(item,level+1,courses)));
-    courses.filter(row=>row.folder_id===key).forEach(row=>group.append(courseNode(row,level+1)));
-    folderNotes(key).forEach(note=>group.append(noteNode(note,level+1)));
+    if(key)folders.filter(item=>item.parent_id===key).forEach(item=>group.append(folderNode(item,level+1)));
+    rows.forEach(note=>group.append(noteNode(note,level+1)));
     branch.append(button,group);
     branch.addEventListener('keydown',event=>{
       if(event.target!==branch)return;
@@ -469,17 +519,38 @@
     return branch;
   }
   function renderList() {
-    const root=el('note-list'); const scroll=root.scrollTop; root.replaceChildren();
-    const courses=courseGroups(),courseCount=courses.length,otherCount=notes.filter(row=>shared.enabled || row.kind!=='course').length;
-    el('note-count').textContent=courseCount ? `${courseCount} 门课程 · ${otherCount} 篇笔记` : `${otherCount} 篇笔记`;
-    if(filter==='trash') notes.forEach(row=>root.append(noteNode(row,1)));
-    else {
-      root.append(folderNode({id:'',name:'收件箱'},1,courses));
-      folders.filter(row=>!row.parent_id).forEach(row=>root.append(folderNode(row,1,courses)));
+    const root=el('note-list');
+    const view=filter==='trash' ? 'trash' : organization;
+    const focused=document.activeElement;
+    const focusKey=root.dataset.organization===view && root.contains(focused)
+      ? ['data-note-id','data-tree-group-id','data-tree-folder-id'].find(key=>focused.hasAttribute(key))
+      : null;
+    if(root.dataset.organization && root.getClientRects().length) listScroll[root.dataset.organization]=root.scrollTop;
+    root.dataset.organization=view;
+    root.replaceChildren();
+    updateOrganizationButton();
+    document.querySelector('.note-folders-heading').classList.toggle('hidden',view!=='problem');
+    root.setAttribute('aria-label',{course:'按课程浏览笔记',problem:'按问题浏览笔记',trash:'笔记回收站'}[view]);
+    el('note-count').textContent=`${notes.length} 篇笔记`;
+    if(view==='trash') {
+      notes.forEach(row=>root.append(noteNode(row,1)));
+    } else if(view==='course') {
+      for(const group of courseGroups()) root.append(browseGroup(group));
+      for(const [kind,title] of [['personal','个人笔记'],['talk','讲座']]) {
+        const rows=notes.filter(note=>note.kind===kind);
+        if(rows.length) root.append(browseGroup({id:`source:${kind}`,title,notes:rows}));
+      }
+    } else {
+      root.append(folderNode({id:'',name:'收件箱'},1));
+      folders.filter(row=>!row.parent_id).forEach(row=>root.append(folderNode(row,1)));
       if(folderEdit && !folderEdit.row && !folderEdit.parent)mountFolderInput(root,folderEdit,true);
     }
     if(!notes.length){const empty=document.createElement('p');empty.className='note-list-empty';empty.textContent=el('note-search').value.trim() ? '没有找到相关笔记' : filter==='trash' ? '笔记回收站是空的' : filter==='starred' ? '还没有收藏的笔记' : '新建笔记，或拖入 Markdown 文件';root.append(empty);}
-    root.scrollTop=scroll;
+    root.scrollTop=listScroll[view];
+    if(focusKey) {
+      const value=CSS.escape(focused.getAttribute(focusKey));
+      root.querySelector(`[${focusKey}="${value}"]`)?.focus({preventScroll:true});
+    }
   }
   function renderNoteFolder() {
     const root=el('note-folder-path');root.replaceChildren();if(!selected)return;
@@ -499,6 +570,8 @@
     if (id !== loadId) return;
     notes=result.notes; folders=result.folders;
     shared=result.shared || {enabled:false};renderSharedStatus();
+    organization=preferredOrganization || (shared.enabled ? 'problem' : 'course');
+    el('note-organization-toggle').disabled=false;
     if (folder && !folders.some(row=>row.id===folder)) { folder=''; return load(); }
     syncFilters(); renderNoteFolder(); renderList();
     } finally {activeLoads--;}
@@ -623,8 +696,8 @@
     reading=options.reading ?? true;
     if (row.deleted) reading=true;
     if (dirty) reading=false;
-    folder=row.folder_id;revealFolder(folder);
-    if(row.kind==='course'){expanded.add(row.location_reference);rememberExpanded();}
+    if(organization==='problem') folder=row.folder_id;
+    revealNote(row);
     resetUndo(); updateStar(); fillSourceControls(); updateMode(); renderNoteFolder(); renderList();
     try { localStorage.setItem('sea-last-note',key); } catch (_) {}
     window.scrollTo(0,0);
@@ -634,7 +707,7 @@
     updateFind(!!query);
   }
   async function create(title='',body='') {
-    await flush(); const activeFolder=folder;
+    await flush(); const activeFolder=organization==='problem' ? folder : '';
     const row=await request('',json('POST',{title,body}));
     if (activeFolder) await library(`/personal/${row.id}/folder`,json('PUT',{folder_id:activeFolder,revision:0}));
     resetFilters(); folder=activeFolder; await load(); await open(`personal:${row.id}`,{reading:false}); changed(); el('note-title').focus();
@@ -723,11 +796,11 @@
   }
   function openFolderMenu(anchor,row=selected) {
     if(!row || row.deleted)return;
-    const note=row.kind==='course' && !shared.enabled ? courseEntry(row) : row;
-    showMenu(anchor,[['收件箱',()=>moveNote(note,'')],...folderChoices().map(row=>[`${note.folder_id===row.id ? '✓ ' : ''}${folderPath(row.id)}`,()=>moveNote(note,row.id)]),['新建文件夹…',()=>beginFolderEdit(null,note,'')]]);
+    showMenu(anchor,[['收件箱',()=>moveNote(row,'')],...folderChoices().map(target=>[`${row.folder_id===target.id ? '✓ ' : ''}${folderPath(target.id)}`,()=>moveNote(row,target.id)]),['新建文件夹…',()=>beginFolderEdit(null,row,'')]]);
   }
   async function moveNote(note,target) {
     await flush();
+    if(note.kind==='course' && !shared.enabled) note=courseEntry(note);
     const previous=note.folder_id || '',candidates=note.folder_candidates || [];
     const result=await library(`${sourcePath(note)}/folder`,json('PUT',{folder_id:target,revision:note.location_revision}));
     if(!result.location_changed){message('已在此文件夹');return;}
@@ -758,6 +831,8 @@
   }
   function beginFolderEdit(row=null,assignTo=null,parent=folder) {
     filter='all';syncFilters();
+    if(organization!=='problem') chooseOrganization('problem');
+    if(innerWidth<=700) el('view-notes').classList.remove('note-open');
     folderEdit={row,assignTo,parent:row?.parent_id ?? parent,value:row?.name || ''};
     revealFolder(parent);renderList();
     const input=el('note-folder-name');input?.focus();input?.select();input?.scrollIntoView({block:'nearest'});
@@ -834,7 +909,7 @@
       if (body.length>2_000_000) throw new Error(`${file.name} 连同图片超过笔记容量，请缩小图片后再导入`);
       prepared.push({title:heading?.[1] || file.name.replace(/\.[^.]+$/,''),body});
     }
-    const activeFolder=folder; let last, imported=0;
+    const activeFolder=organization==='problem' ? folder : ''; let last, imported=0;
     try {
       for (const item of prepared) {
         last=await request('',json('POST',item)); imported++; changed();
@@ -859,6 +934,7 @@
   el('note-find-close').onclick=()=>{el('note-find-bar').classList.add('hidden');el('note-find').value='';updateFind(false);(reading ? el('note-preview') : el('note-body')).focus({preventScroll:true});};
   el('note-find').onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();stepFind(event.shiftKey ? -1 : 1);}if(event.key==='Escape'){event.preventDefault();el('note-find-close').click();}};
   el('note-new').onclick=el('note-first').onclick=()=>act(()=>create());
+  el('note-organization-toggle').onclick=()=>chooseOrganization(organization==='course' ? 'problem' : 'course');
   el('note-search').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>act(async()=>{await flush();await load();}),180);};
   el('note-mode').onclick=()=>act(async()=>{await flush();reading=!reading;updateMode();});
   el('note-star').onclick=()=>act(async()=>{
@@ -878,7 +954,8 @@
     if(event.target.tagName==='INPUT')return;
     const current=event.target.closest('[role="treeitem"]');if(!current)return;
     const visible=[...el('note-list').querySelectorAll('[role="treeitem"]')].filter(node=>node.getClientRects().length);
-    const index=visible.indexOf(current),folderKey=current.dataset.treeFolderId,key=folderKey ?? current.dataset.treeCourseId;
+    const expanded=expansion[organization];
+    const index=visible.indexOf(current),folderKey=current.dataset.treeFolderId,key=folderKey ?? current.dataset.treeGroupId;
     if(['ArrowDown','ArrowUp','Home','End'].includes(event.key)){
       event.preventDefault();const next=event.key==='Home' ? 0 : event.key==='End' ? visible.length-1 : Math.max(0,Math.min(visible.length-1,index+(event.key==='ArrowDown' ? 1 : -1)));visible[next]?.focus();
     }
@@ -888,7 +965,7 @@
       else if(event.key==='ArrowLeft' && expanded.has(key)){expanded.delete(key);renderList();}
       else if(event.key==='ArrowRight'){visible[index+1]?.focus();return;}
       else {current.closest('[role="group"]')?.previousElementSibling?.parentElement?.focus();return;}
-      rememberExpanded();el('note-list').querySelector(`[data-tree-folder-id="${CSS.escape(key)}"],[data-tree-course-id="${CSS.escape(key)}"]`)?.focus();
+      rememberExpanded();el('note-list').querySelector(`[data-tree-folder-id="${CSS.escape(key)}"],[data-tree-group-id="${CSS.escape(key)}"]`)?.focus();
     }else if(event.key==='ArrowLeft')current.closest('[role="group"]')?.previousElementSibling?.parentElement?.focus();
     if(event.key==='F2' && folderKey){event.preventDefault();beginFolderEdit(folders.find(row=>row.id===folderKey));}
   });

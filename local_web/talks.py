@@ -993,7 +993,7 @@ class TalkUploadQueue:
             )
         return branch
 
-    def _retry(self, operation, attempts: int, delay: float = 2, *, talk_id: str = ""):
+    def _retry(self, operation, attempts: int = TALK_CHUNK_ATTEMPTS, delay: float | None = None, *, talk_id: str = ""):
         from .github_client import GitHubAPIError
         for attempt in range(attempts):
             if talk_id:
@@ -1003,9 +1003,10 @@ class TalkUploadQueue:
             try:
                 return operation()
             except GitHubAPIError as exc:
-                if exc.status not in {0, 409, 429, 500, 502, 503, 504} or attempt == attempts - 1:
+                if exc.status not in {0, 408, 409, 429, 500, 502, 503, 504} or attempt == attempts - 1:
                     raise
-                if self._stopping.wait(delay):
+                wait_seconds = delay if delay is not None else min(30, 4 * 2**attempt)
+                if self._stopping.wait(wait_seconds):
                     raise InterruptedError("服务正在退出，重启后继续")
 
     def _run(self, talk_id: str) -> None:
@@ -1017,10 +1018,13 @@ class TalkUploadQueue:
             if item is None:
                 return
             client = self._make_client()
-            stage = "dispatch"
-            branch = self.preflight(client)
-            stage = "upload"
-            client.ensure_branch(TALK_AUDIO_BRANCH, default_branch=branch)
+            try:
+                branch = self._retry(lambda: self.preflight(client), talk_id=talk_id)
+            except TalkTranscribeError:
+                stage = "dispatch"
+                raise
+            self._retry(lambda: client.ensure_branch(TALK_AUDIO_BRANCH, default_branch=branch),
+                        talk_id=talk_id)
             blob = self.staged_blob(talk_id)
             if blob is not None:
                 total = max(1, (len(blob) + TALK_AUDIO_CHUNK_BYTES - 1) // TALK_AUDIO_CHUNK_BYTES)
@@ -1044,22 +1048,25 @@ class TalkUploadQueue:
                         client.reset_timeout()
                     self._store.note_chunk_uploaded(talk_id, index, total)
                     self._check_running(talk_id)
+            manifest_path = talk_audio_manifest_path(talk_id)
+            previous = self._retry(lambda: client.read_branch_file(
+                TALK_AUDIO_BRANCH, manifest_path), talk_id=talk_id)
+            if blob is not None:
                 manifest = build_talk_audio_manifest(
                     talk_id, item["audio_ext"], total, len(blob), title=item["custom_title"])
                 manifest["sha256"] = hashlib.sha256(blob).hexdigest()
                 # Keep an existing matching manifest byte-for-byte: rename and
                 # retries must not invalidate an already completed ASR checkpoint.
-                previous = client.read_branch_file(TALK_AUDIO_BRANCH, talk_audio_manifest_path(talk_id))
                 if previous:
                     old = json.loads(previous)
                     if old.get("sha256") == manifest["sha256"]:
                         manifest = old
                 self._retry(lambda: client.write_branch_file(
-                    TALK_AUDIO_BRANCH, talk_audio_manifest_path(talk_id),
+                    TALK_AUDIO_BRANCH, manifest_path,
                     json.dumps(manifest, ensure_ascii=False).encode(),
                     message=f"talk audio {talk_id} manifest"), TALK_CHUNK_ATTEMPTS, talk_id=talk_id)
                 self._store.note_audio_pushed(talk_id, len(blob), talk_audio_remote_path(talk_id, item["audio_ext"]))
-            elif client.read_branch_file(TALK_AUDIO_BRANCH, talk_audio_manifest_path(talk_id)) is None:
+            elif previous is None:
                 raise TalkTranscribeError("本地暂存与云端录音均不存在，请重新选择录音上传")
             stage = "dispatch"
             # Preserve request identity if an accepted dispatch lost its reply.

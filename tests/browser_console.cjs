@@ -1,5 +1,6 @@
 /* Synthetic integration test. Set PLAYWRIGHT_MODULE and SQLJS_DIR to installed dependencies.
    Example: SQLJS_DIR=/tmp/icourse-console-test-assets node tests/browser_console.cjs
+   Set SEA_TEST_RUN_ONLY=1 to exercise the run page on both transports.
    No request reaches GitHub and all workflow dispatches are intercepted. */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -69,7 +70,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
   let zones = {}, names = {}, version = 'commit-1', missingShard = false, legacy = false, liveShard = false;
   let holidayIds = [];
   let localRevision = 0, localJobs = [], runRequests = [], preferences = {course_ids:['1'],lecture_order:'api'};
-  let dispatches = [];
+  let dispatches = [], workflowReadFails = false, latestCloudRun = null;
   const approvalRequests = [];
   const blockedRun = {id:42,name:'iCourse Check',status:'completed',conclusion:'action_required',
     event:'schedule',created_at:new Date().toISOString(),html_url:'https://github.com/alice/fork/actions/runs/42'};
@@ -113,7 +114,9 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
           ...(!missingShard ? [{type:'blob',path:'data/shards/test.db.gz.enc',sha:liveShard?'shardLive':'shard'}] : []),
         ]});
         if (p.startsWith('/git/blobs/')) return route.fulfill({body:blobs[p.split('/').at(-1)],contentType:'application/octet-stream'});
-        if (p==='/actions/runs') return json({workflow_runs:[blockedRun]});
+        if (p==='/actions/runs') return workflowReadFails
+          ? route.fulfill({status:503,json:{message:'Synthetic refresh failure'}})
+          : json({workflow_runs:[blockedRun, latestCloudRun].filter(Boolean)});
         if (p==='/actions/variables/MODEL_PROVIDERS_JSON') return json({value:JSON.stringify({version:1,providers:[provider]})});
         if (p==='/actions/variables/LECTURE_ORDER') return json({value:'api'});
         if (p==='/actions/variables/COURSE_AUTO_CHECK_JSON') {
@@ -163,7 +166,9 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
           sectionsRevision++;
           return json({zones,sections,revision:sectionsRevision,default_zone:'unassigned'});
         }
-        if (p==='/workflows') return json([blockedRun]);
+        if (p==='/workflows') return workflowReadFails
+          ? route.fulfill({status:503,json:{detail:'Synthetic refresh failure'}})
+          : json([blockedRun, latestCloudRun].filter(Boolean));
         if (p==='/courses/1/lectures') return json(lectures.filter(row=>!deletedLocalLectures.has(row.sub_id)));
         if (p==='/courses/2/lectures') return json(rows("SELECT * FROM lectures WHERE course_id='2'"));
         if (p==='/lectures/10') return json(lecture);
@@ -217,6 +222,187 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       // Keep the test deterministic/offline, including progressive rich Markdown.
       return route.abort();
     });
+    async function verifyRunPage(page, mode, history, blockedTask) {
+      await page.locator('#view-run:not(.hidden)').waitFor();
+      const picker = page.locator('#rerun-course-list');
+      const custom = page.locator('#run-custom');
+      assert.equal(await custom.isVisible(),true);
+      assert.equal(await picker.locator('[data-course-id="catalog-206"]').count(),1);
+      const beforeUpdate = dispatches.length;
+      await page.evaluate(() => {
+        window.originalRunApi = api;
+        api = async (path, options) => {
+          if (path === '/api/local/subscriptions' && runSubmitting === 'update') {
+            await new Promise(resolve => { window.releaseRunUpdate = resolve; });
+            return {course_ids:['1','2','3','4'],paused_course_ids:['2'],
+              courses:[{course_id:'3',auto_check_stopped:true}]};
+          }
+          if (path === '/api/local/run-preferences' && runSubmitting === 'update') {
+            return {course_ids:['4','3','2','1'],lecture_order:'oldest'};
+          }
+          return window.originalRunApi(path, options);
+        };
+      });
+      workflowReadFails = true;
+      await page.locator('#run-button').click();
+      await page.waitForFunction(() => Boolean(window.releaseRunUpdate));
+      assert.equal(await page.locator('#run-button').isDisabled(),true);
+      assert.equal(await page.locator('#rerun-page-submit').isDisabled(),true);
+      await page.evaluate(() => {
+        $('#run-button').click();
+        window.releaseRunUpdate();
+      });
+      await history.getByText('已提交',{exact:true}).waitFor();
+      await page.locator('#run-history-feedback').getByRole('button',{name:'重试'}).waitFor();
+      assert.equal(dispatches.length, beforeUpdate + 1);
+      assert.equal(dispatches.at(-1).body.inputs.course_ids,'4,1');
+      assert.equal(dispatches.at(-1).body.inputs.lecture_order,'oldest');
+      assert.equal(await page.evaluate(()=>rerunSelectedCourseIds.has('catalog-206')),true);
+      assert.equal(await blockedTask.locator('details').evaluate(node=>node.open),true);
+      await page.evaluate(() => { api = window.originalRunApi; });
+      latestCloudRun = {id:43,name:'Single Run',status:'queued',event:'workflow_dispatch',
+        created_at:new Date().toISOString(),html_url:'https://github.com/alice/fork/actions/runs/43'};
+      workflowReadFails = false;
+      await page.locator('#refresh-runs-button').click();
+      await history.locator('[data-task-key="cloud:43"]').waitFor();
+      assert.equal(await history.getByText('已提交',{exact:true}).count(),0);
+      assert.equal(await history.locator('article').first().getAttribute('data-task-key'),'cloud:43');
+      assert.equal(await page.locator('#run-update-feedback').innerText(),'');
+      latestCloudRun = null;
+
+      const beforeRejected = dispatches.length;
+      for (const [failure, expected] of [
+        ['empty', '没有可更新的订阅课程'],
+        ['model', '请先在模型与 API 中启用模型'],
+        ['request', '合成提交失败'],
+      ]) {
+        await page.evaluate(failure => {
+          api = async (path, options) => {
+            if (path === '/api/local/subscriptions' && runSubmitting === 'update' && failure === 'empty') {
+              return {course_ids:[],paused_course_ids:[],courses:[]};
+            }
+            if (path === '/api/local/runs' && options?.method === 'POST') {
+              throw new Error(failure === 'model' ? '请先在模型与 API 中启用模型' : '合成提交失败');
+            }
+            return window.originalRunApi(path, options);
+          };
+        },failure);
+        await page.locator('#run-button').click();
+        await page.locator('#run-update-feedback').getByText(expected,{exact:false}).waitFor();
+        assert.equal(dispatches.length, beforeRejected);
+        if (failure === 'model') {
+          assert.equal(await page.locator('#run-update-feedback').getByRole('button',{name:'模型与 API'}).isVisible(),true);
+        }
+      }
+      await page.evaluate(() => { api = window.originalRunApi; });
+
+      await page.locator('#run-clear-selection').click();
+      await page.locator('#run-undo').getByRole('button',{name:'撤销'}).click();
+      assert.equal(await page.evaluate(()=>rerunSelectedCourseIds.has('catalog-206')),true);
+      await page.locator('#run-clear-selection').click();
+      await page.locator('#run-filter-all').click();
+      await page.locator('#run-kind').selectOption('rerun');
+      await picker.getByRole('button',{name:'选择现代思想史的课次'}).click();
+      const lectureChoice = picker.locator('[data-run-focus="lecture:10"]');
+      await lectureChoice.check();
+      await page.evaluate(() => { rerunLectureCache.get('1').find(row=>String(row.sub_id)==='10').auto_title = '更新后的标题'; renderRerunView(); });
+      assert.equal(await lectureChoice.evaluate(node => node === document.activeElement && node.checked),true);
+      await page.locator('#run-kind').selectOption('process');
+      assert.equal(await page.evaluate(()=>rerunSelectedSubIds.size),0);
+      await page.locator('#run-undo').getByRole('button',{name:'撤销'}).click();
+      assert.equal(await lectureChoice.isChecked(),true);
+      await page.locator('#run-kind').selectOption('process');
+      await picker.locator('[data-course-id="1"] .run-course-check input').check();
+      await picker.locator('[data-course-id="2"] .run-course-check input').check();
+      await page.locator('#run-filter-selected').click();
+      const orderedCourses = () => picker.locator('.run-course').evaluateAll(nodes=>nodes.map(node=>node.dataset.courseId));
+      assert.deepEqual(await orderedCourses(),['1','2']);
+      await picker.locator('[data-course-id="2"] .run-drag-grip').dragTo(picker.locator('[data-course-id="1"]'));
+      assert.deepEqual(await orderedCourses(),['2','1']);
+      await page.locator('#run-undo').getByRole('button',{name:'撤销'}).click();
+      assert.deepEqual(await orderedCourses(),['1','2']);
+      await page.getByRole('button',{name:'上移科学与社会',exact:true}).click();
+      assert.deepEqual(await orderedCourses(),['2','1']);
+      await page.locator('#run-options summary').click();
+      await page.locator('#run-lecture-order').selectOption('newest');
+      assert.match(await page.locator('#run-model-order').innerText(),/test \/ model-a/);
+      const customDispatchCount = dispatches.length;
+      await page.locator('#rerun-page-submit').click();
+      await history.getByText('已提交',{exact:true}).waitFor();
+      assert.equal(dispatches.length,customDispatchCount + 1);
+      assert.equal(dispatches.at(-1).body.inputs.course_ids,'2,1');
+      assert.equal(dispatches.at(-1).body.inputs.lecture_order,'newest');
+      assert.equal(dispatches.at(-1).body.inputs.summary_provider,undefined);
+      assert.equal(dispatches.at(-1).body.inputs.summary_model,undefined);
+
+      await page.locator('#run-target').selectOption('local');
+      await page.locator('#run-custom-toggle').click();
+      if(mode==='local') {
+        for (const failure of ['dependencies','busy']) {
+          await page.evaluate(failure => {
+            api = async (path,options) => {
+              if (path === '/api/local/run-capabilities' && failure === 'dependencies') {
+                return {process_ready:false,summary_ready:false,missing:['ASR']};
+              }
+              if (path === '/api/local/runs' && options?.method === 'POST') {
+                throw new Error('已有本地任务运行');
+              }
+              return window.originalRunApi(path, options);
+            };
+          },failure);
+          await page.locator('#rerun-page-submit').click();
+          const feedback = page.locator('#run-draft-feedback');
+          await feedback.getByRole('button',{name:failure === 'busy' ? '查看任务' : '改用 GitHub Actions'}).waitFor();
+        }
+        await page.evaluate(() => { api = window.originalRunApi; });
+        await page.locator('#run-api-key').fill('synthetic-local-key');
+        await page.locator('#rerun-page-submit').click();
+        await page.getByText('合成处理中',{exact:false}).waitFor();
+        assert.equal(runRequests.at(-1).target,'local');
+        assert.equal(runRequests.at(-1).api_key,'synthetic-local-key');
+        assert.equal(await page.locator('#run-api-key').inputValue(),'');
+        const localTask = history.locator('[data-task-key="local:local-job"]');
+        await localTask.locator('summary').click();
+        await localTask.locator('summary').focus();
+        await page.evaluate(() => refreshRunHistory(['local']));
+        assert.equal(await localTask.locator('summary').evaluate(node=>node.parentElement.open && node===document.activeElement),true);
+        await page.getByRole('button',{name:'停止本地任务'}).click();
+        await localTask.getByText('已停止',{exact:true}).waitFor();
+        await page.locator('#run-custom-toggle').click();
+        await page.locator('#run-save-priority').click();
+        await page.waitForFunction(()=>document.querySelector('#run-priority-status').textContent==='已保存');
+        assert.equal(preferences.lecture_order,'newest');
+      } else {
+        assert.equal(await page.locator('#rerun-page-submit').isDisabled(),true);
+        assert.equal(await page.locator('#run-button').isDisabled(),true);
+        assert.equal(await page.locator('#run-local-link').isVisible(),true);
+      }
+      assert.equal(await page.evaluate(()=>localStorage.getItem(runTargetKey())), 'local');
+      await page.evaluate(async () => {
+        resetRunView();
+        await loadRunView();
+      });
+      assert.equal(await page.locator('#run-target').inputValue(), 'local');
+      assert.equal(await custom.isVisible(),false);
+      await page.locator('.desktop-nav [data-view="settings"]').click();
+      await page.locator('#settings-rerun-button').click();
+      assert.equal(await custom.isVisible(),true);
+      assert.equal(await page.locator('#run-kind').inputValue(),'rerun');
+      await page.locator('#run-options summary').click();
+      await page.locator('#single-run-ids').fill('very-long-' + 'course-'.repeat(10));
+      await page.locator('#single-run-ids').press('Enter');
+      assert.equal(await picker.locator('.run-course').count(),1);
+      await page.evaluate(()=>window.scrollTo(0,0));
+      await page.screenshot({path:`/tmp/icourse-${mode}-run-desktop.png`,fullPage:true});
+      await page.setViewportSize({width:390,height:844});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      await page.screenshot({path:`/tmp/icourse-${mode}-run-mobile.png`,fullPage:true});
+      await page.locator('#theme-toggle').click();
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      await page.screenshot({path:`/tmp/icourse-${mode}-run-mobile-light.png`,fullPage:true});
+      await page.locator('#theme-toggle').click();
+      await page.setViewportSize({width:1280,height:900});
+    }
     for (const mode of ['local','fork']) {
       const page=await context.newPage();
       lastPage=page;
@@ -231,6 +417,20 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         await page.locator('#setup-form button[type="submit"]').click();
       }
       await page.locator('.course-card').first().waitFor();
+      if (process.env.SEA_TEST_RUN_ONLY === '1') {
+        await page.locator('.desktop-nav [data-view="subscriptions"]').click();
+        await page.locator('#subscription-query').fill('catalog-206');
+        await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 1 门课程 · 第 1–1 条');
+        await page.locator('#subscription-catalog .subscription-row').last().getByRole('button',{name:'单次运行',exact:true}).click();
+        const history = page.locator('#run-history-list');
+        const blockedTask = history.locator('[data-task-key="cloud:42"]');
+        await blockedTask.locator('summary').click();
+        await verifyRunPage(page, mode, history, blockedTask);
+        assert.deepEqual(errors, []);
+        await page.close();
+        console.log(`${mode}: run page passed`);
+        continue;
+      }
       assert.equal(await page.locator('.course-card').count(),2);
       const dept = page.locator('#course-sidebar [data-filter-kind="dept"][data-filter-value="历史学系"]');
       assert.equal(await dept.count(), 1);
@@ -824,13 +1024,13 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         };
       });
       assert.deepEqual(await noteColors(), {
-        title:'rgb(229, 228, 223)', subtitle:'rgb(155, 200, 241)', emphasis:'rgb(253, 164, 175)', emphasisWeight:'400',
+        title:'rgb(155, 200, 241)', subtitle:'rgb(155, 200, 241)', emphasis:'rgb(253, 164, 175)', emphasisWeight:'400',
         code:'rgb(155, 200, 241)', quote:'rgb(161, 163, 169)', quoteBackground:'rgba(0, 0, 0, 0)',
       });
       await page.locator('#theme-toggle').click();
       assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'light');
       assert.deepEqual(await noteColors(), {
-        title:'rgb(38, 43, 49)', subtitle:'rgb(30, 80, 133)', emphasis:'rgb(180, 35, 24)', emphasisWeight:'400',
+        title:'rgb(33, 97, 166)', subtitle:'rgb(33, 97, 166)', emphasis:'rgb(180, 35, 24)', emphasisWeight:'400',
         code:'rgb(33, 97, 166)', quote:'rgb(116, 121, 131)', quoteBackground:'rgba(0, 0, 0, 0)',
       });
       await page.locator('#theme-toggle').click();
@@ -939,12 +1139,18 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.setViewportSize({width:1280,height:900});
       // A default subscription run skips paused courses; explicit IDs still work.
       await page.locator('.desktop-nav [data-view="run"]').click();
-      await page.locator('#runs .status-action_required').waitFor();
-      assert.match(await page.locator('#runs').innerText(), /需在 GitHub 处理.*在 GitHub 查看原因/s);
-      assert.equal(await page.locator('#runs a').first().getAttribute('href'), blockedRun.html_url);
+      const history = page.locator('#run-history-list');
+      const blockedTask = history.locator('[data-task-key="cloud:42"]');
+      await blockedTask.locator('.status-action_required').waitFor();
+      await blockedTask.locator('summary').click();
+      assert.match(await blockedTask.innerText(), /需在 GitHub 处理.*在 GitHub 查看原因/s);
+      assert.equal(await blockedTask.getByRole('link').getAttribute('href'), blockedRun.html_url);
       assert.deepEqual(approvalRequests, []);
+      assert.equal(await page.locator('#run-custom').isVisible(),false);
+      const pausedDispatchCount = dispatches.length;
       await page.locator('#run-button').click();
-      await page.waitForFunction(()=>!rerunSelectedCourseIds.has('1'));
+      await page.getByText('没有可更新的订阅课程',{exact:false}).waitFor();
+      assert.equal(dispatches.length, pausedDispatchCount);
       await page.locator('.desktop-nav [data-view="subscriptions"]').click();
       await page.locator('#subscription-list').getByRole('button',{name:'恢复现代思想史的自动检查',exact:true}).click();
       await page.waitForFunction(()=>!pausedCourseIds.has('1'));
@@ -1036,53 +1242,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       assert.equal(await page.locator('#subscription-catalog .subscription-row').count(),7);
       assert.equal(await page.locator('#subscription-catalog-pagination').getByRole('button',{name:'下一页'}).isDisabled(),true);
       await page.locator('#subscription-catalog .subscription-row').last().getByRole('button',{name:'单次运行',exact:true}).click();
-      assert.equal(await page.locator('#single-run-ids').inputValue(),'catalog-206');
-      await page.locator('#view-run:not(.hidden)').waitFor();
-      await page.locator('#run-clear-selection').click();
-      await page.locator('.rerun-course').filter({hasText:'现代思想史'}).locator('.rerun-course-check input').check();
-      await page.locator('.rerun-course').filter({hasText:'科学与社会'}).locator('.rerun-course-check input').check();
-      await page.getByRole('button',{name:'上移科学与社会',exact:true}).click();
-      assert.deepEqual(await page.locator('#run-queue .run-queue-row').evaluateAll(rows=>rows.map(row=>row.dataset.courseId)),['2','1']);
-      await page.locator('#run-lecture-order').selectOption('newest');
-      assert.equal(await page.locator('#rerun-page-model-select').count(),0);
-      assert.match(await page.locator('#run-model-order').innerText(),/test \/ model-a/);
-      await page.locator('#rerun-page-submit').click();
-      await page.waitForFunction(()=>document.querySelector('#message').textContent.includes('已开始GitHub Actions'));
-      assert.equal(dispatches.at(-1).body.inputs.course_ids,'2,1');
-      assert.equal(dispatches.at(-1).body.inputs.lecture_order,'newest');
-      assert.equal(dispatches.at(-1).body.inputs.summary_provider,undefined);
-      assert.equal(dispatches.at(-1).body.inputs.summary_model,undefined);
-      if (mode==='local') {
-        assert.equal(runRequests.at(-1).provider,undefined);
-        assert.equal(runRequests.at(-1).model,undefined);
-      }
-      await page.locator('#run-target').selectOption('local');
-      if(mode==='local') {
-        await page.locator('#run-api-key').fill('synthetic-local-key');
-        await page.locator('#rerun-page-submit').click();
-        await page.getByText('合成处理中',{exact:false}).waitFor();
-        assert.equal(runRequests.at(-1).target,'local');
-        assert.equal(runRequests.at(-1).api_key,'synthetic-local-key');
-        assert.equal(await page.locator('#run-api-key').inputValue(),'');
-        await page.locator('#local-runs details summary').click();
-        await page.waitForTimeout(3200);
-        assert.equal(await page.locator('#local-runs details').evaluate(node=>node.open),true);
-        await page.getByRole('button',{name:'停止本地任务'}).click();
-        await page.getByText('重新生成笔记 · 已停止',{exact:false}).count();
-        await page.waitForFunction(()=>document.querySelector('#local-runs').textContent.includes('已停止'));
-        await page.locator('#run-save-priority').click();
-        await page.waitForFunction(()=>document.querySelector('#run-priority-status').textContent.includes('已保存'));
-        assert.equal(preferences.lecture_order,'newest');
-      } else {
-        assert.equal(await page.locator('#rerun-page-submit').isDisabled(),true);
-        assert.equal(await page.locator('#run-local-link').isVisible(),true);
-      }
-      await page.evaluate(()=>window.scrollTo(0,0));
-      await page.screenshot({path:`/tmp/icourse-${mode}-run-desktop.png`,fullPage:true});
-      await page.setViewportSize({width:390,height:844});
-      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
-      await page.screenshot({path:`/tmp/icourse-${mode}-run-mobile.png`,fullPage:true});
-      await page.setViewportSize({width:1280,height:900});
+      await verifyRunPage(page, mode, history, blockedTask);
       await page.locator('.desktop-nav [data-view="subscriptions"]').click();
       await page.locator('#subscription-term').selectOption('2026-春');
       await page.waitForFunction(()=>document.querySelector('#subscription-catalog-status').textContent==='共 2 门课程 · 第 1–2 条');
@@ -1146,7 +1306,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
         lecture.summary=original;
       }
       if(mode==='fork') {
-        assert.equal(await page.locator('#obsidian-button').isVisible(),false);
+        assert.equal(await page.locator('#settings-obsidian-button').isVisible(),false);
         assert.equal(await page.evaluate(()=>localStorage.getItem('ics_creds')),null);
         const unchanged=await page.evaluate(()=>window.ICOURSE_API('/api/local/sync',{method:'POST'}));
         assert.equal(unchanged.unchanged,true);
@@ -1214,7 +1374,7 @@ if (!sqlDir) throw new Error('Set SQLJS_DIR to a directory containing sql-wasm.j
       await page.close();
       console.log(`${mode}: shared UI, zones, ordering, versions, export, search, catalog, run queue, backend selection, live note refresh, mobile layout passed`);
     }
-    console.log('Pages: encrypted shards, legacy decryption, rollback, rerun, logout passed');
+    if (process.env.SEA_TEST_RUN_ONLY !== '1') console.log('Pages: encrypted shards, legacy decryption, rollback, rerun, logout passed');
   } catch (error) {
     if (lastPage && !lastPage.isClosed()) {
       await lastPage.screenshot({path:'/tmp/icourse-browser-failure.png',fullPage:true});

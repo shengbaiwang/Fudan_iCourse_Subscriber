@@ -211,25 +211,6 @@ input:focus-visible,textarea:focus-visible,select:focus-visible { outline:none; 
   }
 }
 
-/* ── 重跑视图：课程勾选 + 展开选课次 ── */
-.rerun-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:14px; }
-.rerun-toolbar select { flex:1 1 auto; min-width:0; margin:0; }
-.rerun-toolbar button { flex:0 0 auto; white-space:nowrap; }
-.rerun-course-list { display:grid; gap:0; border-top:1px solid var(--line); }
-.rerun-course-list.empty { border-top:0; }
-.rerun-course { border-bottom:1px solid var(--line); padding:12px 4px; }
-.rerun-course-head { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:2px 10px; }
-.rerun-course-check { grid-column:1; grid-row:1/3; display:flex; align-items:center; gap:8px; min-width:0; font-weight:650; cursor:pointer; }
-.rerun-course-check input { width:auto; margin:0; flex:0 0 auto; accent-color:var(--blue); }
-.rerun-course-title { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.rerun-course-meta { grid-column:2; grid-row:2; justify-self:end; color:var(--muted); font-size:12px; white-space:nowrap; }
-.rerun-expand { grid-column:2; grid-row:1; justify-self:end; border:0; background:transparent; color:var(--muted); font-size:12px; padding:4px 6px; }
-.rerun-expand:hover { background:transparent; color:var(--blue); }
-.rerun-lectures { margin-top:8px; padding-top:8px; border-top:1px solid var(--subtle-bg); display:grid; gap:5px; color:var(--text-sub); font-size:13px; }
-.rerun-lecture { display:flex; align-items:center; gap:8px; cursor:pointer; }
-.rerun-lecture input { width:auto; margin:0; accent-color:var(--blue); }
-.rerun-lecture.disabled { color:var(--text-faint); cursor:default; }
-
 /* ── 层级合并与流畅度（追加块） ── */
 
 /* 课程页统计：四张卡片压缩为一行数据条 */
@@ -582,27 +563,6 @@ mark.user-highlight:hover { background:var(--hl-hover); }
 .file-drag-over { outline:2px dashed var(--accent-border); outline-offset:8px; }
 @media(max-width:700px) { .talk-row-actions { max-width:72px; } .blind-model-choice { width:100%; } }
 
-.run-layout { display:grid; grid-template-columns:300px minmax(0,1fr); gap:16px; align-items:start; }
-.run-config { display:grid; gap:12px; position:sticky; top:80px; }
-.run-config label { margin:0; }
-.run-config .meta { margin:0; }
-.run-selection { display:grid; gap:16px; min-width:0; }
-.run-queue { display:grid; gap:0; margin:14px 0; border-top:1px solid var(--line); }
-.run-queue.empty { border-top:0; }
-.run-queue-row { display:flex; align-items:center; gap:10px; padding:12px 4px; border-bottom:1px solid var(--line); }
-.run-queue-number { flex:0 0 22px; color:var(--muted); font-variant-numeric:tabular-nums; }
-.run-queue-label { flex:1; min-width:0; overflow-wrap:anywhere; }
-.run-queue-label strong { display:block; font-size:15px; }
-.run-queue-actions { display:flex; gap:4px; }
-.run-queue-actions button { padding:4px 8px; }
-.run-history { margin-top:16px; }
-.local-run { display:grid; gap:8px; padding:14px 0; border-bottom:1px solid var(--line); }
-.local-run progress { width:100%; accent-color:var(--blue); }
-.local-run summary { cursor:pointer; color:var(--muted); font-size:12px; }
-.local-run pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:220px; overflow:auto; font-size:11px; }
-.live-indicator { color:var(--success); font-size:12px; white-space:nowrap; }
-.run-manual summary { cursor:pointer; }
-@media(max-width:700px) { .run-layout { grid-template-columns:1fr; } .run-config { position:static; } #view-run .view-heading { flex-wrap:wrap; gap:8px; } .run-queue-row { gap:6px; } }
 @media(max-width:700px) {
   .blind-generate-row { grid-template-columns:1fr; }
   .blind-generate-row button { width:100%; }

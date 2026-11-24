@@ -28,6 +28,7 @@
       try { localStorage.setItem('sea-last-reading',JSON.stringify(row)); } catch (_) {}
       let saved=null; try { saved=JSON.parse(localStorage.getItem(storageKey(row))); } catch (_) {}
       if (saved && event.detail.options?.restoreReading !== false) requestAnimationFrame(()=>requestAnimationFrame(()=> {
+        if (current !== row) return;
         const height=document.documentElement.scrollHeight-innerHeight;
         window.scrollTo(0,Math.min(saved.y,height));
         position=saved;
@@ -42,6 +43,49 @@
     if (deleted(lastReading())) localStorage.removeItem('sea-last-reading');
     event.detail.subIds.forEach(id => localStorage.removeItem(storageKey({kind:'course',id})));
     updateContinue();
+  });
+  const fontKey = 'sea-lecture-font-size';
+  const defaultSize = 17, minSize = 12, maxSize = 32;
+  const smaller = $('#lecture-font-smaller'), larger = $('#lecture-font-larger'), reset = $('#lecture-font-reset');
+  let fontSize = defaultSize;
+  function applyFontSize(size) {
+    fontSize = Math.max(minSize, Math.min(maxSize, size));
+    $('#view-detail').style.setProperty('--reading-font-size', `${fontSize}px`);
+    reset.textContent = `${fontSize} px`;
+    reset.setAttribute('aria-label', `当前字号 ${fontSize} 像素，恢复默认字号`);
+    smaller.disabled = fontSize === minSize;
+    larger.disabled = fontSize === maxSize;
+  }
+  function setFontSize(size) {
+    applyFontSize(size);
+    try { localStorage.setItem(fontKey, String(fontSize)); } catch (_) {}
+  }
+  try {
+    const stored = Number(localStorage.getItem(fontKey));
+    if (Number.isInteger(stored) && stored >= minSize && stored <= maxSize) fontSize = stored;
+  } catch (_) {}
+  applyFontSize(fontSize);
+  smaller.onclick = () => setFontSize(fontSize - 1);
+  larger.onclick = () => setFontSize(fontSize + 1);
+  reset.onclick = () => setFontSize(defaultSize);
+
+  document.addEventListener('keydown', event => {
+    if (activeView !== 'detail' || event.defaultPrevented || event.isComposing || event.keyCode === 229 ||
+        event.ctrlKey || event.metaKey || event.altKey || document.querySelector('dialog[open]')) return;
+    const target = event.target;
+    if (target.isContentEditable || target.closest('input, textarea, select, [role="menu"], [role="textbox"]')) return;
+    if (target !== document.body && !target.closest('#view-detail')) return;
+    if (!event.shiftKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+      if (!window.getSelection()?.isCollapsed || target.closest('.table-wrap, pre, .katex-display')) return;
+      event.preventDefault();
+      if (!event.repeat) stepLecture(event.key === 'ArrowLeft' ? -1 : 1);
+      return;
+    }
+    const control = {'+': larger, '=': larger, '-': smaller, '0': reset}[event.key];
+    if (control instanceof HTMLButtonElement) {
+      event.preventDefault();
+      control.click();
+    }
   });
   $('#course-query').oninput=()=>renderCourses({keepSidebar:true});
   $('#library-home').onclick=()=>showView('courses');

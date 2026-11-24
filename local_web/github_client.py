@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import base64
+import hashlib
+import http.client
 import ssl
 import urllib.error
 import urllib.parse
@@ -80,11 +82,14 @@ class GitHubClient:
             ) as response:
                 return response.read()
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:1000]
+            try:
+                detail = exc.read(1000).decode("utf-8", "replace")
+            except (OSError, http.client.IncompleteRead):
+                detail = str(exc.reason)
             raise GitHubAPIError(exc.code, detail) from exc
         except urllib.error.URLError as exc:
             raise GitHubAPIError(0, str(exc.reason)) from exc
-        except (TimeoutError, OSError) as exc:
+        except (OSError, http.client.IncompleteRead) as exc:
             raise GitHubAPIError(0, str(exc)) from exc
 
     def _json(self, path: str, **kwargs: Any) -> Any:
@@ -371,6 +376,12 @@ class GitHubClient:
             if exc.status != 404:
                 raise
             sha = None
+        if sha:
+            # A prior PUT may have committed before its response was lost.
+            digest = hashlib.sha1(f"blob {len(data)}\0".encode("ascii"))
+            digest.update(data)
+            if digest.hexdigest() == sha:
+                return
         payload: dict[str, Any] = {
             "message": message,
             "content": base64.b64encode(data).decode("ascii"),

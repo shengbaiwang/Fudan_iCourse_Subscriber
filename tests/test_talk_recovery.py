@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
@@ -62,6 +63,31 @@ class TalkRecoveryTest(unittest.TestCase):
         self.queue._run(self.id)
         self.assertEqual(self.store.get_talk(self.id)["status"], "transcribing")
         self.assertEqual(len(self.client.dispatches), 1)
+
+    def test_disconnects_during_setup_and_manifest_read_resume(self):
+        self.queue.stage_blob(self.id, b"audio", "mp3", "讲座")
+        eof = GitHubAPIError(0, "[SSL: UNEXPECTED_EOF_WHILE_READING]")
+        self.client.workflow_file_on_ref = Mock(side_effect=[eof, True])
+        self.client.ensure_branch = Mock(side_effect=[eof, "sha"])
+        self.client.read_branch_file = Mock(side_effect=[eof, None])
+        self.client.write_branch_file = Mock(wraps=self.client.write_branch_file)
+        with patch.object(self.queue._stopping, "wait", return_value=False) as wait:
+            self.queue._run(self.id)
+        self.assertEqual(wait.call_count, 3)
+        self.assertEqual(self.client.write_branch_file.call_count, 2)
+        self.assertEqual(len(self.client.dispatches), 1)
+        self.assertEqual(self.store.get_talk(self.id)["status"], "transcribing")
+
+    def test_truncated_put_response_reuses_accepted_blob(self):
+        client = GitHubClient("owner", "repo", "token")
+        # Git's blob ID for the bytes b"hello\n".
+        same = {"sha": "ce013625030ba8dba906f756967f9e9ca394464a"}
+        with patch.object(client, "_json", side_effect=[GitHubAPIError(404, "missing"), same]), \
+                patch("urllib.request.urlopen") as send, \
+                patch.object(self.queue._stopping, "wait", return_value=False):
+            send.return_value.__enter__.return_value.read.side_effect = http.client.IncompleteRead(b"")
+            self.queue._retry(lambda: client.write_branch_file("talk-audio", "part.enc", b"hello\n", "part"))
+            send.assert_called_once()
 
     def test_startup_only_resumes_incomplete_uploads(self):
         self.store.set_status(self.id, "transcribing")

@@ -11,7 +11,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
  await fs.writeFile(path.join(vault,'外部笔记.md'),'# 初始正文\n\nObsidian 里的想法。\n\n![[照片.png]]\n\n[[另一篇|去另一篇]]');
  await fs.writeFile(path.join(vault,'另一篇.md'),'链接已打开');
  await fs.writeFile(path.join(vault,'照片.png'),Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+cFo8AAAAASUVORK5CYII=','base64'));
- const server=spawn(path.join(root,'.venv-course/bin/python'),['-u','tests/serve_note_library.py'],{cwd:root,env:{...process.env,SEA_SHARED_NOTES_DIR:vault},stdio:['ignore','pipe','pipe']});
+ const server=spawn(path.join(root,'.venv-course/bin/python'),['-u','tests/serve_note_library.py'],{cwd:root,env:{...process.env,SEA_SHARED_NOTES_DIR:vault,SEA_TEST_COURSE_GROUPS:'1'},stdio:['ignore','pipe','pipe']});
  let browser,logs='';server.stderr.on('data',chunk=>logs+=chunk);
  try {
  const base=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error(logs)),15000);server.stdout.on('data',data=>{const match=data.toString().match(/READY (http:\/\/\S+)/);if(match){clearTimeout(timer);resolve(match[1]);}});server.on('exit',code=>reject(new Error(`${code}: ${logs}`)));});
@@ -21,6 +21,41 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
  await page.goto(base);await page.locator('#open-personal-library').click();
  await page.getByRole('button',{name:'已连接 Obsidian · 本地共享'}).waitFor();
  assert.equal(await page.locator('.note-course-row').count(),0);
+ const toggle=page.locator('#note-organization-toggle');
+ assert.match(await toggle.getAttribute('aria-label'),/当前按问题/);
+ const positions=new Map();
+ for(const [id,name] of [['one','口述史'],['two','城市史']]){
+   const folder=await page.request.post(base+'/api/local/note-folders',{data:{name}});
+   assert.equal(folder.status(),200);
+   const {id:folderId}=await folder.json();
+   const note=await (await page.request.get(base+'/api/local/note-library/course/'+id)).json();
+   const moved=await page.request.put(base+'/api/local/note-library/course/'+id+'/folder',{
+     data:{folder_id:folderId,revision:note.location_revision}
+   });
+   assert.equal(moved.status(),200);
+   positions.set('course:'+id,folderId);
+ }
+ await page.evaluate(()=>SeaNotebook.load());
+ const history=page.locator('[data-tree-group-id="course-group:history"]');
+ await toggle.click();
+ await history.locator('.note-course-row').click();
+ assert.deepEqual(await history.locator('.note-list-row').evaluateAll(rows=>rows.map(row=>row.dataset.noteId)),['course:one','course:two']);
+ await page.locator('[data-note-id="course:one"]').click();
+ await page.locator('#note-version').selectOption({index:1});
+ const oldVersion=await page.locator('#note-version').inputValue();
+ const oldPreview=await page.locator('#note-preview').innerText();
+ const writes=[];
+ const captureWrite=request=>{if(request.url().startsWith(base+'/api/') && request.method()!=='GET') writes.push(request.url());};
+ page.on('request',captureWrite);
+ await toggle.click();
+ for(const [id,folderId] of positions){
+   assert.equal(await page.locator(`[data-note-id="${id}"]`).evaluate(row=>row.closest('[data-tree-folder-id]').dataset.treeFolderId),folderId);
+ }
+ assert.equal(await page.locator('[data-note-id="course:one"]').isVisible(),true);
+ assert.equal(await page.locator('#note-version').inputValue(),oldVersion);
+ assert.equal(await page.locator('#note-preview').innerText(),oldPreview);
+ assert.deepEqual(writes,[]);
+ page.off('request',captureWrite);
  let data=await (await page.request.get(base+'/api/local/note-library')).json();
  const row=data.notes.find(note=>note.title==='外部笔记');
  await page.locator(`[data-note-id="${row.id}"]`).click();
@@ -38,7 +73,14 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
  await fs.rename(file,path.join(vault,'Obsidian 改名.md'));
  await page.waitForFunction(()=>document.querySelector('#note-title').value==='Obsidian 改名',{},{timeout:12000});
  await page.locator('#note-more').click();await page.getByRole('menuitem',{name:'移入回收站'}).click();
- await page.locator('[data-note-filter="trash"]').click();await page.locator(`[data-note-id="${row.id}"]`).click();
+ await page.locator('[data-note-filter="trash"]').click();
+ await page.locator(`#note-list[data-organization="trash"] [data-note-id="${row.id}"]`).click();
+ await page.waitForFunction(()=>document.querySelector('#note-save-state').textContent==='已移入回收站');
+ const trashRows=await page.locator('#note-list .note-list-row').count();
+ await toggle.click();
+ assert.equal(await page.locator('#note-list .note-list-row').count(),trashRows);
+ assert.equal(await page.locator('#note-list [data-tree-group-id]').count(),0);
+ await toggle.click();
  await page.locator('#note-more').click();const restored=page.waitForResponse(response=>response.url().endsWith('/shared-notes/restore') && response.request().method()==='POST');await page.getByRole('menuitem',{name:'恢复笔记'}).click();assert.equal((await restored).status(),200);
  await page.waitForFunction(()=>document.querySelector('#note-title').value==='Obsidian 改名');
  assert((await fs.readFile(path.join(vault,'Obsidian 改名.md'),'utf8')).includes('应用编辑的正文'));
@@ -53,10 +95,12 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
  await page.getByRole('button',{name:'采用应用版本',exact:true}).click();
  await page.waitForFunction(()=>document.querySelector('#note-conflict-review').classList.contains('hidden') && document.querySelector('#note-save-state').textContent==='已保存');
  assert((await fs.readFile(path.join(vault,'Obsidian 改名.md'),'utf8')).endsWith('需要合并的应用草稿'));
- await page.screenshot({path:path.join(root,'output/diagnostics/shared-notes-browser.png'),fullPage:true});
+ await page.screenshot({path:path.join(os.tmpdir(),'sea-shared-notes-browser.png'),fullPage:true});
  assert.equal((await page.request.post(base+'/api/local/shared-notes/trash',{data:{note_id:'course:one'}})).status(),200);
  await page.locator('[data-note-filter="trash"]').click();
- await page.locator('[data-note-id="course:one"]').click();
+ await page.locator('#note-list[data-organization="trash"] [data-note-id="course:one"]').click();
+ await page.waitForFunction(()=>document.querySelector('#note-date').textContent.startsWith('课程 ·') &&
+   document.querySelector('#note-save-state').textContent==='已移入回收站');
  await page.locator('#note-more').click();
  const sourceRestore=page.waitForResponse(response=>response.url().endsWith('/shared-notes/restore') && response.request().method()==='POST');
  await page.getByRole('menuitem',{name:'恢复笔记'}).click();assert.equal((await sourceRestore).status(),200);

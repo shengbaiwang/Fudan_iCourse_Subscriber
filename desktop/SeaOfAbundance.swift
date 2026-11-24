@@ -211,6 +211,7 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if stopping { return .terminateNow }
         if quitting { return .terminateCancel }
+        guard let web else { return .terminateNow }
         quitting = true
         web.callAsyncJavaScript("if(window.SeaNotebook) await window.SeaNotebook.flush(); if(window.SeaTalkUploads) await window.SeaTalkUploads.flush(); return true;",arguments:[:],in:nil,in:.page) { [weak self] result in
             guard let self = self else { return }
@@ -229,7 +230,10 @@ final class SeaApplication: NSObject, NSApplicationDelegate, WKNavigationDelegat
         return .terminateLater
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool) -> Bool { window.makeKeyAndOrderFront(nil); return true }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        window?.makeKeyAndOrderFront(nil)
+        return true
+    }
 
     func webView(_ webView: WKWebView,decidePolicyFor navigationAction: WKNavigationAction,decisionHandler: @escaping (WKNavigationActionPolicy)->Void) {
         if navigationAction.shouldPerformDownload { decisionHandler(.download); return }
