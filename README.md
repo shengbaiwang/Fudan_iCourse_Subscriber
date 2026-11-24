@@ -97,8 +97,7 @@
 ## 统一控制台（本地与 GitHub Pages）
 
 控制台以 `local_web/static/` 为唯一界面源码，采用深色主题、课程卡片分区和统一导航。
-项目统一使用「秩序成为海浪」图标：午夜蓝底、圆润三角轮廓与从规整分层向右上涌的蓝色海浪。
-正式 [SVG 图标](local_web/static/branding/icourse-icon.svg)、选定原图及尺寸导出见 [图标资产说明](assets/branding/README.md)；以后新增应用入口沿用这一图标。
+项目统一使用蓝色三角形「原点」图标。本地控制台、桌面应用和 GitHub Pages 共用同一图案，参见 [图标资产说明](assets/branding/README.md)。
 本地服务直接提供这套页面；GitHub Pages 从同一源码打包，只切换数据访问方式：
 
 访问 `https://你的用户名.github.io/Fudan_iCourse_Subscriber/`
