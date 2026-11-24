@@ -106,7 +106,7 @@ def validate_manifest(manifest, talk_id):
     if (manifest.get("version") != 1 or not isinstance(names, list) or not names
             or len(names) > 128 or names != [f"{i:04d}.part.enc" for i in range(1, len(names) + 1)]):
         raise ValueError("录音分片清单无效")
-    if manifest.get("ext") not in {"mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "mp4", "mov"}:
+    if manifest.get("ext") not in {"mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "mp4", "mov", "webm"}:
         raise ValueError("录音格式无效")
     size = manifest.get("bytes")
     if not isinstance(size, int) or not 0 < size <= 501 * 1024 * 1024:

@@ -43,6 +43,7 @@ from local_web.talks import (
     validate_talk_input,
 )
 from src.ai.summary_prompt import SYSTEM_PROMPT, summary_user_content
+from scripts.transcribe_talk import validate_manifest
 
 
 class EmptyKeychain:
@@ -88,7 +89,15 @@ class TalkAudioValidationTest(unittest.TestCase):
         ext, _ = validate_audio_upload("a.wav", b"RIFF" + b"x" * 100)
         self.assertEqual(ext, "wav")
 
+    def test_webm_upload_survives_workflow_manifest_validation(self):
+        ext, _ = validate_audio_upload("录音.WEBM", b"\x1a\x45\xdf\xa3" + b"x" * 100)
+        self.assertEqual(ext, "webm")
+        manifest = build_talk_audio_manifest("t1", ext, 1, 104)
+        validate_manifest(manifest, "t1")
+
     def test_rejects_bad_extension_and_magic(self):
+        with self.assertRaises(ValueError):
+            validate_audio_upload("fake.webm", b"ID3" + b"x" * 100)
         with self.assertRaises(ValueError):
             validate_audio_upload("evil.exe", b"MZ" + b"x" * 100)
         with self.assertRaises(ValueError):

@@ -98,9 +98,6 @@ TALK_UPLOAD_DEADLINE_SECONDS = 45 * 60
 # containers only.  Video is accepted because phone recordings are usually
 # mp4/m4a — the workflow extracts the audio track with ffmpeg.
 MAX_AUDIO_BYTES = 500 * 1024 * 1024
-ALLOWED_AUDIO_EXTENSIONS = frozenset(
-    {"mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "mp4", "mov", "m4a"}
-)
 # Extension → expected magic-byte prefixes.  Checked server-side so a
 # renamed executable cannot slip through.
 AUDIO_MAGIC = {
@@ -113,7 +110,9 @@ AUDIO_MAGIC = {
     "opus": (b"OggS",),
     "mp4": (b"\x00\x00\x00",),
     "mov": (b"\x00\x00\x00",),
+    "webm": (b"\x1a\x45\xdf\xa3",),  # EBML header
 }
+ALLOWED_AUDIO_EXTENSIONS = frozenset(AUDIO_MAGIC)
 # Offset-4 box names accepted for ISO-BMFF containers (m4a/mp4/mov).
 _FTYP_BOXES = (b"ftyp", b"moov", b"mdat", b"free", b"wide")
 

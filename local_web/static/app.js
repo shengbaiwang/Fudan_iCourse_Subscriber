@@ -4972,7 +4972,7 @@ async function fetchTalkUploadProgress(talkId) {
 function enqueueTalkFiles(files, title = "") {
   const accepted = Array.from(files || []);
   if (!accepted.length) return false;
-  const invalid = accepted.find(file => !/\.(mp3|m4a|aac|wav|flac|ogg|opus|mp4|mov)$/i.test(file.name) || file.size > 500 * 1024 * 1024 || !file.size);
+  const invalid = accepted.find(file => !/\.(mp3|m4a|aac|wav|flac|ogg|opus|mp4|mov|webm)$/i.test(file.name) || file.size > 500 * 1024 * 1024 || !file.size);
   if (invalid) {
     message(`「${invalid.name}」格式不支持、内容为空或超过 500 MB，请调整选择。`, true);
     return false;
